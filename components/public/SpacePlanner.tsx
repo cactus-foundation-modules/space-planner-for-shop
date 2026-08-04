@@ -22,6 +22,7 @@ import {
 import type { History, PlannerState, ProductSize } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
+import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/planner-model'
 import { polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
@@ -78,7 +79,16 @@ async function waitForCapture(
 }
 
 /** One resolved model as the browser holds it - see lib/model-resolver's ClientModel. */
-type PlannerModel = { url: string; cacheKey: string; format: string; yawOffsetDeg: number; noDecimation: boolean }
+type PlannerModel = {
+  url: string
+  cacheKey: string
+  format: string
+  yawOffsetDeg: number
+  noDecimation: boolean
+  /** '' where the product has no fabric configured. See lib/three/planner-model. */
+  fabricKey: string
+  slots: FabricSlot[]
+}
 
 /**
  * A saved room and layout, loaded on the server and handed straight in.
@@ -375,6 +385,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         format: model.format as ResolvedModel['format'],
         yawOffsetDeg: model.yawOffsetDeg,
         noDecimation: model.noDecimation,
+        fabricKey: model.fabricKey ?? '',
       })
     }
     return buildScene(state.geometry, toPlanItems(state), snapshot, resolved)

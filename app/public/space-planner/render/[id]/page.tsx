@@ -64,6 +64,7 @@ export default async function RenderPage({
       format: model.format,
       yawOffsetDeg: model.yawOffsetDeg,
       noDecimation: model.noDecimation,
+      fabricKey: model.fabricKey,
     })
   }
   const description = buildScene(room.geometry, plan.items, plan.productSnapshot, resolved)
@@ -75,6 +76,8 @@ export default async function RenderPage({
     format: model.format,
     yawOffsetDeg: model.yawOffsetDeg,
     noDecimation: model.noDecimation,
+    fabricKey: model.fabricKey,
+    slots: model.slots,
   }))
 
   return (

@@ -144,6 +144,33 @@ export async function upsertProductMeta(
 }
 
 /**
+ * Every product the planner could draw a real model for.
+ *
+ * Both levels, because the planner works at both: it browses at listing level
+ * and places at variant level, so a listing whose variations carry the model
+ * needs a measured size of its own just as much as they do.
+ *
+ * Ordered by name so the measuring pass is watchable and a resume is exact.
+ */
+export async function listModelledProductIds(): Promise<string[]> {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT DISTINCT p."id", p."name"
+    FROM "shp_products" p
+    WHERE p."status" = 'ACTIVE'
+      AND (
+        EXISTS (SELECT 1 FROM "p3d_models" m WHERE m."product_id" = p."id")
+        OR EXISTS (
+          SELECT 1 FROM "svr_variants" v
+          JOIN "p3d_models" m ON m."product_id" = v."child_product_id"
+          WHERE v."product_id" = p."id"
+        )
+      )
+    ORDER BY p."name" ASC
+  `
+  return rows.map((row) => row.id)
+}
+
+/**
  * The worst-offenders view the admin sorts on: modelled products nobody has
  * looked at yet, most-placed first. Upkeep is worth ten minutes when it is
  * pointed at the twelve models customers actually use, and worth nothing at all

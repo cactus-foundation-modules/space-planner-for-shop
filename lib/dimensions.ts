@@ -44,6 +44,30 @@ function plausible(mm: number): boolean {
   return Number.isFinite(mm) && mm >= MIN_PLAUSIBLE_MM && mm <= MAX_PLAUSIBLE_MM
 }
 
+// The unit a piece of text names at its end, if it names one at all.
+const UNIT_TAIL = /(mm|millimetres?|millimeters?|cm|centimetres?|centimeters?|m|metres?|meters?|in|ins|inch|inches|"|ft|feet|foot|')\s*$/i
+
+function namedUnit(text: string): string | null {
+  return text.trim().match(UNIT_TAIL)?.[1] ?? null
+}
+
+/**
+ * Lend one half of an expression the unit written on the other half.
+ *
+ * People write a range or a list with the unit ONCE, at the end: "66.5-131.5cm",
+ * "1200 / 1400 / 1600mm". Parsed half by half, the first figure is a bare number
+ * and falls through to the caller's `assume` - which is how every height
+ * adjustable desk in this catalogue came to be 67 mm tall, and how a chair whose
+ * spec reads 111-127cm was drawn eleven centimetres high and then squashed onto
+ * that by the scene. The unit is not being guessed here: it is written down, on
+ * the same expression, about the same measurement.
+ */
+function withUnitFrom(text: string, donor: string): string {
+  if (namedUnit(text)) return text
+  const unit = namedUnit(donor)
+  return unit ? `${text.trim()}${unit}` : text
+}
+
 /**
  * Parse a single spec value into millimetres.
  *
@@ -61,9 +85,10 @@ export function parseDimensionValue(raw: string, assume: 'mm' | 'cm' | 'm' | 'in
   // desk at standing height, which looks like a mistake because it is one.
   const range = text.match(/^(.+?)\s*(?:-|–|to)\s*(.+)$/i)
   if (range) {
-    const lower = parseOne(range[1] ?? '', assume)
+    const upperText = range[2] ?? ''
+    const lower = parseOne(withUnitFrom(range[1] ?? '', upperText), assume)
     // Only trust it as a range when both halves parse; "1200-off" is not a range.
-    const upper = parseOne(range[2] ?? '', assume)
+    const upper = parseOne(upperText, assume)
     if (lower !== null && upper !== null && plausible(lower)) {
       return { ok: true, mm: Math.round(lower), note: 'range-lower', raw: original }
     }
@@ -71,7 +96,8 @@ export function parseDimensionValue(raw: string, assume: 'mm' | 'cm' | 'm' | 'in
 
   // A list: "1200 / 1400 / 1600". The first is what this SKU is.
   if (text.includes('/')) {
-    const first = parseOne(text.split('/')[0] ?? '', assume)
+    const parts = text.split('/')
+    const first = parseOne(withUnitFrom(parts[0] ?? '', parts[parts.length - 1] ?? ''), assume)
     if (first !== null && plausible(first)) {
       return { ok: true, mm: Math.round(first), note: 'first-of-list', raw: original }
     }

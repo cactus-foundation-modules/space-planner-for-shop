@@ -30,7 +30,7 @@ const snapshot: ProductSnapshot = {
   chair: { name: 'Eclipse Chair', sku: 'ECL-1', slug: 'eclipse-chair', price: 189, taxClassId: null, image: null, parentId: null, optionSummary: '' },
 }
 
-const deskModel: ResolvedModel = { productId: 'desk', plainUrl: 'https://cdn/desk.glb', format: 'glb', yawOffsetDeg: 0, noDecimation: false }
+const deskModel: ResolvedModel = { productId: 'desk', plainUrl: 'https://cdn/desk.glb', format: 'glb', yawOffsetDeg: 0, noDecimation: false, fabricKey: '' }
 
 describe('buildScene', () => {
   const plan: PlanItems = {
@@ -63,6 +63,24 @@ describe('buildScene', () => {
   it('groups the two identical desks onto one model file', () => {
     expect(uniqueModelCount(scene)).toBe(1)
     expect(scene.instanceGroups[0]?.itemIds).toEqual(['a', 'b'])
+  })
+
+  it('keeps two colours of the same file apart', () => {
+    // One chair file, painted at view time. Grouped on the file alone, a room
+    // holding a blue one and a black one drew whichever was resolved first,
+    // twice - and neither shopper got the chair they picked.
+    const models = new Map<string, ResolvedModel>([
+      ['desk', deskModel],
+      ['chair', { productId: 'chair', plainUrl: 'https://cdn/chair.glb', format: 'glb', yawOffsetDeg: 0, noDecimation: false, fabricKey: 'blue1' }],
+    ])
+    const twoColours = buildScene(
+      defaultRoomGeometry(),
+      { version: 1, items: [item('a', 'desk'), item('c', 'chair')] },
+      snapshot,
+      models,
+    )
+    expect(twoColours.instanceGroups).toHaveLength(2)
+    expect(twoColours.instanceGroups.find((group) => group.fabricKey === 'blue1')?.key).toBe('https://cdn/chair.glb::blue1')
   })
 
   it('marks a category-default size as approximate', () => {

@@ -81,12 +81,20 @@ one need a customer account like everybody else.
 
 Strictly in this order, cached in `spl_dimension_cache`, and never guessed:
 
-1. **Measured from the 3D model.** Written by `scripts/calibrate.mjs`, which loads
-   every distinct model file with node transforms applied. It cannot happen in a
-   request: a route has sixty seconds and a model averages four megabytes.
+1. **Measured from the 3D model.** Written by the **Measure** button on the Sizes
+   screen, which loads every distinct model file in the admin's own browser with
+   node transforms and the file's yaw correction applied, and posts the extents
+   back in batches (`/admin/dimensions/measure`). It cannot happen in a request: a
+   route has sixty seconds and a model averages four megabytes. Doing it in the
+   browser is not a compromise - it means the number banked is the extent of the
+   mesh the planner actually puts in the room.
 2. **Parsed from the spec sheet** - Overall Width/Depth/Height, read as free text.
+   A variation inherits its listing's values for any axis it does not state
+   itself, which is what it takes to size a range that lists its dimensions once
+   and its colours twelve times.
 3. **A category default**, for the axes still missing. Badged "approx." in the UI.
-4. **Typed in by hand** by the shopper. Nothing overwrites this.
+4. **Typed in by hand** by the shopper. Nothing overwrites this, including a
+   measurement.
 5. **A labelled block**, so adding something to a plan is never blocked.
 
 Where a measured model and a spec sheet disagree by more than a tenth, the row is
@@ -96,6 +104,45 @@ the size it claims.
 
 Anything the parser cannot read lands in the junk tail on the Sizes screen, with
 the actual text, so somebody can fix the sheet.
+
+## Fitting the mesh to the size
+
+The plan and the model are two independent statements about how big a thing is,
+and `lib/three/model-scale.ts` reconciles them on every placement. It used to be
+three divisions - width over width, height over height, depth over depth - which
+is right until one of the six numbers is wrong, and then it is the worst possible
+answer: a single bad axis does not draw a small chair, it draws a squashed one,
+which reads as a broken tool rather than as bad data.
+
+So an axis ratio outside 0.4-2.5 is treated as a data fault and dropped, an
+**approximate** size never deforms a real mesh, and axis ratios that disagree with
+each other by more than half fall back to a uniform fit. Below those thresholds
+per-axis scaling stays, because it is genuinely right: this catalogue's suppliers
+widen a desk by sliding its ends apart, so one model legitimately serves several
+widths.
+
+## Colours
+
+Most of this catalogue is one model file per SHAPE, with the fabric painted on at
+view time from the shopper's chosen swatch - so a planner that just loads the file
+draws a room of white chairs. `lib/model-resolver.ts` asks p3d for the same
+`FabricBundle` its own viewer uses and hands the slots to the client, where
+`paintedModel()` clones the materials named in them and paints the clones.
+
+Three things worth knowing:
+
+- **The paints are part of the instancing identity.** A scene node carries a
+  `fabricKey`, and instance groups are keyed on file *plus* paints - otherwise a
+  room holding a blue chair and a black one drew whichever resolved first, twice.
+- **Materials are cloned before painting.** Prepared models are shared by every
+  placement of that file, and three.js clones share materials by reference.
+- **A listing stands in for its first variation.** The browse panel places a
+  listing, and a listing has no colours of its own, so it borrows the first
+  enabled variation's - the same one the product page opens on.
+
+Bundles are cached per server instance for a minute: each resolve is around eight
+queries, one of which reads the shop's whole swatch vocabulary, and the planner
+asks for the same roomful again on every load, save and render.
 
 ## The one thing to be careful of
 

@@ -15,6 +15,7 @@ import { prisma } from '@/lib/db/prisma'
 // migration has run.
 
 let cached: { value: boolean; at: number } | null = null
+let variationsCached: { value: boolean; at: number } | null = null
 const TTL_MS = 30_000
 
 export async function hasAttributeTables(): Promise<boolean> {
@@ -33,6 +34,76 @@ export async function hasAttributeTables(): Promise<boolean> {
 
 export function resetAttributeProbeCache(): void {
   cached = null
+  variationsCached = null
+}
+
+async function hasVariationsTable(): Promise<boolean> {
+  if (variationsCached && Date.now() - variationsCached.at < TTL_MS) return variationsCached.value
+  const rows = await prisma.$queryRaw<[{ present: boolean }]>`
+    SELECT (to_regclass('public.svr_variants') IS NOT NULL) AS "present"
+  `
+  const value = Boolean(rows[0]?.present)
+  variationsCached = { value, at: Date.now() }
+  return value
+}
+
+/**
+ * The listing each of these products is a variation of, where it is one.
+ *
+ * The planner browses at listing level and PLACES at variant level, exactly as
+ * the cart does - so the product whose size is being resolved is nearly always a
+ * child. Spec attributes, meanwhile, are ticked wherever they describe: an
+ * "Overall Width" that changes per variation sits on the child, and one that
+ * describes the whole range sits once on the listing. Reading only the child is
+ * how a chair whose listing plainly states 67.5 x 64 x 111 cm was placed as an
+ * 800 x 600 x 750 generic block: the child carries its colour and nothing else.
+ *
+ * Same bargain the rest of this file makes - raw SQL behind a presence probe, no
+ * import from shop-variations, so a shop without it simply has no parents.
+ */
+export async function getVariationParents(productIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (productIds.length === 0) return out
+  if (!(await hasVariationsTable())) return out
+
+  const rows = await prisma.$queryRaw<Array<{ child_product_id: string; product_id: string }>>`
+    SELECT "child_product_id", "product_id"
+    FROM "svr_variants"
+    WHERE "child_product_id" IN (${Prisma.join(productIds)})
+  `
+  // child_product_id is UNIQUE, so a child has exactly one listing and this can
+  // never depend on row order.
+  for (const row of rows) out.set(row.child_product_id, row.product_id)
+  return out
+}
+
+/**
+ * The first enabled variation of each of these listings.
+ *
+ * The planner's browse panel places a LISTING, not a variation - "add a Galaxy
+ * chair", not "add the blue one" - and a listing has no colours of its own,
+ * because in this catalogue the colours belong to the variations. Something has
+ * to stand for it, and the same something the product page opens on is the only
+ * defensible choice: the first variation, in the order the shop put them in.
+ *
+ * The alternative is what the planner did until now, which is to draw the file
+ * unpainted. On a range whose model is one grey shell with the fabric painted on
+ * at view time, that is a white chair - and a room of white chairs looks like a
+ * product that has not loaded.
+ */
+export async function getFirstVariationChildren(parentIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  if (parentIds.length === 0) return out
+  if (!(await hasVariationsTable())) return out
+
+  const rows = await prisma.$queryRaw<Array<{ product_id: string; child_product_id: string }>>`
+    SELECT DISTINCT ON (v."product_id") v."product_id", v."child_product_id"
+    FROM "svr_variants" v
+    WHERE v."product_id" IN (${Prisma.join(parentIds)}) AND v."enabled" = true
+    ORDER BY v."product_id", v."position" ASC, v."created_at" ASC, v."child_product_id" ASC
+  `
+  for (const row of rows) out.set(row.product_id, row.child_product_id)
+  return out
 }
 
 export type SpecValue = { attribute: string; label: string }

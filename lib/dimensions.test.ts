@@ -31,8 +31,27 @@ describe('parseDimensionValue', () => {
     expect(parseDimensionValue('1400 to 1800mm')).toMatchObject({ ok: true, mm: 1400, note: 'range-lower' })
   })
 
+  it('lends the lower bound the unit written on the upper one', () => {
+    // The unit is written ONCE, at the end of the expression, and this catalogue
+    // writes it in centimetres. Parsed half by half the lower bound is a bare
+    // number, and read as millimetres it made every height-adjustable desk on the
+    // site 67 mm tall and every adjustable chair a pancake.
+    expect(parseDimensionValue('66.5-131.5cm')).toMatchObject({ ok: true, mm: 665, note: 'range-lower' })
+    expect(parseDimensionValue('111-127cm')).toMatchObject({ ok: true, mm: 1110, note: 'range-lower' })
+    expect(parseDimensionValue('43.5-50cm')).toMatchObject({ ok: true, mm: 435, note: 'range-lower' })
+    expect(parseDimensionValue('1.2 - 1.8m')).toMatchObject({ ok: true, mm: 1200, note: 'range-lower' })
+  })
+
+  it('leaves a lower bound that names its own unit alone', () => {
+    expect(parseDimensionValue('650mm - 1.3m')).toMatchObject({ ok: true, mm: 650, note: 'range-lower' })
+  })
+
   it('takes the first of a list', () => {
     expect(parseDimensionValue('1200 / 1400 / 1600mm')).toMatchObject({ ok: true, mm: 1200, note: 'first-of-list' })
+  })
+
+  it('lends the first of a list the unit written on the last', () => {
+    expect(parseDimensionValue('120 / 140 / 160cm')).toMatchObject({ ok: true, mm: 1200, note: 'first-of-list' })
   })
 
   it('marks a bare number as having used the column convention', () => {

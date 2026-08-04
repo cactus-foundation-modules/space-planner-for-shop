@@ -2,13 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-// The dimension report, and the rebuild.
+// The dimension report, the rebuild, and the measuring pass.
 //
 // The rebuild is driven from here, one bounded step at a time, because
 // twenty-two thousand products will not resolve inside a sixty-second route -
 // and a button that appears to hang is worse than no button. The owner watches a
 // progress bar and can stop it, which is what makes it a job rather than a leap
 // of faith.
+//
+// The measuring pass is driven from here for a harder reason: it can only run in
+// a browser. Rung 1 of the size ladder says the mesh is truth where there is a
+// mesh, and until this existed nothing ever wrote one of those rows, so a
+// catalogue of properly modelled furniture was being sized off free-text spec
+// columns. Loading a couple of hundred multi-megabyte models is not a request;
+// this tab does it, with the same code that draws them in the planner, and posts
+// the numbers back in batches.
 
 type Report = {
   total: number
@@ -20,6 +28,14 @@ type Report = {
 type Junk = { productId: string; name: string; parsedFrom: string; source: string }
 type Conflict = { productId: string; name: string; note: string }
 type Job = { id: string; status: string; cursor: number; total: number; resolvedCount: number; failedCount: number; error: string }
+/** One modelled product, with a signed url good for this session. */
+type MeasureWork = { productId: string; url: string; cacheKey: string; format: 'glb' | 'fbx' | 'obj'; yawOffsetDeg: number }
+type MeasureState = { done: number; total: number; written: number; failed: number; conflicts: number }
+
+/** Files measured between cache clears. Keeps the tab's memory flat over a long pass. */
+const MEASURE_CLEAR_EVERY = 8
+/** Measurements per POST. Small enough that stopping loses almost nothing. */
+const MEASURE_BATCH = 25
 
 const SOURCE_LABELS: Record<string, string> = {
   glb: 'Measured from the 3D model',
@@ -35,7 +51,10 @@ export function DimensionsScreen() {
   const [conflicts, setConflicts] = useState<Conflict[]>([])
   const [job, setJob] = useState<Job | null>(null)
   const [running, setRunning] = useState(false)
+  const [measuring, setMeasuring] = useState(false)
+  const [measureState, setMeasure] = useState<MeasureState | null>(null)
   const cancelled = useRef(false)
+  const measureCancelled = useRef(false)
 
   const load = useCallback(async () => {
     const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions')
@@ -89,6 +108,94 @@ export function DimensionsScreen() {
     void load()
   }
 
+  /**
+   * Measure every modelled product in this tab and bank the results.
+   *
+   * Grouped by FILE, not by product: a chair range is one model shared by every
+   * colour of it, and the measurement belongs to the file. Measuring per product
+   * would parse the same forty megabytes eleven times over for eleven identical
+   * answers.
+   */
+  const measureAll = async () => {
+    measureCancelled.current = false
+    setMeasuring(true)
+    setMeasure({ done: 0, total: 0, written: 0, failed: 0, conflicts: 0 })
+
+    // Imported here rather than at the top of the file so that opening this
+    // screen does not pull three.js in behind it.
+    const { clearPreparedModels, prepareModel } = await import('@/modules/space-planner-for-shop/lib/three/planner-model')
+
+    const listing = await fetch('/api/m/space-planner-for-shop/admin/dimensions/measure')
+    if (!listing.ok) {
+      setMeasuring(false)
+      return
+    }
+    const { models } = (await listing.json()) as { models: MeasureWork[] }
+
+    // One entry per file, carrying every product that file answers for.
+    const files = new Map<string, { work: MeasureWork; productIds: string[] }>()
+    for (const work of models) {
+      const key = `${work.cacheKey}|${work.yawOffsetDeg}`
+      const existing = files.get(key)
+      if (existing) existing.productIds.push(work.productId)
+      else files.set(key, { work, productIds: [work.productId] })
+    }
+
+    const totals: MeasureState = { done: 0, total: files.size, written: 0, failed: 0, conflicts: 0 }
+    setMeasure({ ...totals })
+
+    let batch: Array<{ productId: string; widthMm: number; depthMm: number; heightMm: number }> = []
+    const flush = async () => {
+      if (batch.length === 0) return
+      const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/measure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ measurements: batch }),
+      })
+      batch = []
+      if (!response.ok) return
+      const result = (await response.json()) as { written: number; conflicts: number }
+      totals.written += result.written
+      totals.conflicts += result.conflicts
+    }
+
+    for (const entry of files.values()) {
+      if (measureCancelled.current) break
+      try {
+        const ready = await prepareModel(entry.work.cacheKey, entry.work.url, entry.work.format, {
+          yawOffsetDeg: entry.work.yawOffsetDeg,
+          // Nothing here is drawn, so nothing here is worth simplifying or
+          // shrinking - and a decimated mesh is not the mesh being measured.
+          noDecimation: true,
+          decimationTarget: 1,
+          textureMaxPx: 64,
+        })
+        for (const productId of entry.productIds) {
+          batch.push({ productId, widthMm: ready.widthMm, depthMm: ready.depthMm, heightMm: ready.heightMm })
+        }
+      } catch {
+        totals.failed += 1
+      }
+
+      totals.done += 1
+      if (batch.length >= MEASURE_BATCH) await flush()
+      // The prepared-model cache exists to make a ROOM cheap; over a whole
+      // catalogue it is just a leak with a nice name.
+      if (totals.done % MEASURE_CLEAR_EVERY === 0) clearPreparedModels()
+      setMeasure({ ...totals })
+    }
+
+    await flush()
+    clearPreparedModels()
+    setMeasure({ ...totals })
+    setMeasuring(false)
+    void load()
+  }
+
+  const stopMeasuring = () => {
+    measureCancelled.current = true
+  }
+
   const stop = async () => {
     cancelled.current = true
     if (!job) return
@@ -120,6 +227,41 @@ export function DimensionsScreen() {
       )}
 
       <div className="card" style={{ padding: '1rem', display: 'grid', gap: '0.6rem' }}>
+        <h2 className="card-title" style={{ margin: 0 }}>Measure the 3D models</h2>
+        <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+          Opens every 3D model you have and measures it, so the planner uses the real thing rather than whatever the spec sheet
+          says. Leave this tab open while it runs - it downloads each model to do it. Anything you have typed in by hand is left
+          alone.
+        </p>
+        {measureState && (
+          <div>
+            <div style={{ height: 8, background: 'var(--color-border)', borderRadius: 999, overflow: 'hidden' }}>
+              <div
+                style={{
+                  width: `${measureState.total > 0 ? Math.round((measureState.done / measureState.total) * 100) : 0}%`,
+                  height: '100%',
+                  background: 'var(--color-primary)',
+                }}
+              />
+            </div>
+            <p style={{ margin: '0.35rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+              {measureState.done} of {measureState.total} models · {measureState.written} sizes saved
+              {measureState.failed > 0 && ` · ${measureState.failed} would not open`}
+              {measureState.conflicts > 0 && ` · ${measureState.conflicts} disagree with the spec sheet`}
+            </p>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button type="button" className="btn btn-primary" onClick={() => void measureAll()} disabled={measuring || running}>
+            {measuring ? 'Measuring…' : 'Measure'}
+          </button>
+          <button type="button" className="btn" onClick={stopMeasuring} disabled={!measuring}>
+            Stop
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: '1rem', display: 'grid', gap: '0.6rem' }}>
         <h2 className="card-title" style={{ margin: 0 }}>Work the sizes out again</h2>
         <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
           Goes through the whole catalogue. It takes a while and you can stop it at any point - it picks up where it left off.
@@ -137,7 +279,7 @@ export function DimensionsScreen() {
           </div>
         )}
         <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button type="button" className="btn btn-primary" onClick={() => void rebuild()} disabled={running}>
+          <button type="button" className="btn btn-primary" onClick={() => void rebuild()} disabled={running || measuring}>
             {running ? 'Working…' : 'Start'}
           </button>
           <button type="button" className="btn" onClick={() => void stop()} disabled={!running}>

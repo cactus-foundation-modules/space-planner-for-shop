@@ -4,6 +4,8 @@ import {
   COMBINED_ATTRIBUTES,
   DEPTH_ATTRIBUTES,
   HEIGHT_ATTRIBUTES,
+  MAX_PLAUSIBLE_MM,
+  MIN_PLAUSIBLE_MM,
   UNDER_TOP_HEIGHT_ATTRIBUTES,
   UNDER_TOP_WIDTH_ATTRIBUTES,
   WIDTH_ATTRIBUTES,
@@ -19,7 +21,8 @@ import {
   saveDimensionsMany,
 } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
 import { getModelMetaForProducts } from '@/modules/space-planner-for-shop/lib/db/model-meta'
-import { getSpecValues } from '@/modules/space-planner-for-shop/lib/spec-attributes'
+import { getSpecValues, getVariationParents } from '@/modules/space-planner-for-shop/lib/spec-attributes'
+import type { SpecValue } from '@/modules/space-planner-for-shop/lib/spec-attributes'
 import type { MountType, SizeSource, SplDimensions } from '@/modules/space-planner-for-shop/lib/types'
 
 // The resolution ladder, in strict order:
@@ -67,18 +70,50 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
   const ids = [...new Set(productIds)].filter(Boolean)
   if (ids.length === 0) return out
 
+  // The listing behind each placed variant, resolved first because its spec
+  // values have to be read in the SAME round as the children's.
+  const parentOf = await getVariationParents(ids)
+  const withParents = [...new Set([...ids, ...parentOf.values()])]
+
   const [products, existing, specValues, categoryOf, categoryDefaults, productMeta] = await Promise.all([
     prisma.$queryRaw<ProductRow[]>`
-      SELECT "id", "updated_at" FROM "shp_products" WHERE "id" IN (${prismaIn(ids)})
+      SELECT "id", "updated_at" FROM "shp_products" WHERE "id" IN (${prismaIn(withParents)})
     `,
     getDimensionsForProducts(ids),
-    getSpecValues(ids),
-    getPrimaryCategoryForProducts(ids),
+    getSpecValues(withParents),
+    getPrimaryCategoryForProducts(withParents),
     getCategoryDefaultsMap(),
     getModelMetaForProducts(ids),
   ])
 
+  // Child first, listing second. readAttributeDimensions takes the first match
+  // per axis, so a variation that states its own width keeps it and one that
+  // states nothing inherits the range's - which is what makes a per-width desk
+  // and a one-size-fits-all chair both come out right.
+  const valuesFor = (id: string): SpecValue[] => {
+    const own = specValues.get(id) ?? []
+    const parentId = parentOf.get(id)
+    const inherited = parentId ? specValues.get(parentId) ?? [] : []
+    return inherited.length > 0 ? [...own, ...inherited] : own
+  }
+
   const updatedAtById = new Map(products.map((row) => [row.id, row.updated_at]))
+
+  // A child's size can now come off its LISTING's spec sheet, so the listing
+  // moving has to make the child stale too - correcting an Overall Width on the
+  // listing must not leave every variation in the room at the old size.
+  //
+  // Deliberately NOT banked into product_updated_at. That column is compared
+  // against shp_products.updated_at by the sweep's own SQL, and writing a
+  // parent's stamp into a child's row would make every such child look
+  // permanently stale and re-resolve on every pass, for ever. So the parent is
+  // checked here, against when this row was last worked out.
+  const parentMovedSince = (id: string, resolvedAt: Date | null): boolean => {
+    const parentId = parentOf.get(id)
+    if (!parentId || !resolvedAt) return false
+    const parent = updatedAtById.get(parentId)
+    return parent ? parent.getTime() > resolvedAt.getTime() : false
+  }
   // Banked and written once at the end rather than a round trip per product.
   const toSave: SplDimensions[] = []
 
@@ -92,10 +127,13 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
       !cached.stale &&
       cached.productUpdatedAt &&
       productUpdatedAt &&
-      cached.productUpdatedAt.getTime() === productUpdatedAt.getTime()
+      cached.productUpdatedAt.getTime() === productUpdatedAt.getTime() &&
+      !parentMovedSince(id, cached.resolvedAt)
+
+    const values = valuesFor(id)
 
     if (fresh && cached) {
-      out.set(id, { ...cached, underTop: underTopFrom(specValues.get(id) ?? []) })
+      out.set(id, { ...cached, underTop: underTopFrom(values) })
       continue
     }
 
@@ -103,14 +141,18 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
       productId: id,
       productUpdatedAt,
       cached: cached ?? null,
-      values: specValues.get(id) ?? [],
-      categoryId: categoryOf.get(id) ?? null,
+      values,
+      // A variation child is rarely filed under a category of its own; the
+      // listing is what carries them. Falling back to the listing's is what
+      // stops a placed variant dropping past a perfectly good category default
+      // to the generic block.
+      categoryId: categoryOf.get(id) ?? (parentOf.get(id) ? categoryOf.get(parentOf.get(id) as string) ?? null : null),
       categoryDefaults,
       mountOverride: productMeta.get(id)?.mountType ?? null,
     })
 
     toSave.push(resolved)
-    out.set(id, { ...resolved, underTop: underTopFrom(specValues.get(id) ?? []) })
+    out.set(id, { ...resolved, underTop: underTopFrom(values) })
   }
 
   if (toSave.length > 0) await saveDimensionsMany(toSave)
@@ -214,6 +256,101 @@ export function resolveOne(input: ResolveInput): SplDimensions {
     stale: false,
     resolvedAt: new Date(),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Rung 1: the measured model
+// ---------------------------------------------------------------------------
+
+/** One model, measured with its node transforms and its yaw correction applied. */
+export type Measurement = { productId: string; widthMm: number; depthMm: number; heightMm: number }
+
+export type MeasurementResult = { written: number; skipped: number; conflicts: number }
+
+function measurementPlausible(entry: Measurement): boolean {
+  return [entry.widthMm, entry.depthMm, entry.heightMm].every(
+    (mm) => Number.isFinite(mm) && mm >= MIN_PLAUSIBLE_MM && mm <= MAX_PLAUSIBLE_MM,
+  )
+}
+
+/**
+ * Bank measured models as rung 1 of the ladder.
+ *
+ * The measuring itself cannot happen on a route - a route has sixty seconds and
+ * these files average four megabytes - so it happens in a browser, with the same
+ * code that draws them, and lands here. Which is the point: the number written
+ * is the extent of the mesh the planner actually puts in the room, not a second
+ * opinion about it taken by some other pipeline.
+ *
+ * Two things it will not do. It will not overwrite a size the owner typed by
+ * hand - rung 4 outranks rung 1 precisely because somebody looked at the thing.
+ * And it will not write an implausible measurement: a file exported in
+ * centimetres measures forty metres across, and forty metres of desk in a
+ * customer's floor plan is worse than no desk at all.
+ */
+export async function applyMeasurements(measurements: Measurement[]): Promise<MeasurementResult> {
+  const usable = measurements.filter(measurementPlausible)
+  const ids = [...new Set(usable.map((entry) => entry.productId))]
+  if (ids.length === 0) return { written: 0, skipped: measurements.length, conflicts: 0 }
+
+  const parentOf = await getVariationParents(ids)
+  const withParents = [...new Set([...ids, ...parentOf.values()])]
+
+  const [products, existing, specValues, categoryOf, categoryDefaults, productMeta] = await Promise.all([
+    prisma.$queryRaw<ProductRow[]>`
+      SELECT "id", "updated_at" FROM "shp_products" WHERE "id" IN (${prismaIn(ids)})
+    `,
+    getDimensionsForProducts(ids),
+    getSpecValues(withParents),
+    getPrimaryCategoryForProducts(withParents),
+    getCategoryDefaultsMap(),
+    getModelMetaForProducts(ids),
+  ])
+
+  const updatedAtById = new Map(products.map((row) => [row.id, row.updated_at]))
+  const toSave: SplDimensions[] = []
+  let conflicts = 0
+  let skipped = measurements.length - usable.length
+
+  const seen = new Set<string>()
+  for (const entry of usable) {
+    if (seen.has(entry.productId)) continue
+    seen.add(entry.productId)
+    if (!updatedAtById.has(entry.productId)) { skipped += 1; continue }
+    if (existing.get(entry.productId)?.source === 'manual') { skipped += 1; continue }
+
+    const own = specValues.get(entry.productId) ?? []
+    const parentId = parentOf.get(entry.productId)
+    const inherited = parentId ? specValues.get(parentId) ?? [] : []
+    const attribute = readAttributeDimensions(inherited.length > 0 ? [...own, ...inherited] : own)
+
+    const note = dimensionsConflict(
+      { widthMm: entry.widthMm, depthMm: entry.depthMm, heightMm: entry.heightMm },
+      attribute,
+    )
+    if (note) conflicts += 1
+
+    const categoryId = categoryOf.get(entry.productId) ?? (parentId ? categoryOf.get(parentId) ?? null : null)
+    const categoryDefault = categoryId ? categoryDefaults.get(categoryId) ?? null : null
+
+    toSave.push({
+      productId: entry.productId,
+      widthMm: Math.round(entry.widthMm),
+      depthMm: Math.round(entry.depthMm),
+      heightMm: Math.round(entry.heightMm),
+      source: 'glb',
+      parsedFrom: attribute.parsedFrom,
+      conflict: note !== '',
+      conflictNote: note,
+      mountType: productMeta.get(entry.productId)?.mountType ?? categoryDefault?.mountType ?? 'floor',
+      productUpdatedAt: updatedAtById.get(entry.productId) ?? null,
+      stale: false,
+      resolvedAt: new Date(),
+    })
+  }
+
+  if (toSave.length > 0) await saveDimensionsMany(toSave)
+  return { written: toSave.length, skipped, conflicts }
 }
 
 type AttributeDimensions = {

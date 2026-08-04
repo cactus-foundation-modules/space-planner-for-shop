@@ -25,9 +25,11 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three'
+import { instanceKey } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { SceneDescription, SceneNode } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
-import { prepareModel } from '@/modules/space-planner-for-shop/lib/three/planner-model'
-import type { PrepareOptions } from '@/modules/space-planner-for-shop/lib/three/planner-model'
+import { paintedModel, prepareModel } from '@/modules/space-planner-for-shop/lib/three/planner-model'
+import type { FabricSlot, PrepareOptions } from '@/modules/space-planner-for-shop/lib/three/planner-model'
+import { modelScaleFor } from '@/modules/space-planner-for-shop/lib/three/model-scale'
 import type { P3dFormat } from '@/modules/product-3d-views-for-shop/lib/formats'
 
 // Turning a scene description into something on screen.
@@ -419,6 +421,9 @@ export type SceneModelSource = {
   format: string
   yawOffsetDeg?: number
   noDecimation?: boolean
+  /** Which paints this product wears, and the key they are cached under. See planner-model. */
+  fabricKey?: string
+  slots?: FabricSlot[]
 }
 
 /** Marks a subtree that is a clone of a cached prepared model - see disposeGroup. */
@@ -447,29 +452,34 @@ export async function buildItems(
   // running out of memory - a room that is partly schematic is far better than
   // a room that is a crashed canvas.
   const wanted = description.instanceGroups.slice(0, options.maxUniqueModels)
-  const byCacheKey = new Map<string, SceneModelSource>()
+  // Keyed by FILE PLUS PAINTS, because that pair is what one prepared model in
+  // the room actually is. Keyed on the file alone, a room holding the blue chair
+  // and the black one drew whichever of them was resolved first, twice.
+  const bySource = new Map<string, SceneModelSource>()
   for (const model of models.values()) {
-    if (!byCacheKey.has(model.cacheKey)) byCacheKey.set(model.cacheKey, model)
+    const key = instanceKey({ plainUrl: model.cacheKey, fabricKey: model.fabricKey ?? '' })
+    if (!bySource.has(key)) bySource.set(key, model)
   }
-  const readyByUrl = new Map<string, Awaited<ReturnType<typeof prepareModel>>>()
+  const readyByKey = new Map<string, Awaited<ReturnType<typeof prepareModel>>>()
 
   await Promise.all(
     wanted.map(async (entry) => {
-      const source = byCacheKey.get(entry.plainUrl)
+      const source = bySource.get(entry.key)
       if (!source) return
       try {
-        readyByUrl.set(
-          entry.plainUrl,
-          await prepareModel(source.cacheKey, source.url, source.format as P3dFormat, {
-            ...options,
-            // The file's own fix-ups, applied per model rather than per scene.
-            // Passing the scene-wide defaults here is how the yaw correction an
-            // owner typed in the admin reached nothing at all, and how a model
-            // flagged "leave the detail alone" got decimated anyway.
-            yawOffsetDeg: source.yawOffsetDeg ?? options.yawOffsetDeg,
-            noDecimation: options.noDecimation || (source.noDecimation ?? false),
-          }),
-        )
+        // The download, the crunch and the measurement are per FILE and shared
+        // across colours; only the materials are per colour.
+        const base = await prepareModel(source.cacheKey, source.url, source.format as P3dFormat, {
+          ...options,
+          // The file's own fix-ups, applied per model rather than per scene.
+          // Passing the scene-wide defaults here is how the yaw correction an
+          // owner typed in the admin reached nothing at all, and how a model
+          // flagged "leave the detail alone" got decimated anyway.
+          yawOffsetDeg: source.yawOffsetDeg ?? options.yawOffsetDeg,
+          noDecimation: options.noDecimation || (source.noDecimation ?? false),
+        })
+        const slots = source.slots ?? []
+        readyByKey.set(entry.key, slots.length > 0 ? await paintedModel(base, entry.key, slots) : base)
       } catch {
         // Fetch or parse failed. The item joins the placeholder path below.
       }
@@ -477,7 +487,7 @@ export async function buildItems(
   )
 
   for (const node of description.nodes) {
-    const ready = node.model ? readyByUrl.get(node.model.plainUrl) : undefined
+    const ready = node.model ? readyByKey.get(instanceKey(node.model)) : undefined
     let object: Object3D
 
     if (ready) {
@@ -489,15 +499,12 @@ export async function buildItems(
       // So the clone goes inside a holder and the HOLDER is what gets placed.
       const holder = new Group()
       holder.add(ready.object.clone(true))
-      // Scale the measured mesh to the size the plan believes in. Where the two
-      // agree this is a multiply by one; where they do not, the plan wins on
-      // screen and the disagreement is flagged in the admin rather than argued
-      // with here.
-      holder.scale.set(
-        ready.widthMm > 0 ? (node.size.width * 1000) / ready.widthMm : 1,
-        ready.heightMm > 0 ? (node.size.height * 1000) / ready.heightMm : 1,
-        ready.depthMm > 0 ? (node.size.depth * 1000) / ready.depthMm : 1,
-      )
+      // Fit the measured mesh to the size the plan believes in - which is a
+      // multiply by one wherever the two agree, and a judgement call wherever
+      // they do not. The rules for that call, and why a straight per-axis
+      // division was the wrong one, are in model-scale.ts.
+      const scale = modelScaleFor(ready, node.size, node.approximate)
+      holder.scale.set(scale.x, scale.y, scale.z)
       holder.userData[SHARED_MODEL] = true
       object = holder
     } else {

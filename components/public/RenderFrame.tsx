@@ -72,6 +72,8 @@ export function RenderFrame(props: RenderFrameProps) {
           format: source.format,
           yawOffsetDeg: source.yawOffsetDeg,
           noDecimation: source.noDecimation,
+          fabricKey: source.fabricKey,
+          slots: source.slots,
         })
       }
 

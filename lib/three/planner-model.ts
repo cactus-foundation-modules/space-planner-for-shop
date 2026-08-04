@@ -2,7 +2,8 @@
 
 import { Box3, Mesh, Vector3 } from 'three'
 import type { BufferGeometry, Material, Object3D, Texture } from 'three'
-import { loadModel } from '@/modules/product-3d-views-for-shop/lib/three/load-model'
+import { applyFabricPaint, loadModel } from '@/modules/product-3d-views-for-shop/lib/three/load-model'
+import type { FabricAutoScale } from '@/modules/product-3d-views-for-shop/lib/three/load-model'
 import type { P3dFormat } from '@/modules/product-3d-views-for-shop/lib/formats'
 
 // Loading a catalogue model at REAL SIZE.
@@ -64,6 +65,93 @@ export async function prepareModel(
 
 export function clearPreparedModels(): void {
   prepared.clear()
+  painted.clear()
+}
+
+// ---------------------------------------------------------------------------
+// Fabric
+// ---------------------------------------------------------------------------
+
+/** One part of the model and the material the shopper chose for it. p3d resolves these. */
+export type FabricSlot = {
+  materialName: string
+  textureUrl: string
+  colour: string | null
+  repeat: number
+  rotationDeg: number
+  gloss: number
+  /**
+   * Set when the tile repeat could not be worked out server-side and the mesh
+   * has to be measured for it. Carried rather than dropped because dropping it
+   * is not a small mistake: a weave left at repeat 1 comes out about seventeen
+   * times too large, which reads as the wrong fabric rather than as a bug.
+   */
+  autoScale: FabricAutoScale | null
+}
+
+// Painted models are cached per model file AND per set of paints, because those
+// two together are what a shopper sees. Three Galaxy chairs in blue share one
+// painted copy; a blue one and a black one share the download and the crunch
+// beneath it but not the materials.
+const painted = new Map<string, Promise<PreparedModel>>()
+
+/**
+ * The same prepared model, wearing the colours the shopper picked.
+ *
+ * The whole Deskwell chair catalogue is one file per shape with the fabric
+ * painted on at view time - which is why the planner drew a room full of white
+ * chairs while the product page beside it showed them in blue. p3d already
+ * resolves the paints and already knows how to apply them; this is the planner
+ * finally asking.
+ *
+ * Materials are CLONED before they are painted. A prepared model is shared by
+ * every placement of that file, and three.js clones share materials by
+ * reference, so painting the shared one blue would turn every Galaxy chair in
+ * the room blue - including the black one standing next to it.
+ */
+export async function paintedModel(base: PreparedModel, fabricKey: string, slots: FabricSlot[]): Promise<PreparedModel> {
+  if (slots.length === 0) return base
+
+  const existing = painted.get(fabricKey)
+  if (existing) return existing
+
+  const entry = (async () => {
+    const object = base.object.clone(true)
+    const wanted = new Set(slots.map((slot) => slot.materialName))
+    const clones = new Map<Material, Material>()
+
+    object.traverse((child) => {
+      const mesh = child as Mesh
+      if (!mesh.isMesh || !mesh.material) return
+      const swap = (material: Material): Material => {
+        if (!wanted.has(material.name)) return material
+        const already = clones.get(material)
+        if (already) return already
+        const copy = material.clone()
+        clones.set(material, copy)
+        return copy
+      }
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material)
+    })
+
+    // A texture that will not load leaves that part in the file's own finish -
+    // one missing swatch must not cost the shopper the whole chair.
+    for (const slot of slots) {
+      try {
+        await applyFabricPaint(object, slot)
+      } catch {
+        // Keep going: the next part may well be fine.
+      }
+    }
+
+    return { ...base, object }
+  })().catch((error) => {
+    painted.delete(fabricKey)
+    throw error
+  })
+
+  painted.set(fabricKey, entry)
+  return entry
 }
 
 async function build(url: string, format: P3dFormat, options: PrepareOptions): Promise<PreparedModel> {

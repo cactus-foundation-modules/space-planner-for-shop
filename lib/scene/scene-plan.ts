@@ -22,6 +22,20 @@ export type ResolvedModel = {
   format: 'glb' | 'fbx' | 'obj'
   yawOffsetDeg: number
   noDecimation: boolean
+  /**
+   * Which set of fabric paints this product wears, or '' for none.
+   *
+   * Part of the instancing identity, not decoration: a whole chair range is one
+   * file with the colour painted on at view time, so twenty blue chairs are one
+   * instance and the black one beside them is another. Keyed on the paints
+   * rather than on the product so a range sharing a fabric shares the work.
+   */
+  fabricKey: string
+}
+
+/** File plus paints - what one prepared, painted model in the scene is keyed by. */
+export function instanceKey(model: Pick<ResolvedModel, 'plainUrl' | 'fabricKey'>): string {
+  return model.fabricKey ? `${model.plainUrl}::${model.fabricKey}` : model.plainUrl
 }
 
 export type SceneNode = {
@@ -77,7 +91,7 @@ export type SceneDescription = {
    * geometry and twenty transforms rather than twenty downloads. This is the
    * whole budget model: budgets are per unique model, not per placed item.
    */
-  instanceGroups: Array<{ plainUrl: string; format: ResolvedModel['format']; itemIds: string[] }>
+  instanceGroups: Array<{ key: string; plainUrl: string; fabricKey: string; format: ResolvedModel['format']; itemIds: string[] }>
   /** The centre of the room, in world metres - where a camera should look. */
   centre: { x: number; z: number }
   extentM: number
@@ -150,13 +164,21 @@ export function buildScene(
     }
   })
 
-  const groups = new Map<string, { plainUrl: string; format: ResolvedModel['format']; itemIds: string[] }>()
+  const groups = new Map<string, SceneDescription['instanceGroups'][number]>()
   for (const node of nodes) {
     if (!node.model) continue
-    const key = node.model.plainUrl
+    const key = instanceKey(node.model)
     const existing = groups.get(key)
     if (existing) existing.itemIds.push(node.itemId)
-    else groups.set(key, { plainUrl: key, format: node.model.format, itemIds: [node.itemId] })
+    else {
+      groups.set(key, {
+        key,
+        plainUrl: node.model.plainUrl,
+        fabricKey: node.model.fabricKey,
+        format: node.model.format,
+        itemIds: [node.itemId],
+      })
+    }
   }
 
   return {
