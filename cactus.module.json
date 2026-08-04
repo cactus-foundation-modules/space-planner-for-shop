@@ -1,0 +1,158 @@
+{
+  "name": "space-planner-for-shop",
+  "version": "0.1.0",
+  "tablePrefix": "spl_",
+  "description": "Lets shoppers draw their own room to scale, place products from your catalogue in it in 2D and 3D, check what actually fits, and take away a floor plan, a priced item list and a quote request. Uses the 3D models you already have and falls back to sized placeholders for everything else.",
+  "requiresCoreVersion": "0.5.940",
+  "publicBasePath": "space-planner",
+  "requiresModules": [
+    { "name": "shop", "minVersion": "0.1.192" },
+    { "name": "product-3d-views-for-shop", "minVersion": "0.1.82" },
+    { "name": "shop-variations", "minVersion": "0.1.107" },
+    { "name": "quote-for-shop", "minVersion": "0.1.8" }
+  ],
+  "requiredEnvVars": [
+    { "name": "SPACE_PLANNER_RENDER_URL", "required": false },
+    { "name": "SPACE_PLANNER_RENDER_SECRET", "required": false }
+  ],
+  "permissions": [
+    "space-planner.access",
+    "space-planner.manage"
+  ],
+  "navGroupLabel": "Space Planner",
+  "navEntries": [
+    {
+      "label": "Rooms & plans",
+      "path": "/m/space-planner-for-shop/plans",
+      "icon": "<path d=\"M3 3h18v18H3z\"/><path d=\"M3 10h7V3M21 14h-7v7\"/>",
+      "permission": "space-planner.access"
+    },
+    {
+      "label": "Model metadata",
+      "path": "/m/space-planner-for-shop/models",
+      "icon": "<path d=\"M12 2 3 7v10l9 5 9-5V7z\"/><path d=\"m3 7 9 5 9-5M12 12v10\"/>",
+      "permission": "space-planner.access"
+    },
+    {
+      "label": "Dimensions",
+      "path": "/m/space-planner-for-shop/dimensions",
+      "icon": "<path d=\"M3 8h18v8H3z\"/><path d=\"M7 8v8M11 8v4M15 8v8M19 8v4\"/>",
+      "permission": "space-planner.access"
+    },
+    {
+      "label": "Renders",
+      "path": "/m/space-planner-for-shop/renders",
+      "icon": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"2\"/><path d=\"m21 15-5-4-4 4-2-2-4 4\"/>",
+      "permission": "space-planner.access"
+    }
+  ],
+  "cookieCategories": [
+    "necessary"
+  ],
+  "emailTemplates": {
+    "groupLabel": "Space Planner",
+    "import": "./lib/email-templates",
+    "export": "spacePlannerEmailTemplates"
+  },
+  "settingsTabs": [
+    {
+      "id": "space-planner",
+      "label": "Space Planner",
+      "permission": "space-planner.manage",
+      "host": "shop.settings-sub-tabs",
+      "import": "./components/admin/SpacePlannerSettingsPanel",
+      "component": "SpacePlannerSettingsPanel"
+    }
+  ],
+  "extensionPoints": [
+    {
+      "point": "shop.cart-header-actions",
+      "id": "space-planner-cart",
+      "import": "./components/public/PlannerCartHeaderAction",
+      "component": "PlannerCartHeaderAction"
+    },
+    {
+      "point": "members.account-section",
+      "id": "space-planner-spaces",
+      "import": "./components/public/PlannerAccountSection",
+      "component": "PlannerAccountSection"
+    },
+    {
+      "point": "members.account-nav",
+      "id": "space-planner-spaces-nav",
+      "import": "./lib/member-account-nav",
+      "component": "spacePlannerMemberAccountNav"
+    },
+    {
+      "point": "core.admin-dashboard-widgets",
+      "id": "space-planner-summary",
+      "import": "./components/admin/DashboardWidget",
+      "component": "spacePlannerDashboardWidget"
+    },
+    {
+      "point": "core.media-usage-providers",
+      "id": "space-planner-for-shop",
+      "import": "./lib/media-usage-provider",
+      "component": "spacePlannerMediaUsageProvider"
+    },
+    {
+      "point": "core.media-reference-rewriters",
+      "id": "space-planner-for-shop",
+      "import": "./lib/media-reference-rewriter",
+      "component": "spacePlannerMediaReferenceRewriter"
+    }
+  ],
+  "puckBlocks": [
+    {
+      "type": "SpacePlannerTeaser",
+      "import": "./components/puck/SpacePlannerTeaser",
+      "component": "spacePlannerTeaserPuckComponent",
+      "rscComponent": "spacePlannerTeaserPuckRscComponent",
+      "rscImport": "./components/puck/SpacePlannerTeaser.rsc"
+    },
+    {
+      "type": "SpacePlannerProductButton",
+      "import": "./components/puck/SpacePlannerProductButton",
+      "component": "spacePlannerProductButtonPuckComponent",
+      "rscComponent": "spacePlannerProductButtonPuckRscComponent",
+      "rscImport": "./components/puck/SpacePlannerProductButton.rsc",
+      "layoutTypes": [
+        "shopProductDetail",
+        "shopProduct"
+      ]
+    }
+  ],
+  "cronJobs": [
+    {
+      "path": "/api/m/space-planner-for-shop/cron/sweep",
+      "schedule": "20 3 * * *"
+    }
+  ],
+  "memberExtensions": {
+    "activityTypes": [
+      { "type": "space-planner.room-saved", "label": "Saved a room" },
+      { "type": "space-planner.plan-saved", "label": "Saved a plan" },
+      { "type": "space-planner.plan-quoted", "label": "Asked for a quote from a plan" }
+    ],
+    "notificationCategories": [
+      { "category": "space-planner.render", "label": "Space Planner renders" }
+    ],
+    "dataExportPath": "/api/m/space-planner-for-shop/member/gdpr-export",
+    "routeTiers": [
+      { "pathPrefix": "/api/m/space-planner-for-shop/member", "tier": "MEMBER" },
+      { "pathPrefix": "/api/m/space-planner-for-shop/public", "tier": "PUBLIC" }
+    ]
+  },
+  "teardown": [
+    "spl_plan_versions",
+    "spl_plans",
+    "spl_rooms",
+    "spl_model_meta",
+    "spl_category_defaults",
+    "spl_dimension_cache",
+    "spl_render_jobs",
+    "spl_backfill_jobs",
+    "spl_events",
+    "spl_settings"
+  ]
+}

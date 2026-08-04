@@ -1,0 +1,49 @@
+import type { EmailTemplateDef } from '@/lib/email/registry'
+
+// This module's two emails, declared for core's single email editor
+// (Settings > Emails). Core owns the wording, the on/off switch, the wrapper
+// design and the sending; this file is only the defaults.
+//
+// Two, not five. A planner that emails somebody every time they move a desk is a
+// planner they unsubscribe from.
+//
+// `items` is a small HTML table the module builds, with its own escaping already
+// applied to every product name in it - hence rawTags. Everything else that
+// could carry typed text is escaped by core on the way in, as normal.
+
+export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
+  {
+    key: 'space-planner.plan-emailed',
+    label: 'Your room plan (to the shopper)',
+    subject: 'Your room plan from {{siteName}} - {{planName}}',
+    bodyHtml:
+      '<p>Here is the plan you put together at {{siteName}}.</p>' +
+      '<p><strong>{{roomName}} - {{planName}}</strong><br>{{itemCount}} items, {{total}}</p>' +
+      '<p><a href="{{planUrl}}">Open your plan</a></p>' +
+      '{{items}}' +
+      '<p style="color:#666;font-size:13px">{{disclaimer}}</p>',
+    mergeTags: ['siteName', 'roomName', 'planName', 'itemCount', 'total', 'planUrl', 'items', 'disclaimer'],
+    requiredTags: ['planUrl'],
+    rawTags: ['items'],
+    // The shopper pressed the button and is owed the result, so this one is not
+    // something a preference switch may quietly swallow.
+    transactional: true,
+  },
+  {
+    key: 'space-planner.render-done',
+    label: 'Your room picture is ready (to the shopper)',
+    subject: 'Your picture of {{planName}} is ready',
+    bodyHtml:
+      '<p>The picture of your plan has finished.</p>' +
+      '<p><a href="{{planUrl}}">Have a look</a></p>' +
+      '{{#if stale}}<p>You have moved things around since you asked for it, so it shows the room as it was on {{renderedFor}}.</p>{{/if}}',
+    mergeTags: ['siteName', 'planName', 'planUrl', 'renderedFor'],
+    requiredTags: ['planUrl'],
+    rawTags: [],
+    // Unprompted, arriving minutes later. It gets a notification category so a
+    // member can switch it off - and that single declaration is what lights up
+    // the member Notifications tab, which core hides entirely until some module
+    // contributes one.
+    transactional: false,
+  },
+]

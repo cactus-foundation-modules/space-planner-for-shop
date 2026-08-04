@@ -1,0 +1,67 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { shopClosedResponse } from '@/modules/shop/lib/access'
+import { getPrimaryProductImages, getProductsByIds } from '@/modules/shop/lib/db/products'
+import { getShopConfigCached } from '@/modules/shop/lib/config'
+import { effectivePrice } from '@/modules/shop/lib/pricing'
+import { formatMoney } from '@/modules/shop/lib/money'
+import { makeDisplayAdjuster, resolveTaxDisplay } from '@/modules/shop/lib/tax-display'
+import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
+import { resolveModelsForProducts, toClientModels } from '@/modules/space-planner-for-shop/lib/model-resolver'
+
+// Everything the planner needs to put a specific set of products in a room:
+// sizes off the ladder, a freshly signed model url where there is a model, the
+// price the storefront would print, and the clearance measurements the
+// under-desk fit check uses.
+//
+// POST rather than GET because a plan can reference a couple of hundred product
+// ids and a query string is not the place for them. Nothing is written.
+
+const Body = z.object({ productIds: z.array(z.string().min(1).max(64)).min(1).max(400) })
+
+export async function POST(request: NextRequest) {
+  const closed = await shopClosedResponse()
+  if (closed) return closed
+
+  const parsed = Body.safeParse(await request.json().catch(() => null))
+  if (!parsed.success) return NextResponse.json({ error: 'Bad request' }, { status: 400 })
+
+  const ids = [...new Set(parsed.data.productIds)]
+  const [products, images, dimensions, models, shopConfig, taxDisplay] = await Promise.all([
+    getProductsByIds(ids),
+    getPrimaryProductImages(ids),
+    resolveDimensions(ids),
+    resolveModelsForProducts(ids),
+    getShopConfigCached(),
+    resolveTaxDisplay(),
+  ])
+
+  const items = ids
+    .map((id) => {
+      const product = products.get(id)
+      if (!product) return null
+      const size = dimensions.get(id)
+      const adjust = makeDisplayAdjuster(taxDisplay, product.taxClassId)
+      const net = effectivePrice(product, shopConfig.enabledPriceTypes)
+      const price = adjust ? adjust(net) : net
+      return {
+        id,
+        name: product.name,
+        sku: product.sku ?? '',
+        slug: product.slug,
+        image: images[id] ?? null,
+        price,
+        priceFormatted: formatMoney(price, shopConfig.currencySymbol),
+        widthMm: size?.widthMm ?? 800,
+        depthMm: size?.depthMm ?? 600,
+        heightMm: size?.heightMm ?? 750,
+        sizeSource: size?.source ?? 'marker',
+        mount: size?.mountType ?? 'floor',
+        underTopHeightMm: size?.underTop.heightMm ?? null,
+        underTopWidthMm: size?.underTop.widthMm ?? null,
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+
+  return NextResponse.json({ items, models: toClientModels(models) })
+}
