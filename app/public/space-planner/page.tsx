@@ -1,6 +1,8 @@
+import { notFound } from 'next/navigation'
 import { getMemberFromCookie } from '@/lib/members/session'
 import { getMemberAreaPath } from '@/lib/members/paths'
 import { getShopGate } from '@/modules/shop/lib/access'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 import { getPlanForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { getShopConfigCached } from '@/modules/shop/lib/config'
@@ -51,6 +53,11 @@ export default async function SpacePlannerPage({
 }) {
   const gate = await getShopGate()
   if (gate.blocked) return <ShopClosedNotice message={gate.message} />
+
+  // Staff-only mode. The address is the feature, so hiding the buttons and
+  // leaving this open would be hiding nothing at all - anyone who ever followed
+  // a link, or guessed, would still be in.
+  if (!(await plannerVisible())) notFound()
 
   const params = await searchParams
   const [config, member, shopConfig] = await Promise.all([getSplConfigCached(), getMemberFromCookie(), getShopConfigCached()])

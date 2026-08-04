@@ -21,6 +21,34 @@ right size is the main path rather than the fallback.
 SQL behind a `to_regclass` probe, and the size ladder simply drops a rung on a shop
 that has not installed it.
 
+## Staff only, out of the box
+
+`adminOnly` in the module settings, **on by default**. It is a whole feature, and an
+owner is entitled to decide it is not ready for paying customers yet.
+
+While it is on, `plannerVisible()` (`lib/visibility.ts`) is false for everyone except
+an admin session carrying `space-planner.access` or `space-planner.manage`, and the
+planner is not on the storefront at all: no basket button, no product button, no
+teaser, no member tab, `/space-planner` and `/space-planner/spaces` answer `notFound()`,
+and the public data routes plus every member route (all of which come through
+`requireMember`) answer 404 rather than 403 - a hidden feature that says "forbidden"
+has announced itself.
+
+Modelled on shop's `getShopGate`: the session cookie is read **only** on the restricted
+path, so a public planner can never be the thing that drags a cached page into a
+per-request render. The Puck teaser is the one surface checked against the setting
+alone, without a session, because it sits on prerendered pages - which also means it
+can lag a change to the switch until that page is next saved. Nothing else does, and
+the address itself never does, so a stale teaser is a dead button rather than a leak.
+
+Two deliberate exemptions: `/space-planner/shared/<token>` (somebody pressed share and
+sent it to a named person - that is what a staff-only planner is *for*, though the
+"open the planner" link at the bottom goes), and `/space-planner/render/<id>` (the
+render worker is a browser holding a signed token, not a member of staff).
+
+Saving is unchanged: rooms and plans belong to a `Member`, so staff who want to keep
+one need a customer account like everybody else.
+
 ## What it adds
 
 - **`/space-planner`** - the planner itself. Renders inside the site header and

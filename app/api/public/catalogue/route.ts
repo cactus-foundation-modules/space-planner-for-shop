@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { shopClosedResponse } from '@/modules/shop/lib/access'
 import { browseCatalogue, listPlannerCategories } from '@/modules/space-planner-for-shop/lib/catalogue'
+import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // The browse panel's data.
 //
@@ -12,6 +13,8 @@ import { browseCatalogue, listPlannerCategories } from '@/modules/space-planner-
 export async function GET(request: NextRequest) {
   const closed = await shopClosedResponse()
   if (closed) return closed
+  const hidden = await plannerHiddenResponse()
+  if (hidden) return hidden
 
   const params = request.nextUrl.searchParams
   const page = Number(params.get('page') ?? '1')

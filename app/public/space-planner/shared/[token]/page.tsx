@@ -7,6 +7,7 @@ import { getRoomForAdmin } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { buildBom } from '@/modules/space-planner-for-shop/lib/bom'
 import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // A shared plan, read-only.
 //
@@ -14,6 +15,13 @@ import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
 // session. It is robots-disallowed (lib/robots.ts) because a customer's office
 // layout turning up in a search result would be a genuine breach of what "share
 // this link with my boss" meant to them.
+//
+// Deliberately still works in staff-only mode: this page exists because somebody
+// pressed share and sent the link to a specific person, and staff-only mode is
+// the case where that person is a customer being sent a layout by the shop.
+// Killing it would break the one thing a staff-only planner is for. What does go
+// is the invitation at the bottom to open the planner, which would only lead to
+// a 404.
 //
 // It renders the item list and the room's numbers rather than the 3D scene: the
 // recipient is usually whoever signs the purchase order, and what they want is
@@ -36,7 +44,12 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
   const plan = await getPlanByShareToken(token)
   if (!plan) notFound()
 
-  const [room, bom, config] = await Promise.all([getRoomForAdmin(plan.roomId), buildBom(plan.items, plan.productSnapshot), getSplConfigCached()])
+  const [room, bom, config, visible] = await Promise.all([
+    getRoomForAdmin(plan.roomId),
+    buildBom(plan.items, plan.productSnapshot),
+    getSplConfigCached(),
+    plannerVisible(),
+  ])
   const placed = plan.items.items.filter((item) => !item.staged)
 
   return (
@@ -88,11 +101,13 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
       <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{bom.disclaimer}</p>
       <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{config.guidanceDisclaimer}</p>
 
-      <div>
-        <Link href="/space-planner" prefetch={false} style={{ color: 'var(--color-primary)' }}>
-          Copy this into your own planner →
-        </Link>
-      </div>
+      {visible && (
+        <div>
+          <Link href="/space-planner" prefetch={false} style={{ color: 'var(--color-primary)' }}>
+            Copy this into your own planner →
+          </Link>
+        </div>
+      )}
     </div>
   )
 }

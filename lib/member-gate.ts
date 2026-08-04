@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import type { Member } from '@prisma/client'
 import { getMemberFromCookie } from '@/lib/members/session'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
 import { countRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { countPlansInRoom } from '@/modules/space-planner-for-shop/lib/db/plans'
 
@@ -20,6 +21,13 @@ export type MemberGate =
   | { member?: undefined; error: NextResponse }
 
 export async function requireMember(): Promise<MemberGate> {
+  // Staff-only mode first, and before the sign-in question: every member route
+  // in this module comes through here, so this is the one place the feature can
+  // be switched off for customers without eleven separate chances to forget one.
+  // A staff member who is also signed in as a member carries on as normal.
+  const hidden = await plannerHiddenResponse()
+  if (hidden) return { error: hidden }
+
   const member = await getMemberFromCookie()
   if (!member) {
     return {

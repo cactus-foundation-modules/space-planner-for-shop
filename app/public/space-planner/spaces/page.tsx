@@ -1,6 +1,8 @@
 import Link from 'next/link'
+import { notFound } from 'next/navigation'
 import { getMemberFromCookie } from '@/lib/members/session'
 import { getMemberAreaPath } from '@/lib/members/paths'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { listPlansForRoom } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
@@ -13,6 +15,8 @@ export const metadata = { title: 'My spaces' }
 // when they ask for a quote, and it is why a room is a first-class thing here
 // rather than a property of a plan.
 export default async function SpacesPage() {
+  if (!(await plannerVisible())) notFound()
+
   const member = await getMemberFromCookie()
   if (!member) {
     return (

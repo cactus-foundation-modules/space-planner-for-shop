@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { getMemberFromCookie } from '@/lib/members/session'
 import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // The planner's card on the member account overview (core's
 // members.account-section point).
@@ -12,6 +13,7 @@ import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/room
 export async function PlannerAccountSection() {
   const member = await getMemberFromCookie()
   if (!member) return null
+  if (!(await plannerVisible())) return null
 
   const rooms = await listRoomsForMember(member.id)
   if (rooms.length === 0) return null

@@ -9,6 +9,7 @@ import { formatMoney } from '@/modules/shop/lib/money'
 import { makeDisplayAdjuster, resolveTaxDisplay } from '@/modules/shop/lib/tax-display'
 import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
 import { resolveModelsForProducts, toClientModels } from '@/modules/space-planner-for-shop/lib/model-resolver'
+import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // Everything the planner needs to put a specific set of products in a room:
 // sizes off the ladder, a freshly signed model url where there is a model, the
@@ -23,6 +24,8 @@ const Body = z.object({ productIds: z.array(z.string().min(1).max(64)).min(1).ma
 export async function POST(request: NextRequest) {
   const closed = await shopClosedResponse()
   if (closed) return closed
+  const hidden = await plannerHiddenResponse()
+  if (hidden) return hidden
 
   const parsed = Body.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return NextResponse.json({ error: 'Bad request' }, { status: 400 })

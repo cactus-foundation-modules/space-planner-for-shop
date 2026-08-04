@@ -1,6 +1,7 @@
 import { getMembersConfig } from '@/lib/members/config'
 import type { MemberAccountNavItem } from '@/lib/members/account-nav'
 import { prisma } from '@/lib/db/prisma'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // The planner's tab in the member account nav (core's members.account-nav point).
 //
@@ -13,6 +14,7 @@ import { prisma } from '@/lib/db/prisma'
 export async function spacePlannerMemberAccountNav(member: { id: string }): Promise<MemberAccountNavItem[]> {
   const membersConfig = await getMembersConfig()
   if (!membersConfig.enabled) return []
+  if (!(await plannerVisible())) return []
 
   const rows = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT COUNT(*)::bigint AS count FROM "spl_rooms" WHERE "member_id" = ${member.id}

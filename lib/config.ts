@@ -13,6 +13,24 @@ import { prisma } from '@/lib/db/prisma'
 // the block themselves.
 
 export const SplConfigSchema = z.object({
+  // ---- Who can see it at all ------------------------------------------------
+  /**
+   * Staff only. ON by default, and deliberately so.
+   *
+   * The planner is a big, opinionated tool, and an owner is entitled to decide
+   * it is not ready to be put in front of paying customers yet. With this on it
+   * disappears from the storefront completely - no basket button, no product
+   * button, no teaser block, no member tab, and the planner's own addresses
+   * answer 404 - while anyone signed in to the admin with space-planner access
+   * uses it exactly as before. That way it can be lived with on the real
+   * catalogue before it is anybody else's problem.
+   *
+   * Everything downstream of it is gated too, not just the buttons: an address
+   * somebody bookmarked, and the data routes behind the screen. A feature that
+   * is only hidden is not hidden.
+   */
+  adminOnly: z.boolean().default(true),
+
   // ---- Where the planner shows up -------------------------------------------
   showOnCart: z.boolean().default(true),
   cartButtonLabel: z.string().default('View in Space Planner'),

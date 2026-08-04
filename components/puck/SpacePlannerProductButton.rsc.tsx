@@ -1,4 +1,5 @@
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 import {
   SpacePlannerProductButton,
   spacePlannerProductButtonPuckComponent,
@@ -11,6 +12,7 @@ import {
 export async function SpacePlannerProductButtonRsc(props: SpacePlannerProductButtonProps) {
   const config = await getSplConfigCached()
   if (!config.showOnProduct) return null
+  if (!(await plannerVisible())) return null
   return <SpacePlannerProductButton {...props} label={props.label?.trim() || config.productButtonLabel} />
 }
 

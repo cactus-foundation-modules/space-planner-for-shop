@@ -41,7 +41,27 @@ export function SpacePlannerSettingsPanel() {
   return (
     <div style={{ display: 'grid', gap: '1.25rem', maxWidth: '44rem' }}>
       <section style={{ display: 'grid', gap: '0.6rem' }}>
+        <h3 style={{ margin: 0 }}>Who can see it</h3>
+        <Toggle
+          label="Hide the Space Planner from customers (staff only)"
+          checked={config.adminOnly}
+          onChange={(value) => patch({ adminOnly: value })}
+        />
+        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+          On, and the planner vanishes from your shop entirely - no buttons, no links, and its own address says the page does
+          not exist. Anyone signed in to this admin with Space Planner access carries on using it as normal, so you can live
+          with it on your real catalogue before anybody else meets it. Plans you have already shared by link keep working, since
+          you sent those to somebody on purpose. Saving a plan still needs a customer account, staff or not.
+        </p>
+      </section>
+
+      <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Where it shows up</h3>
+        {config.adminOnly && (
+          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+            None of this reaches customers while the planner is staff only.
+          </p>
+        )}
         <Toggle label="Button on the basket page" checked={config.showOnCart} onChange={(value) => patch({ showOnCart: value })} />
         <Text label="Basket button wording" value={config.cartButtonLabel} onChange={(value) => patch({ cartButtonLabel: value })} />
         <Toggle label="Button on product pages" checked={config.showOnProduct} onChange={(value) => patch({ showOnProduct: value })} />

@@ -1,6 +1,7 @@
 import { plannerCss } from '@/modules/space-planner-for-shop/components/public/planner-css'
 import { PlannerLaunchButton } from '@/modules/space-planner-for-shop/components/public/PlannerLaunchButton'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // The planner's control on shop's `shop.cart-header-actions` point.
 //
@@ -17,6 +18,7 @@ import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
 export async function PlannerCartHeaderAction() {
   const config = await getSplConfigCached()
   if (!config.showOnCart) return null
+  if (!(await plannerVisible())) return null
 
   return (
     <>
