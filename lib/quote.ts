@@ -60,8 +60,11 @@ export async function createQuoteFromPlan(input: PlanQuoteInput): Promise<PlanQu
     .filter(Boolean)
     .join('\n')
 
+  // The owner's own setting, in days, and no arithmetic of our own on top of it:
+  // a stray doubling here quietly gave every plan quote twice the validity the
+  // quote module says it has, on the quote module's own printed document.
   const expiresAt = config.expiryDays > 0
-    ? new Date(Date.now() + config.expiryDays * 2 * 24 * 60 * 60 * 1000)
+    ? new Date(Date.now() + config.expiryDays * 24 * 60 * 60 * 1000)
     : null
 
   const quote = await createQuote({

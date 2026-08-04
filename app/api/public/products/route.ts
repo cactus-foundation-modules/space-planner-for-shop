@@ -44,6 +44,16 @@ export async function POST(request: NextRequest) {
     .map((id) => {
       const product = products.get(id)
       if (!product) return null
+      // Only what the storefront would show. `getProductsByIds` is a plain
+      // fetch by id, so without this an unauthenticated caller could read the
+      // name and the price of a DRAFT or ARCHIVED product by guessing at ids -
+      // a small leak, but a leak out of a shop's unreleased pricing.
+      //
+      // Filtered on status ALONE, deliberately. `catalogue_hidden` is what
+      // marks a variation child, and variation children are precisely what this
+      // route exists to size: the planner browses at listing level and places
+      // at variant level, exactly as the cart does.
+      if (product.status !== 'ACTIVE') return null
       const size = dimensions.get(id)
       const adjust = makeDisplayAdjuster(taxDisplay, product.taxClassId)
       const from = fromPrices.get(id)

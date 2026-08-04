@@ -187,6 +187,15 @@ export function plannerCss(): string {
 .spl-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
 .spl-stack { display: grid; gap: 0.6rem; }
 .spl-buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+/* A tick and its wording, sized so the whole line is the hit target. */
+.spl-check { display: flex; gap: 0.5rem; align-items: flex-start; font-size: var(--text-sm, 0.875rem); cursor: pointer; }
+.spl-check input { margin-top: 0.15rem; flex: none; }
+/* In the toolbar the tick sits on the same line as everything else in it. */
+.spl-bar-check { align-items: center; white-space: nowrap; color: var(--spl-muted); }
+.spl-bar-check input { margin-top: 0; }
+/* Label beside its control rather than above it, for the toolbars. */
+.spl-field-inline { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.35rem; }
+.spl-input-sm, .spl-select-sm { width: 6.5rem; min-height: 2rem; padding: 0.2rem 0.4rem; }
 
 .spl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .spl-card {

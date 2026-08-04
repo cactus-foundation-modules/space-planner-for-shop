@@ -69,42 +69,76 @@ export async function getModelMetaForProducts(productIds: string[]): Promise<Map
   return new Map(rows.map((row) => [row.product_id as string, toMeta(row)]))
 }
 
+/**
+ * A PATCH, in the sense the word is normally used: a field the caller did not
+ * mention keeps whatever it had.
+ *
+ * Worth stating because it did not, and the admin screen sends exactly one field
+ * at a time. Setting a model's yaw offset therefore cleared the tick saying
+ * somebody had checked it, and marking it checked cleared the footprint
+ * override - each save quietly undoing the last.
+ *
+ * `footprintOverride` distinguishes absent from null on purpose: absent keeps
+ * the override, an explicit null removes it.
+ */
 export async function upsertFileMeta(
   modelId: string,
   patch: { yawOffsetDegrees?: number; footprintOverride?: { widthMm: number; depthMm: number } | null; noDecimation?: boolean; notes?: string; reviewed?: boolean },
 ): Promise<void> {
+  const footprint = patch.footprintOverride === undefined
+    ? undefined
+    : patch.footprintOverride === null
+      ? null
+      : JSON.stringify(patch.footprintOverride)
+  const reviewedAt = patch.reviewed === undefined ? undefined : patch.reviewed ? new Date() : null
+
   await prisma.$executeRaw`
     INSERT INTO "spl_model_meta" ("scope", "model_id", "yaw_offset_degrees", "footprint_override", "no_decimation", "notes", "reviewed_at")
     VALUES (
       'file',
       ${modelId},
       ${patch.yawOffsetDegrees ?? 0},
-      ${patch.footprintOverride ? JSON.stringify(patch.footprintOverride) : null}::jsonb,
+      ${footprint ?? null}::jsonb,
       ${patch.noDecimation ?? false},
       ${patch.notes ?? ''},
-      ${patch.reviewed ? new Date() : null}
+      ${reviewedAt ?? null}
     )
     ON CONFLICT ("model_id") DO UPDATE SET
       "yaw_offset_degrees" = COALESCE(${patch.yawOffsetDegrees ?? null}, "spl_model_meta"."yaw_offset_degrees"),
-      "footprint_override" = ${patch.footprintOverride === undefined ? null : patch.footprintOverride ? JSON.stringify(patch.footprintOverride) : null}::jsonb,
+      "footprint_override" = CASE
+        WHEN ${patch.footprintOverride === undefined} THEN "spl_model_meta"."footprint_override"
+        ELSE ${footprint ?? null}::jsonb
+      END,
       "no_decimation" = COALESCE(${patch.noDecimation ?? null}, "spl_model_meta"."no_decimation"),
       "notes" = COALESCE(${patch.notes ?? null}, "spl_model_meta"."notes"),
-      "reviewed_at" = ${patch.reviewed ? new Date() : null},
+      "reviewed_at" = CASE
+        WHEN ${patch.reviewed === undefined} THEN "spl_model_meta"."reviewed_at"
+        ELSE ${reviewedAt ?? null}
+      END,
       "updated_at" = CURRENT_TIMESTAMP
   `
 }
 
+/** As upsertFileMeta: an unmentioned field keeps what it had. */
 export async function upsertProductMeta(
   productId: string,
   patch: { mountType?: MountType | null; notes?: string; reviewed?: boolean },
 ): Promise<void> {
+  const reviewedAt = patch.reviewed === undefined ? undefined : patch.reviewed ? new Date() : null
+
   await prisma.$executeRaw`
     INSERT INTO "spl_model_meta" ("scope", "product_id", "mount_type", "notes", "reviewed_at")
-    VALUES ('product', ${productId}, ${patch.mountType ?? null}, ${patch.notes ?? ''}, ${patch.reviewed ? new Date() : null})
+    VALUES ('product', ${productId}, ${patch.mountType ?? null}, ${patch.notes ?? ''}, ${reviewedAt ?? null})
     ON CONFLICT ("product_id") DO UPDATE SET
-      "mount_type" = ${patch.mountType ?? null},
+      "mount_type" = CASE
+        WHEN ${patch.mountType === undefined} THEN "spl_model_meta"."mount_type"
+        ELSE ${patch.mountType ?? null}
+      END,
       "notes" = COALESCE(${patch.notes ?? null}, "spl_model_meta"."notes"),
-      "reviewed_at" = ${patch.reviewed ? new Date() : null},
+      "reviewed_at" = CASE
+        WHEN ${patch.reviewed === undefined} THEN "spl_model_meta"."reviewed_at"
+        ELSE ${reviewedAt ?? null}
+      END,
       "updated_at" = CURRENT_TIMESTAMP
   `
 }

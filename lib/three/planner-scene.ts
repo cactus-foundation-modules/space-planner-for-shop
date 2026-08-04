@@ -12,6 +12,7 @@ import {
   Mesh,
   MeshStandardMaterial,
   Object3D,
+  OrthographicCamera,
   PerspectiveCamera,
   Path,
   Scene,
@@ -72,12 +73,62 @@ export function createRenderer(canvas: HTMLCanvasElement): WebGLRenderer | null 
   }
 }
 
+/**
+ * The two ways of looking at a room, and why both are offered.
+ *
+ * Perspective is how it will look to somebody standing in it. Orthographic is
+ * how it looks on a drawing: parallel lines stay parallel, so two identical
+ * desks are identical on screen wherever they are in the room, and you can
+ * compare them by eye. Buyers want the first; anybody checking a layout wants
+ * the second.
+ */
+export type CameraKind = 'perspective' | 'orthographic'
+
+export type PlannerCamera = PerspectiveCamera | OrthographicCamera
+
+/** Half the height of the orthographic view, in metres. Framing sets it. */
+function orthoHalfHeight(camera: OrthographicCamera): number {
+  const stored = camera.userData.halfHeightM
+  return typeof stored === 'number' && stored > 0 ? stored : 5
+}
+
+export function createCamera(kind: CameraKind): PlannerCamera {
+  if (kind === 'orthographic') {
+    // The frustum is nonsense until applyCameraAspect runs, which every caller
+    // does immediately - the numbers depend on the canvas, and the canvas has no
+    // size worth reading at the moment a camera is made.
+    const camera = new OrthographicCamera(-1, 1, 1, -1, 0.05, 400)
+    camera.position.set(4, 3, 6)
+    return camera
+  }
+  const camera = new PerspectiveCamera(50, 1, 0.05, 200)
+  camera.position.set(4, 3, 6)
+  return camera
+}
+
+/** Fit whichever camera it is to the shape of the canvas. */
+export function applyCameraAspect(camera: PlannerCamera, aspect: number): void {
+  if ((camera as PerspectiveCamera).isPerspectiveCamera) {
+    const perspective = camera as PerspectiveCamera
+    perspective.aspect = aspect
+    perspective.updateProjectionMatrix()
+    return
+  }
+  const ortho = camera as OrthographicCamera
+  const halfHeight = orthoHalfHeight(ortho)
+  const halfWidth = halfHeight * Math.max(0.2, aspect)
+  ortho.left = -halfWidth
+  ortho.right = halfWidth
+  ortho.top = halfHeight
+  ortho.bottom = -halfHeight
+  ortho.updateProjectionMatrix()
+}
+
 export function createScene(): { scene: Scene; camera: PerspectiveCamera } {
   const scene = new Scene()
   scene.background = null
 
-  const camera = new PerspectiveCamera(50, 1, 0.05, 200)
-  camera.position.set(4, 3, 6)
+  const camera = createCamera('perspective') as PerspectiveCamera
 
   // Toned down from where this started. With ACES tone mapping on top, an
   // ambient of 1.4 plus a key of 2.2 washed the floor and the walls to the same
@@ -235,7 +286,7 @@ function buildWallSegment(
  * closed box seen from outside is a box. Inside the room every wall passes the
  * test, so standing in it looks exactly as it should.
  */
-export function updateWallVisibility(room: Group, camera: PerspectiveCamera): void {
+export function updateWallVisibility(room: Group, camera: PlannerCamera): void {
   for (const child of room.children) {
     const outward = child.userData.outward as { x: number; z: number } | undefined
     if (!outward) continue
@@ -355,6 +406,25 @@ export type BuildItemsResult = {
 }
 
 /**
+ * A model the caller has already resolved, as the browser holds it.
+ *
+ * `cacheKey` is the query-stripped url and the only thing compared or stored;
+ * `url` is freshly signed and good for this page load. The two fix-ups travel
+ * with it because they belong to the FILE - the same chair used by forty
+ * variants is turned the same way for all of them.
+ */
+export type SceneModelSource = {
+  url: string
+  cacheKey: string
+  format: string
+  yawOffsetDeg?: number
+  noDecimation?: boolean
+}
+
+/** Marks a subtree that is a clone of a cached prepared model - see disposeGroup. */
+const SHARED_MODEL = 'sharedModel'
+
+/**
  * Everything in the room.
  *
  * Instancing is the budget model: each distinct model file is prepared once and
@@ -365,7 +435,7 @@ export type BuildItemsResult = {
  */
 export async function buildItems(
   description: SceneDescription,
-  models: Map<string, { url: string; cacheKey: string; format: string }>,
+  models: Map<string, SceneModelSource>,
   options: PrepareOptions & { maxUniqueModels: number },
 ): Promise<BuildItemsResult> {
   const group = new Group()
@@ -377,14 +447,29 @@ export async function buildItems(
   // running out of memory - a room that is partly schematic is far better than
   // a room that is a crashed canvas.
   const wanted = description.instanceGroups.slice(0, options.maxUniqueModels)
+  const byCacheKey = new Map<string, SceneModelSource>()
+  for (const model of models.values()) {
+    if (!byCacheKey.has(model.cacheKey)) byCacheKey.set(model.cacheKey, model)
+  }
   const readyByUrl = new Map<string, Awaited<ReturnType<typeof prepareModel>>>()
 
   await Promise.all(
     wanted.map(async (entry) => {
-      const source = [...models.values()].find((model) => model.cacheKey === entry.plainUrl)
+      const source = byCacheKey.get(entry.plainUrl)
       if (!source) return
       try {
-        readyByUrl.set(entry.plainUrl, await prepareModel(source.cacheKey, source.url, source.format as P3dFormat, options))
+        readyByUrl.set(
+          entry.plainUrl,
+          await prepareModel(source.cacheKey, source.url, source.format as P3dFormat, {
+            ...options,
+            // The file's own fix-ups, applied per model rather than per scene.
+            // Passing the scene-wide defaults here is how the yaw correction an
+            // owner typed in the admin reached nothing at all, and how a model
+            // flagged "leave the detail alone" got decimated anyway.
+            yawOffsetDeg: source.yawOffsetDeg ?? options.yawOffsetDeg,
+            noDecimation: options.noDecimation || (source.noDecimation ?? false),
+          }),
+        )
       } catch {
         // Fetch or parse failed. The item joins the placeholder path below.
       }
@@ -396,15 +481,25 @@ export async function buildItems(
     let object: Object3D
 
     if (ready) {
-      object = ready.object.clone(true)
+      // The prepared model carries its own transform - recentred on its
+      // footprint, stood on the floor, turned by the file's yaw correction - and
+      // that transform is the entire point of having prepared it. Placing the
+      // item ON the clone overwrites all three, which is how every model in the
+      // room came to hang off wherever its exporter happened to put the origin.
+      // So the clone goes inside a holder and the HOLDER is what gets placed.
+      const holder = new Group()
+      holder.add(ready.object.clone(true))
       // Scale the measured mesh to the size the plan believes in. Where the two
       // agree this is a multiply by one; where they do not, the plan wins on
       // screen and the disagreement is flagged in the admin rather than argued
       // with here.
-      const scaleX = ready.widthMm > 0 ? (node.size.width * 1000) / ready.widthMm : 1
-      const scaleY = ready.heightMm > 0 ? (node.size.height * 1000) / ready.heightMm : 1
-      const scaleZ = ready.depthMm > 0 ? (node.size.depth * 1000) / ready.depthMm : 1
-      object.scale.set(scaleX, scaleY, scaleZ)
+      holder.scale.set(
+        ready.widthMm > 0 ? (node.size.width * 1000) / ready.widthMm : 1,
+        ready.heightMm > 0 ? (node.size.height * 1000) / ready.heightMm : 1,
+        ready.depthMm > 0 ? (node.size.depth * 1000) / ready.depthMm : 1,
+      )
+      holder.userData[SHARED_MODEL] = true
+      object = holder
     } else {
       if (node.model) degraded.push(node.itemId)
       object = buildPlaceholder(node)
@@ -439,13 +534,28 @@ function roomBounds(description: SceneDescription): { width: number; depth: numb
  * for the tall narrow one a phone gives you - which is how a 4 m room ends up
  * filling the screen with one wall.
  */
-export function frameRoom(camera: PerspectiveCamera, description: SceneDescription): Vector3 {
+export function frameRoom(camera: PlannerCamera, description: SceneDescription): Vector3 {
   const bounds = roomBounds(description)
   const radius = 0.5 * Math.hypot(bounds.width, bounds.depth, bounds.height)
-  const vFov = (camera.fov * Math.PI) / 180
-  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.2, camera.aspect))
-  const distance = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 0.98
   const target = new Vector3(description.centre.x, bounds.height * 0.35, description.centre.z)
+
+  if (!(camera as PerspectiveCamera).isPerspectiveCamera) {
+    // An orthographic camera has no field of view to fit the room into: the
+    // frustum IS the framing. So the distance only has to clear the geometry,
+    // and the half-height is what decides how much of the room is on screen.
+    const ortho = camera as OrthographicCamera
+    ortho.userData.halfHeightM = radius * 1.08
+    applyCameraAspect(ortho, (ortho.right - ortho.left) / Math.max(1e-6, ortho.top - ortho.bottom))
+    const distance = radius * 3 + 2
+    ortho.position.set(target.x + distance * 0.64, target.y + distance * 0.44, target.z + distance * 0.64)
+    ortho.lookAt(target)
+    return target
+  }
+
+  const perspective = camera as PerspectiveCamera
+  const vFov = (perspective.fov * Math.PI) / 180
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.2, perspective.aspect))
+  const distance = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 0.98
   // Looking down the room's diagonal from about thirty degrees up: high enough
   // to read the layout, low enough that the furniture still looks like furniture
   // rather than a floor plan with shadows.
@@ -465,7 +575,7 @@ export function frameRoom(camera: PerspectiveCamera, description: SceneDescripti
  * the first thing placed lands there - so a camera parked at the centre put the
  * shopper's head inside a desk and showed them the underneath of a worktop.
  */
-export function eyeLevel(camera: PerspectiveCamera, description: SceneDescription): Vector3 {
+export function eyeLevel(camera: PlannerCamera, description: SceneDescription): Vector3 {
   const xs = description.floor.outline.map((point) => point.x)
   const zs = description.floor.outline.map((point) => point.z)
   const box = { minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs) }
@@ -490,18 +600,35 @@ export function eyeLevel(camera: PerspectiveCamera, description: SceneDescriptio
   return target
 }
 
-export function disposeGroup(group: Object3D): void {
-  group.traverse((child) => {
-    const mesh = child as Mesh
-    // Sprites share ONE geometry across every sprite three has ever made.
-    // Disposing it here takes every future label with it, and the symptom -
-    // name tags that vanish the second time you open the 3D view - looks
-    // nothing like its cause.
-    if (mesh.geometry && !(child as unknown as { isSprite?: boolean }).isSprite) mesh.geometry.dispose()
-    const material = (mesh as unknown as { material?: MeshStandardMaterial | MeshStandardMaterial[] }).material
-    if (!material) return
+/**
+ * Give back what this group owns, and nothing that it merely borrows.
+ *
+ * Two things in here are shared and must survive:
+ *
+ *   - A cloned catalogue model. `Object3D.clone` copies geometry and material BY
+ *     REFERENCE, so every clone of a chair shares one geometry with the prepared
+ *     copy in the model cache and with each other. Disposing one frees the
+ *     geometry the next rebuild is about to draw with - and since the items
+ *     group is rebuilt on every change to the room, that is every change to the
+ *     room. The symptom is furniture that goes blank or black the moment
+ *     anything moves, which looks nothing like its cause.
+ *   - Sprite geometry, which three shares across every sprite it has ever made.
+ *     Disposing it takes every future label with it.
+ *
+ * Walked by hand rather than with traverse() so a shared subtree can be skipped
+ * whole; traverse offers no way to stop going down.
+ */
+export function disposeGroup(object: Object3D): void {
+  if (object.userData[SHARED_MODEL]) return
+
+  const mesh = object as Mesh
+  if (mesh.geometry && !(object as unknown as { isSprite?: boolean }).isSprite) mesh.geometry.dispose()
+  const material = (mesh as unknown as { material?: MeshStandardMaterial | MeshStandardMaterial[] }).material
+  if (material) {
     for (const entry of Array.isArray(material) ? material : [material]) entry.dispose()
-  })
+  }
+
+  for (const child of [...object.children]) disposeGroup(child)
 }
 
 export const SELECTION_COLOUR = new Color(0x2f6fed)

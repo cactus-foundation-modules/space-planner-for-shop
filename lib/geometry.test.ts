@@ -5,18 +5,25 @@ import {
   displacedItems,
   footprintsOverlap,
   heightBandsClash,
+  fitOpeningToWall,
   isSelfIntersecting,
   itemCorners,
   itemInsideRoom,
+  itemsFight,
+  nearestItemGapMm,
   normaliseOrigin,
   normaliseWinding,
+  offsetAlongWall,
   perimeterMm,
   pointInPolygon,
   polygonAreaM2,
   polygonSignedArea,
   setWallLength,
+  distanceToWallAlong,
+  snapToItems,
   snapToWall,
   snapYaw,
+  tucksUnder,
   validateRoomGeometry,
   walls,
 } from '@/modules/space-planner-for-shop/lib/geometry'
@@ -238,5 +245,135 @@ describe('displacedItems', () => {
       }],
     }
     expect(displacedItems([item()], geometry).map((i) => i.id)).toEqual(['i1'])
+  })
+})
+
+describe('snapping to other items', () => {
+  it('clicks a desk flush against the one beside it', () => {
+    const left = item({ id: 'left', x: 1000, y: 1500 })
+    // 60 mm short of touching, and 40 mm out of line: both inside the tolerance.
+    const right = item({ id: 'right', x: 1000 + 1600 + 60, y: 1540 })
+    const snapped = snapToItems(right, [left])
+    expect(snapped.x).toBe(left.x + 1600)
+    expect(snapped.y).toBe(left.y)
+  })
+
+  it('leaves a desk alone when the nearest one is nowhere near', () => {
+    const left = item({ id: 'left', x: 500, y: 500 })
+    const right = item({ id: 'right', x: 3500, y: 2500 })
+    expect(snapToItems(right, [left])).toEqual(right)
+  })
+
+  it('does not offer a snap the shopper has escaped with the override key', () => {
+    const left = item({ id: 'left', x: 1000, y: 1500 })
+    const right = item({ id: 'right', x: 1000 + 1600 + 60, y: 1500 })
+    expect(snapToItems(right, [left], 0)).toEqual(right)
+  })
+
+  it('snaps to a neighbour stood at a quarter turn, on its real footprint', () => {
+    // Turned 90 degrees, so what reads as its width along x is its 800 depth.
+    const turned = item({ id: 'turned', x: 1000, y: 1500, yaw: 90 })
+    const beside = item({ id: 'beside', x: 1000 + 400 + 800 + 50, y: 1500 })
+    expect(snapToItems(beside, [turned]).x).toBe(1000 + 400 + 800)
+  })
+
+  it('measures the gap to the nearest thing, and calls touching nothing at all', () => {
+    const left = item({ id: 'left', x: 1000, y: 1500 })
+    const touching = item({ id: 'touching', x: 1000 + 1600, y: 1500 })
+    expect(nearestItemGapMm(touching, [left])).toBe(0)
+    expect(nearestItemGapMm(item({ id: 'far', x: 3800, y: 1500 }), [left])).toBeGreaterThan(0)
+  })
+})
+
+describe('what counts as a clash', () => {
+  const desk = item({ id: 'desk', x: 2000, y: 1500, widthMm: 1600, depthMm: 800, heightMm: 730 })
+  const chair = item({ id: 'chair', productId: 'chair', x: 2000, y: 1500, widthMm: 650, depthMm: 650, heightMm: 1100 })
+
+  it('does not paint a chair tucked under a desk red', () => {
+    expect(itemsFight(chair, desk)).toBe(false)
+    expect(itemsFight(desk, chair)).toBe(false)
+  })
+
+  it('still paints two desks in the same spot red', () => {
+    expect(itemsFight(desk, item({ id: 'other-desk', x: 2100, y: 1500 }))).toBe(true)
+  })
+
+  it('believes the catalogue over the guess when the catalogue has an answer', () => {
+    const cupboard = item({ id: 'cupboard', productId: 'cupboard', x: 2000, y: 1500, widthMm: 1000, depthMm: 500, heightMm: 900 })
+    // Published as having no usable space under it, so nothing goes under it.
+    const sizes = { cupboard: { heightMm: null, widthMm: null } }
+    expect(tucksUnder(chair, cupboard, sizes)).toBe(false)
+  })
+
+  it('will not tuck something wider than the space it is going into', () => {
+    const sizes = { p1: { heightMm: 620, widthMm: 1400 } }
+    const wide = item({ id: 'wide', productId: 'wide', x: 2000, y: 1500, widthMm: 1500, depthMm: 600, heightMm: 700 })
+    expect(tucksUnder(wide, desk, sizes)).toBe(false)
+  })
+})
+
+describe('doors and windows', () => {
+  const geometry: RoomGeometry = { ...defaultRoomGeometry(), vertices: RECT }
+
+  it('measures how far along a wall a point falls', () => {
+    expect(offsetAlongWall(RECT, 0, { x: 1000, y: 0 })).toBe(1000)
+    // Off the end of the wall gives the end of the wall, not a number off it.
+    expect(offsetAlongWall(RECT, 0, { x: 9000, y: 0 })).toBe(4000)
+  })
+
+  it('slides an opening back on to the wall when it would hang off the end', () => {
+    const fitted = fitOpeningToWall(geometry, {
+      id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 3800, widthMm: 900, sillMm: 0, heightMm: 2040,
+    })
+    expect(fitted?.offsetMm).toBe(4000 - 900)
+  })
+
+  it('narrows one that is wider than the wall it is on rather than losing it', () => {
+    const narrow: RoomGeometry = {
+      ...geometry,
+      vertices: [{ x: 0, y: 0 }, { x: 700, y: 0 }, { x: 700, y: 3000 }, { x: 0, y: 3000 }],
+    }
+    const fitted = fitOpeningToWall(narrow, {
+      id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 0, widthMm: 900, sillMm: 0, heightMm: 2040,
+    })
+    expect(fitted?.widthMm).toBe(700)
+    expect(fitted?.offsetMm).toBe(0)
+  })
+
+  it('keeps an opening under the ceiling', () => {
+    const fitted = fitOpeningToWall(geometry, {
+      id: 'w1', kind: 'window', wallIndex: 0, offsetMm: 100, widthMm: 1200, sillMm: 900, heightMm: 4000,
+    })
+    expect((fitted?.sillMm ?? 0) + (fitted?.heightMm ?? 0)).toBeLessThanOrEqual(geometry.ceilingMm)
+  })
+})
+
+describe('distanceToWallAlong', () => {
+  // The commonest awkward office shape: a 7x3 top leg and a 4x5.5 left leg.
+  const L: Vertex[] = [
+    { x: 0, y: 0 },
+    { x: 7000, y: 0 },
+    { x: 7000, y: 3000 },
+    { x: 4000, y: 3000 },
+    { x: 4000, y: 5500 },
+    { x: 0, y: 5500 },
+  ]
+
+  it('measures to the wall the ray actually reaches', () => {
+    expect(distanceToWallAlong({ x: 2000, y: 1000 }, 0, -1, L)).toBeCloseTo(1000)
+    expect(distanceToWallAlong({ x: 2000, y: 1000 }, -1, 0, L)).toBeCloseTo(2000)
+  })
+
+  it('stops at the wall of the cut-out rather than at the bounding box', () => {
+    // Straight down from the top leg: the floor ends at y = 3000 here, even
+    // though the room's bounding box runs to 5500. Measuring to the box was
+    // what put a 4.5 m gap beside a desk with a wall 2 m away.
+    expect(distanceToWallAlong({ x: 6000, y: 1000 }, 0, 1, L)).toBeCloseTo(2000)
+    // And in the other leg, where the box happens to be right, it agrees.
+    expect(distanceToWallAlong({ x: 2000, y: 1000 }, 0, 1, L)).toBeCloseTo(4500)
+  })
+
+  it('ignores a wall the ray runs alongside rather than into', () => {
+    expect(distanceToWallAlong({ x: 2000, y: 0 }, 1, 0, L)).toBeGreaterThan(0)
   })
 })

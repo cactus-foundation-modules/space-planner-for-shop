@@ -35,6 +35,20 @@ that has not installed it.
 - **Four admin screens** under their own sidebar section: rooms & plans, model
   corrections, sizes, and pictures.
 
+## What the shopper can do with it
+
+- **Draw or type the room**, of any number of walls, and put doors and windows in
+  the walls.
+- **Place things from the catalogue**, drag them about, and turn them by the handle
+  on the selected one. Dragging snaps to the walls and to the other furniture -
+  edge to edge, and lined up on the other axis - so a bank of desks actually
+  touches. Hold `alt` to escape any of it.
+- **Look at it flat or in 3D**, with perspective on for how it will look and off
+  for a drawing you can compare sizes on.
+- **Take it away**: add the lot to the basket, ask for a quote, email it to
+  themselves, or export a PDF - the room's measurements and the priced item list
+  always, the flat plan, the 3D view and a quote page by choice.
+
 ## How sizes are worked out
 
 Strictly in this order, cached in `spl_dimension_cache`, and never guessed:
@@ -91,21 +105,48 @@ Named rather than quietly missing:
 
 ## Rooms of any shape
 
-The flat plan is three tools on one canvas, switched by `mode` in `Plan2d.tsx`:
+The flat plan is four tools on one canvas, switched by `mode` in `Plan2d.tsx`:
 
 - **furnish** - arrange the furniture. The default.
 - **shape** - drag the room's own corners, double-tap a wall to split it, remove a
   corner you do not want. Reached from **Room -> Change the shape**.
+- **openings** - put doors, windows and plain gaps on the walls, and slide them
+  along. Reached from **Room -> Doors & windows**.
 - **draw** - put a new outline down corner by corner, with walls snapping square
   and their length written on them as they go. Reached from the first-run screen
   or **Room -> Draw a new one**.
 
-Both editing modes go through one reducer action, `set-shape`, whose `settle` flag
+A door or a window belongs to the ROOM rather than to a layout, so it lives in the
+geometry beside the wall it is cut into: one survives a plan being copied, comes
+along when the wall is dragged, and is what the 3D view builds a lintel over.
+Anything that moves the walls puts every opening back on the wall it belongs to -
+slid along if it now hangs off the end, narrowed if the wall has become shorter
+than it is, and dropped only when the wall can no longer hold it at all.
+
+Both outline-editing modes go through one reducer action, `set-shape`, whose `settle` flag
 is the whole design: mid-gesture the vertices are taken exactly as given, and on
 release they are wound, re-originned, the furniture is translated by the same
 amount so it stays where it was in the room, and anything now outside the walls is
 moved to the tray rather than left in the garden. An outline that folds through
 itself is refused on release and the previous one is put back.
+
+## The PDF export
+
+`POST /api/m/space-planner-for-shop/member/plans/<id>/pdf`, member-tier and rate
+limited on the same window as pictures, because every call starts a headless
+browser. The document itself is composed in `lib/export-doc.ts` and printed by
+`lib/pdf.ts` - the same two-environment chromium arrangement quote-for-shop uses,
+copied rather than imported, because a dependent module does not reach into the
+module it depends on to add exports to it.
+
+The two drawings are photographed IN THE BROWSER and posted up as data URLs. They
+are pictures of what the shopper is looking at, at the zoom and the angle they
+chose, and half of that state never leaves their tab. Prices are the other way
+round and always: the item list is built server-side from the saved plan through
+shop's own price resolution, exactly as the quote route does it. The optional
+quote page takes its heading, intro, terms, validity note and hide-prices rule
+from quote-for-shop's settings, and carries the real quote number when the plan
+has already been through the quote flow.
 
 ## Render worker contract
 

@@ -37,7 +37,9 @@ export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
       '<p>The picture of your plan has finished.</p>' +
       '<p><a href="{{planUrl}}">Have a look</a></p>' +
       '{{#if stale}}<p>You have moved things around since you asked for it, so it shows the room as it was on {{renderedFor}}.</p>{{/if}}',
-    mergeTags: ['siteName', 'planName', 'planUrl', 'renderedFor'],
+    // `stale` is a flag rather than wording, but it still has to be declared or
+    // the editor does not offer it and the preview cannot exercise the branch.
+    mergeTags: ['siteName', 'planName', 'planUrl', 'renderedFor', 'stale'],
     requiredTags: ['planUrl'],
     rawTags: [],
     // Unprompted, arriving minutes later. It gets a notification category so a

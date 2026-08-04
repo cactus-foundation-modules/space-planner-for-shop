@@ -71,6 +71,20 @@ describe('resolveOne', () => {
     expect(result).toMatchObject({ widthMm: 1400, depthMm: 800, heightMm: 730, source: 'category_default' })
   })
 
+  it('calls a size approximate when any part of it came off a fallback', () => {
+    const defaults = new Map([['cat-desks', { widthMm: 1400, depthMm: 800, heightMm: 730, mountType: 'floor' as MountType }]])
+    const result = resolveOne(base({
+      categoryId: 'cat-desks',
+      categoryDefaults: defaults,
+      // A real width off the spec sheet, and nothing at all for the other two.
+      values: [{ attribute: 'Overall Width', label: '1600mm' }],
+    }))
+    expect(result.widthMm).toBe(1600)
+    expect(result.depthMm).toBe(800)
+    // Badged as approximate, because two of the three axes are a guess.
+    expect(result.source).toBe('category_default')
+  })
+
   it('never blocks a placement, even with nothing to go on', () => {
     const result = resolveOne(base())
     expect(result.source).toBe('marker')

@@ -237,3 +237,87 @@ describe('room geometry', () => {
     expect(Math.min(...ys)).toBe(0)
   })
 })
+
+describe('turning things', () => {
+  function deskWithArm(): PlannerState {
+    const withParent = plannerReducer(start(), { type: 'add-item', id: 'desk', product: desk, x: 2000, y: 1500 })
+    const withChild = plannerReducer(withParent, { type: 'add-item', id: 'arm', product: pedestal, x: 2000, y: 1200 })
+    return plannerReducer(withChild, { type: 'attach', childId: 'arm', parentId: 'desk' })
+  }
+
+  it('brings whatever is mounted on an item round with it', () => {
+    const state = plannerReducer(deskWithArm(), { type: 'rotate-items', ids: ['desk'], deltaDeg: 90, snap: false })
+    const parent = state.items.find((item) => item.id === 'desk')
+    const child = state.items.find((item) => item.id === 'arm')
+    expect(parent?.yaw).toBe(90)
+    expect(child?.yaw).toBe(90)
+    // The arm was 300 mm in front of the desk's centre; a quarter turn puts it
+    // 300 mm to one side of it, not where it was.
+    expect(child?.x).toBe(2300)
+    expect(child?.y).toBe(1500)
+  })
+
+  it('turns a child by what the parent actually did, not by what was asked for', () => {
+    const spun = plannerReducer(deskWithArm(), { type: 'rotate-items', ids: ['desk'], deltaDeg: 7, snap: true })
+    const parent = spun.items.find((item) => item.id === 'desk')
+    const child = spun.items.find((item) => item.id === 'arm')
+    // Snapped to nothing at all, so the arm must not have moved either.
+    expect(parent?.yaw).toBe(0)
+    expect(child?.yaw).toBe(0)
+    expect(child?.x).toBe(2000)
+  })
+})
+
+describe('doors and windows', () => {
+  it('puts a door on the wall centred on where it was tapped', () => {
+    const state = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    const opening = state.geometry.openings[0]
+    expect(opening?.kind).toBe('door')
+    expect(opening?.widthMm).toBe(900)
+    expect(opening?.offsetMm).toBe(2000 - 450)
+  })
+
+  it('keeps one on its wall when it is slid past the end', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    const slid = plannerReducer(added, { type: 'set-opening', id: 'd1', patch: { offsetMm: 9000 } })
+    expect(slid.geometry.openings[0]?.offsetMm).toBe(4000 - 900)
+  })
+
+  it('slides a door along when the wall it is on is shortened', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 3500 })
+    expect(added.geometry.openings[0]?.offsetMm).toBe(3050)
+    const shortened = plannerReducer(added, { type: 'set-wall-length', wallIndex: 0, lengthMm: 2000 })
+    const opening = shortened.geometry.openings[0]
+    expect(opening).toBeDefined()
+    expect(opening!.offsetMm + opening!.widthMm).toBeLessThanOrEqual(2000)
+  })
+
+  it('removes one on request', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    expect(plannerReducer(added, { type: 'delete-opening', id: 'd1' }).geometry.openings).toEqual([])
+  })
+})
+
+describe('clash warnings', () => {
+  it('says nothing about a chair pushed under a desk', () => {
+    const chair: ProductSize = {
+      productId: 'chair',
+      widthMm: 650,
+      depthMm: 650,
+      heightMm: 1100,
+      sizeSource: 'attribute',
+      mount: 'floor',
+      underTopHeightMm: null,
+      underTopWidthMm: null,
+    }
+    const state = plannerReducer(withDesk(), { type: 'add-item', id: 'chair', product: chair, x: 2000, y: 1500 })
+    const sizes = { desk: { heightMm: 620, widthMm: 1400 } }
+    expect(findClashes(state.items, sizes)).toEqual([])
+  })
+
+  it('still says something about two desks in one place', () => {
+    const state = plannerReducer(withDesk(), { type: 'add-item', id: 'b', product: desk, x: 2000, y: 1500 })
+    const moved = plannerReducer(state, { type: 'set-item', id: 'b', patch: { x: 2000, y: 1500 } })
+    expect(findClashes(moved.items, { desk: { heightMm: 620, widthMm: 1400 } })).toHaveLength(1)
+  })
+})

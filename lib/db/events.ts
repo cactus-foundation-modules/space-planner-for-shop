@@ -24,6 +24,7 @@ export type SplEventName =
   | 'plan.emailed'
   | 'plan.shared'
   | 'plan.rendered'
+  | 'plan.exported'
   | 'plan.printed'
 
 export async function recordEvent(event: SplEventName, opts: { planId?: string | null; productId?: string | null } = {}): Promise<void> {

@@ -3,18 +3,24 @@ import {
   clampItemIntoRoom,
   footprintsOverlap,
   itemCorners,
+  OPENING_DEFAULTS,
+  fitOpeningToWall,
   itemInsideRoom,
-  itemsClash,
+  itemsFight,
+  nearestItemGapMm,
   nearestWall,
   normaliseOrigin,
   normaliseWinding,
   pointInPolygon,
+  rotatePoint,
   setWallLength,
+  snapToItems,
   snapToWall,
   snapYaw,
 } from '@/modules/space-planner-for-shop/lib/geometry'
 import { PLAN_SCHEMA_VERSION } from '@/modules/space-planner-for-shop/lib/types'
-import type { MountType, PlanItem, PlanItems, RoomGeometry, SizeSource, Vertex } from '@/modules/space-planner-for-shop/lib/types'
+import type { UnderTopSizes } from '@/modules/space-planner-for-shop/lib/geometry'
+import type { MountType, OpeningKind, PlanItem, PlanItems, RoomGeometry, SizeSource, Vertex, WallOpening } from '@/modules/space-planner-for-shop/lib/types'
 
 // The planner's state and every way it can change, as a pure reducer.
 //
@@ -74,6 +80,10 @@ export type PlannerAction =
   | { type: 'stage-items'; ids: string[] }
   | { type: 'unstage-item'; id: string; x: number; y: number }
   | { type: 'attach'; childId: string; parentId: string | null }
+  /** A door, a window or a plain gap, put on a wall at a distance along it. */
+  | { type: 'add-opening'; id: string; kind: OpeningKind; wallIndex: number; offsetMm: number }
+  | { type: 'set-opening'; id: string; patch: Partial<Omit<WallOpening, 'id'>> }
+  | { type: 'delete-opening'; id: string }
   | { type: 'select'; ids: string[] }
   | { type: 'load'; snapshot: PlannerSnapshot }
 
@@ -107,7 +117,7 @@ function applyShape(
   const shifted = moved[0]
   const dx = first && shifted ? shifted.x - first.x : 0
   const dy = first && shifted ? shifted.y - first.y : 0
-  const geometry = { ...state.geometry, vertices: moved }
+  const geometry = withFittedOpenings({ ...state.geometry, vertices: moved })
 
   const items = state.items.map((item) => {
     if (item.staged) return item
@@ -119,6 +129,25 @@ function applyShape(
   })
 
   return bump({ ...state, geometry, items })
+}
+
+/**
+ * Every door and window put back on the wall it belongs to, after the walls have
+ * moved.
+ *
+ * A wall shortened past a door has to do something with the door, and there are
+ * only two honest answers: slide it along, or admit the wall cannot hold it any
+ * more. Silently leaving it hanging off the end is the third answer, and it
+ * produces a room that draws a doorway in mid-air and a 3D view with a hole in
+ * the outside world.
+ */
+function withFittedOpenings(geometry: RoomGeometry): RoomGeometry {
+  if (geometry.openings.length === 0) return geometry
+  const openings = geometry.openings.flatMap((opening) => {
+    const fitted = fitOpeningToWall(geometry, opening)
+    return fitted ? [fitted] : []
+  })
+  return { ...geometry, openings }
 }
 
 /**
@@ -137,6 +166,36 @@ function movingAwayFromWall(before: PlanItem, after: PlanItem, geometry: RoomGeo
   const to = nearestWall({ x: after.x, y: after.y }, geometry.vertices)
   if (!from || !to) return false
   return to.distanceMm > from.distanceMm + 0.5
+}
+
+/** The same escape, for the furniture. See movingAwayFromWall - the trap is identical. */
+function movingAwayFromItems(before: PlanItem, after: PlanItem, others: PlanItem[]): boolean {
+  const from = nearestItemGapMm(before, others)
+  const to = nearestItemGapMm(after, others)
+  if (from === null || to === null) return false
+  return to > from + 0.5
+}
+
+/**
+ * Everything a snap may consider: placed, not this item, and not being dragged
+ * along with it. A multi-selection snapping to its own members would fight
+ * itself on every pointer event.
+ */
+function snapNeighbours(items: PlanItem[], moving: Set<string>): PlanItem[] {
+  return items.filter((item) => !item.staged && !moving.has(item.id))
+}
+
+/**
+ * One drag step's worth of snapping: to the walls, and then to the furniture.
+ *
+ * In that order, and both escapable. The wall decides which way the item faces,
+ * so it goes first; the neighbours then slide it along that wall until it is
+ * flush with whatever is beside it, which is how a bank of desks gets built with
+ * a mouse instead of with the number fields.
+ */
+function snapPlacement(moved: PlanItem, from: PlanItem, neighbours: PlanItem[], geometry: RoomGeometry): PlanItem {
+  const walled = movingAwayFromWall(from, moved, geometry) ? moved : snapToWall(moved, geometry)
+  return movingAwayFromItems(from, walled, neighbours) ? walled : snapToItems(walled, neighbours)
 }
 
 function makeItem(id: string, product: ProductSize, x: number, y: number, staged: boolean): PlanItem {
@@ -170,7 +229,7 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       return { ...state, selection: action.ids }
 
     case 'set-geometry': {
-      const geometry = { ...action.geometry, vertices: normaliseOrigin(normaliseWinding(action.geometry.vertices)) }
+      const geometry = withFittedOpenings({ ...action.geometry, vertices: normaliseOrigin(normaliseWinding(action.geometry.vertices)) })
       // A wholesale replacement can be a much smaller room - "start the room
       // again" is exactly that - so anything the new outline no longer contains
       // goes to the tray. Deleting somebody's choices because they redrew the
@@ -201,11 +260,15 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       for (const item of state.items) {
         if (item.parentId && moving.has(item.parentId)) moving.add(item.id)
       }
+      const neighbours = snapNeighbours(state.items, moving)
       const items = state.items.map((item) => {
         if (!moving.has(item.id) || item.staged) return item
         const moved = { ...item, x: Math.round(item.x + action.dx), y: Math.round(item.y + action.dy) }
-        const snapped = action.snap && !item.parentId && !movingAwayFromWall(item, moved, state.geometry)
-          ? snapToWall(moved, state.geometry)
+        // A child follows its parent and is not snapped on its own: a monitor
+        // arm that clicked onto the nearest wall halfway through moving the desk
+        // would be a poltergeist.
+        const snapped = action.snap && !item.parentId
+          ? snapPlacement(moved, item, neighbours, state.geometry)
           : moved
         return clampItemIntoRoom(snapped, state.geometry)
       })
@@ -213,10 +276,13 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
     }
 
     case 'place-item': {
+      const neighbours = snapNeighbours(state.items, new Set([action.id]))
       const items = state.items.map((item) => {
         if (item.id !== action.id) return item
         const moved = { ...item, x: Math.round(action.x), y: Math.round(action.y), staged: false }
-        const snapped = action.snap ? snapToWall(moved, state.geometry) : moved
+        // Dropped rather than dragged, so there is no previous step to be moving
+        // away from and the snaps are offered unconditionally.
+        const snapped = action.snap ? snapToItems(snapToWall(moved, state.geometry), neighbours) : moved
         return clampItemIntoRoom(snapped, state.geometry)
       })
       return bump({ ...state, items })
@@ -224,10 +290,30 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
     case 'rotate-items': {
       const rotating = new Set(action.ids)
-      const items = state.items.map((item) => {
+      // Snapping rounds the turn, so what was actually applied is not always
+      // what was asked for - and the children have to follow what the parent
+      // really did, or a snapped desk and the arm mounted on it end up at
+      // different angles.
+      const applied = new Map<string, number>()
+      const turned = state.items.map((item) => {
         if (!rotating.has(item.id)) return item
-        const yaw = item.yaw + action.deltaDeg
-        return { ...item, yaw: action.snap ? snapYaw(yaw) : yaw }
+        const yaw = action.snap ? snapYaw(item.yaw + action.deltaDeg) : item.yaw + action.deltaDeg
+        applied.set(item.id, yaw - item.yaw)
+        return { ...item, yaw }
+      })
+
+      // Anything mounted on or tucked under a turning item comes round WITH it,
+      // about the parent's own centre. A monitor arm that keeps its spot on the
+      // floor while the desk turns out from under it is not attached to
+      // anything, whatever the plan says.
+      const before = new Map(state.items.map((item) => [item.id, item]))
+      const items = turned.map((item) => {
+        if (rotating.has(item.id) || !item.parentId) return item
+        const delta = applied.get(item.parentId)
+        const parent = before.get(item.parentId)
+        if (delta === undefined || !parent) return item
+        const orbit = rotatePoint(item.x - parent.x, item.y - parent.y, delta)
+        return { ...item, x: Math.round(parent.x + orbit.x), y: Math.round(parent.y + orbit.y), yaw: item.yaw + delta }
       })
       return bump({ ...state, items })
     }
@@ -320,6 +406,39 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       return bump({ ...state, items })
     }
 
+    case 'add-opening': {
+      // Doors and windows are a property of the ROOM, not of the layout, so they
+      // live in the geometry beside the walls they are cut into - which is what
+      // makes one of them survive a plan being duplicated and a wall being
+      // dragged, and what lets the 3D view build a lintel over it.
+      const defaults = OPENING_DEFAULTS[action.kind]
+      const fitted = fitOpeningToWall(state.geometry, {
+        id: action.id,
+        kind: action.kind,
+        wallIndex: action.wallIndex,
+        // Dropped centred on where the wall was tapped, which is where somebody
+        // pointing at a wall means.
+        offsetMm: Math.round(action.offsetMm - defaults.widthMm / 2),
+        ...defaults,
+      })
+      if (!fitted) return state
+      return bump({ ...state, geometry: { ...state.geometry, openings: [...state.geometry.openings, fitted] } })
+    }
+
+    case 'set-opening': {
+      const openings = state.geometry.openings.flatMap((opening) => {
+        if (opening.id !== action.id) return [opening]
+        const fitted = fitOpeningToWall(state.geometry, { ...opening, ...action.patch })
+        return fitted ? [fitted] : []
+      })
+      return bump({ ...state, geometry: { ...state.geometry, openings } })
+    }
+
+    case 'delete-opening': {
+      const openings = state.geometry.openings.filter((opening) => opening.id !== action.id)
+      return bump({ ...state, geometry: { ...state.geometry, openings } })
+    }
+
     case 'attach': {
       // One level only. Accessory-on-accessory stacking is deliberately out of
       // scope, and a cycle would be a hang rather than a feature.
@@ -347,9 +466,12 @@ export function toPlanItems(state: PlannerState): PlanItems {
  * Which pairs actually fight, as opposed to merely sharing floor space.
  *
  * Legitimate overlaps are the norm in office planning: a chair tucks under a
- * desk, a pedestal slides under the desktop. So this warns; it never blocks.
+ * desk, a pedestal slides under the desktop. So this warns; it never blocks -
+ * and it does not warn at all about the arrangements people were aiming for.
+ * `underTop` carries what the catalogue knows about the space beneath each
+ * product, which is what tells a tucked-in chair from two desks in one spot.
  */
-export function findClashes(items: PlanItem[]): Array<{ a: string; b: string }> {
+export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}): Array<{ a: string; b: string }> {
   const out: Array<{ a: string; b: string }> = []
   const placed = items.filter((item) => !item.staged)
   for (let i = 0; i < placed.length; i++) {
@@ -357,7 +479,7 @@ export function findClashes(items: PlanItem[]): Array<{ a: string; b: string }> 
       const a = placed[i]
       const b = placed[j]
       if (!a || !b) continue
-      if (itemsClash(a, b)) out.push({ a: a.id, b: b.id })
+      if (itemsFight(a, b, underTop)) out.push({ a: a.id, b: b.id })
     }
   }
   return out

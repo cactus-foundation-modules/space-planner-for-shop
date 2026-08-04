@@ -25,7 +25,7 @@ import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/s
 import { polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
-import type { PlanItem, ProductSnapshot, RoomGeometry, Vertex } from '@/modules/space-planner-for-shop/lib/types'
+import type { OpeningKind, PlanItem, ProductSnapshot, RoomGeometry, Vertex } from '@/modules/space-planner-for-shop/lib/types'
 import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalogue'
 
 // The planner.
@@ -45,6 +45,40 @@ const View3d = dynamic(() => import('@/modules/space-planner-for-shop/components
 })
 
 type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+/**
+ * Wait for a view to be able to photograph itself, then photograph it.
+ *
+ * Polled rather than awaited on a promise, because what is being waited for is a
+ * component mounting, registering itself and finishing a build - three things
+ * spread across React's own scheduling with no single moment to hang a callback
+ * on. It gives up rather than hanging: a document missing one picture is a
+ * document; an export that never returns is a bug report.
+ */
+async function waitForCapture(
+  ref: { current: (() => string | null) | null },
+  ready: () => boolean = () => true,
+  timeoutMs = 15_000,
+): Promise<string | null> {
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (ready() && ref.current) {
+      const image = ref.current()
+      if (image) return image
+    }
+    await delay(120)
+  }
+  return null
+}
+
+/** One resolved model as the browser holds it - see lib/model-resolver's ClientModel. */
+type PlannerModel = { url: string; cacheKey: string; format: string; yawOffsetDeg: number; noDecimation: boolean }
 
 /**
  * A saved room and layout, loaded on the server and handed straight in.
@@ -81,9 +115,15 @@ export type SpacePlannerProps = {
 }
 
 type Tab = 'catalogue' | 'selected' | 'items'
-type StageView = 'plan' | 'orbit' | 'eye'
+/**
+ * The two surfaces, named for what you do on them rather than for how they are
+ * drawn. "Stand in it" went with them: a camera parked at head height inside a
+ * part-furnished room is a novelty the first time and an obstacle every time
+ * after, and the orbit view answers the same question better.
+ */
+type StageView = 'plan' | 'orbit'
 
-const VIEW_LABELS: Record<StageView, string> = { plan: 'Flat plan', orbit: '3D', eye: 'Stand in it' }
+const VIEW_LABELS: Record<StageView, string> = { plan: 'Edit', orbit: 'Preview' }
 const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', selected: 'Selected', items: 'Item list' }
 
 export function SpacePlanner(props: SpacePlannerProps) {
@@ -93,7 +133,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [tab, setTab] = useState<Tab>('catalogue')
   const [stage, setStage] = useState<StageView>('plan')
   const [products, setProducts] = useState<Record<string, ProductInfo>>({})
-  const [models, setModels] = useState<Map<string, { url: string; cacheKey: string; format: string }>>(new Map())
+  const [models, setModels] = useState<Map<string, PlannerModel>>(new Map())
   const [message, setMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null)
   const [savedPlanId, setSavedPlanId] = useState<string | null>(props.openPlan?.planId ?? null)
   const [savedRoomId, setSavedRoomId] = useState<string | null>(props.openPlan?.roomId ?? null)
@@ -106,6 +146,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [roomEdit, setRoomEdit] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [startAgain, setStartAgain] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
   /**
    * What the flat plan's pointer means. Editing the room is a mode rather than a
    * second screen, so the shopper never loses sight of what they have already
@@ -113,9 +155,46 @@ export function SpacePlanner(props: SpacePlannerProps) {
    * the surface they are already looking at.
    */
   const [planMode, setPlanMode] = useState<PlanMode>('furnish')
+  /** Which door or window is being edited, and what the next tap on a wall makes. */
+  const [openingSelection, setOpeningSelection] = useState<string | null>(null)
+  const [openingKind, setOpeningKind] = useState<OpeningKind>('door')
+  /**
+   * Whether the 3D view uses a perspective camera.
+   *
+   * Off gives a flat, architectural projection - parallel lines stay parallel,
+   * so two desks the same size measure the same on screen wherever they are in
+   * the room. On is how the room will look to somebody standing in it. Both are
+   * right for different questions, which is why it is a switch and not a
+   * decision made for everybody.
+   */
+  const [perspective, setPerspective] = useState(true)
   const shapeBeforeDraw = useRef<RoomGeometry | null>(null)
+  /** The outline as it was before the shape gesture in progress - see applyShape. */
+  const shapeBeforeEdit = useRef<RoomGeometry | null>(null)
   const idCounter = useRef(0)
   const stagedProductRef = useRef(false)
+  /**
+   * Product ids already asked about, whatever came back.
+   *
+   * Without it, a product that no longer answers - deleted from the catalogue,
+   * hidden, or simply gone - is asked for again on every render for ever: the
+   * effect below keys on `products`, and every reply replaces that object even
+   * when it carries nothing. A saved plan holding one retired desk quietly
+   * turned into an unbounded stream of requests.
+   */
+  const askedFor = useRef(new Set<string>())
+  /** Ways to photograph the two views, handed up by the views themselves. */
+  const capturePlan = useRef<(() => string | null) | null>(null)
+  const captureView = useRef<(() => string | null) | null>(null)
+  /**
+   * Whether the 3D view is still assembling itself.
+   *
+   * In a ref rather than in state because the only reader is the export, which
+   * polls from inside an async callback - and a callback reading state reads
+   * whatever it was when the callback was made, which for a thing being waited
+   * on is always "still busy".
+   */
+  const viewBusy = useRef(true)
 
   const nextId = useCallback(() => {
     idCounter.current += 1
@@ -168,7 +247,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     if (!response.ok) return []
     const data = (await response.json()) as {
       items: Array<ProductInfo & { id: string }>
-      models: Array<{ productId: string; url: string; cacheKey: string; format: string }>
+      models: Array<PlannerModel & { productId: string }>
     }
     setProducts((current) => {
       const next = { ...current }
@@ -184,14 +263,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
   }, [])
 
   useEffect(() => {
-    const missing = productIds.filter((id) => !products[id])
+    const missing = productIds.filter((id) => !products[id] && !askedFor.current.has(id))
     if (missing.length === 0) return
+    for (const id of missing) askedFor.current.add(id)
     void (async () => {
       try {
         await fetchProducts(missing)
       } catch {
         // The plan still draws: sizes come off the items themselves and the
-        // models simply do not appear. Nothing here is worth an error message.
+        // models simply do not appear. Nothing here is worth an error message -
+        // but a request that failed on the network deserves another go the next
+        // time the plan changes, so those ids come back out of the set.
+        for (const id of missing) askedFor.current.delete(id)
       }
     })()
   }, [productIds, products, fetchProducts])
@@ -257,7 +340,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   // ---- derived ----------------------------------------------------------
 
-  const clashes = useMemo(() => findClashes(state.items), [state.items])
+  // What the catalogue knows about the space under each product's top. Without
+  // it the clash warning cannot tell a chair pushed under a desk - which is the
+  // arrangement people are aiming for - from two desks in the same square metre.
+  const underTop = useMemo(() => {
+    const out: Record<string, { heightMm: number | null; widthMm: number | null }> = {}
+    for (const [id, info] of Object.entries(products)) {
+      out[id] = { heightMm: info.underTopHeightMm, widthMm: info.underTopWidthMm }
+    }
+    return out
+  }, [products])
+
+  const clashes = useMemo(() => findClashes(state.items, underTop), [state.items, underTop])
   const labels = useMemo(() => {
     const out: Record<string, string> = {}
     for (const [id, info] of Object.entries(products)) out[id] = info.name
@@ -279,8 +373,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
         productId,
         plainUrl: model.cacheKey,
         format: model.format as ResolvedModel['format'],
-        yawOffsetDeg: 0,
-        noDecimation: false,
+        yawOffsetDeg: model.yawOffsetDeg,
+        noDecimation: model.noDecimation,
       })
     }
     return buildScene(state.geometry, toPlanItems(state), snapshot, resolved)
@@ -346,11 +440,22 @@ export function SpacePlanner(props: SpacePlannerProps) {
     [],
   )
 
-  const savePlan = useCallback(async () => {
+  /**
+   * Save the room and the layout, and answer with the plan's id.
+   *
+   * The id matters to more than the save button now: anything that has to happen
+   * server-side against this plan - the PDF, a quote, a picture - needs the plan
+   * to exist first, and needs to know what it was called when it did.
+   *
+   * `quiet` suppresses the "saved" note for callers that are saving on the way
+   * to doing something else, where "Saved." is an answer to a question nobody
+   * asked.
+   */
+  const savePlan = useCallback(async (opts: { quiet?: boolean } = {}): Promise<string | null> => {
     if (!props.signedIn) {
       setMessage({ tone: 'info', text: 'Make an account to keep this - it takes a moment and your room comes with you.' })
       window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
-      return
+      return null
     }
     setMessage(null)
     try {
@@ -384,9 +489,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
       setSavedPlanId(planData.plan.id)
       setDirty(false)
       clearScratch()
-      setMessage({ tone: 'info', text: 'Saved. You will find it under "My spaces" in your account.' })
+      if (!opts.quiet) setMessage({ tone: 'info', text: 'Saved. You will find it under "My spaces" in your account.' })
+      return planData.plan.id
     } catch (error) {
       setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not save that just now.' })
+      return null
     }
   }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
 
@@ -404,25 +511,40 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const applyShape = useCallback(
     (vertices: Vertex[], settle: boolean) => {
       if (!settle) {
+        // One undo step per gesture, banked on the first move of it. Nothing
+        // used to bank one at all, so the refusal below reached for an undo
+        // snapshot that either did not exist or belonged to something else
+        // entirely - and a room refused for folding through itself stayed on
+        // screen folded through itself.
+        if (!shapeBeforeEdit.current) {
+          shapeBeforeEdit.current = state.geometry
+          commit()
+        }
         dispatch({ type: 'set-shape', vertices, settle: false })
         return
       }
+
+      // A settle with no gesture behind it is a one-shot edit - a corner added
+      // by double-tapping, or one removed - so its undo step is banked here.
+      const previous = shapeBeforeEdit.current
+      if (!previous) commit()
+      const restore = previous ?? state.geometry
+      shapeBeforeEdit.current = null
+
       const candidate = { ...state.geometry, vertices }
       const issues = validateRoomGeometry(candidate).filter((issue) => issue.code === 'self-intersecting' || issue.code === 'wall-too-short')
       if (issues.length > 0) {
         setMessage({ tone: 'error', text: issues[0]?.message ?? 'That shape will not work.' })
-        const step = undo(history, state)
-        if (step) {
-          setHistory(step.history)
-          dispatch({ type: 'load', snapshot: step.snapshot })
-        }
+        // Put back the outline that was there when the gesture started. The
+        // furniture stays exactly as it is: nothing about it was in question.
+        dispatch({ type: 'load', snapshot: { geometry: restore, items: state.items } })
         return
       }
       setMessage(null)
       dispatch({ type: 'set-shape', vertices, settle: true })
       setDirty(true)
     },
-    [history, state],
+    [commit, state],
   )
 
   const startDrawing = useCallback(() => {
@@ -458,6 +580,80 @@ export function SpacePlanner(props: SpacePlannerProps) {
     if (previous) dispatch({ type: 'set-geometry', geometry: previous })
     setMessage(null)
   }, [])
+
+  /**
+   * Export the plan as a PDF.
+   *
+   * The two drawings are photographed HERE, in the tab, because they are
+   * pictures of what the shopper is actually looking at - their zoom, their
+   * angle. The 3D one needs its view to exist, so if they have never opened
+   * Preview it is opened for them, given a moment to build, photographed and put
+   * back. Fiddly, but the alternative is a tick box that silently produces a
+   * document with a missing picture in it.
+   *
+   * A PDF is made from the SAVED plan, so an unsaved one is saved on the way -
+   * the document has to price the items server-side, and the shop's own prices
+   * are the only ones it is allowed to print.
+   */
+  const exportPdf = useCallback(
+    async (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean }) => {
+      setExportBusy(true)
+      setMessage(null)
+      const stageBefore = stage
+      try {
+        if (!props.signedIn) {
+          setMessage({ tone: 'info', text: 'Make an account to save this as a PDF - it takes a moment.' })
+          window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
+          return
+        }
+
+        // The 3D one first: it has models to fetch and a frame to draw, and
+        // waiting for it is the long part.
+        let viewImage: string | null = null
+        if (options.include3dView) {
+          setStage('orbit')
+          viewImage = await waitForCapture(captureView, () => !viewBusy.current)
+        }
+        let planImage: string | null = null
+        if (options.includePlanView) {
+          setStage('plan')
+          planImage = await waitForCapture(capturePlan)
+        }
+        setStage(stageBefore)
+
+        const planId = await savePlan({ quiet: true })
+        if (!planId) return
+
+        const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/pdf`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...options, planImage, viewImage }),
+        })
+        if (!response.ok) {
+          const data = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(data?.error ?? 'We could not make that PDF just now.')
+        }
+
+        // Handed to the browser as a download rather than opened in a tab: this
+        // is a document somebody wants to keep and send on.
+        const blob = await response.blob()
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `${roomName} - ${planName}.pdf`.replace(/[^A-Za-z0-9 ._-]+/g, '')
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        URL.revokeObjectURL(url)
+        setExporting(false)
+      } catch (error) {
+        setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not make that PDF just now.' })
+      } finally {
+        setExportBusy(false)
+      }
+    },
+    [props.signedIn, props.signInHref, savePlan, stage, roomName, planName],
+  )
 
   const sendToCart = useCallback(() => {
     const counts = new Map<string, number>()
@@ -554,7 +750,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </div>
         <div className="spl-bar-spacer" />
         <div className="spl-tabs" role="tablist" aria-label="View">
-          {(['plan', 'orbit', 'eye'] as StageView[]).map((option) => (
+          {(['plan', 'orbit'] as StageView[]).map((option) => (
             <button
               key={option}
               type="button"
@@ -570,7 +766,34 @@ export function SpacePlanner(props: SpacePlannerProps) {
             </button>
           ))}
         </div>
-        {planMode !== 'furnish' ? (
+        {stage === 'orbit' && (
+          <label className="spl-check spl-bar-check">
+            <input type="checkbox" checked={perspective} onChange={(event) => setPerspective(event.target.checked)} />
+            <span>Perspective</span>
+          </label>
+        )}
+        {planMode === 'openings' ? (
+          <OpeningsBar
+            geometry={state.geometry}
+            kind={openingKind}
+            onKind={setOpeningKind}
+            selection={openingSelection}
+            onPatch={(patch) => {
+              if (!openingSelection) return
+              commit()
+              dispatch({ type: 'set-opening', id: openingSelection, patch })
+              setDirty(true)
+            }}
+            onRemove={() => {
+              if (!openingSelection) return
+              commit()
+              dispatch({ type: 'delete-opening', id: openingSelection })
+              setOpeningSelection(null)
+              setDirty(true)
+            }}
+            onDone={() => { setOpeningSelection(null); setPlanMode('furnish') }}
+          />
+        ) : planMode !== 'furnish' ? (
           <div className="spl-bar-actions">
             <span className="spl-note">{planMode === 'draw' ? 'Drawing the room' : 'Changing the shape'}</span>
             {planMode === 'draw' ? (
@@ -597,7 +820,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
             Room
           </button>
           <button type="button" className="spl-btn spl-secondary" onClick={() => setStartAgain(true)}>
-            Start the room again
+            Start again
           </button>
           <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(undo(history, state))} disabled={history.past.length === 0}>
             Undo
@@ -605,8 +828,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
           <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(redo(history, state))} disabled={history.future.length === 0}>
             Redo
           </button>
-          <button type="button" className="spl-btn spl-secondary" onClick={() => window.print()}>
-            Print
+          <button type="button" className="spl-btn spl-secondary" onClick={() => setExporting(true)}>
+            Export PDF
           </button>
           <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
             Add to basket
@@ -652,14 +875,35 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 if (ids.length > 0) setTab('selected')
               }}
               onDragItems={(ids, dx, dy, snap) => dispatch({ type: 'move-items', ids, dx, dy, snap })}
-              onDragEnd={commit}
+              onRotateItems={(ids, deltaDeg, snap) => dispatch({ type: 'rotate-items', ids, deltaDeg, snap })}
+              onDragStart={commit}
+              onDragEnd={() => setDirty(true)}
               onWallClick={(wallIndex, currentLengthMm) => setWallEdit({ index: wallIndex, lengthMm: currentLengthMm })}
               onShape={applyShape}
               onDrawDone={finishDrawing}
               onDrawCancel={cancelDrawing}
+              openingSelection={openingSelection}
+              openingKind={openingKind}
+              onSelectOpening={setOpeningSelection}
+              onAddOpening={(wallIndex, offsetMm) => {
+                const id = nextId()
+                dispatch({ type: 'add-opening', id, kind: openingKind, wallIndex, offsetMm })
+                setOpeningSelection(id)
+                setDirty(true)
+              }}
+              onMoveOpening={(id, offsetMm) => dispatch({ type: 'set-opening', id, patch: { offsetMm } })}
+              registerCapture={(capture) => { capturePlan.current = capture }}
             />
           ) : (
-            <View3d description={description} models={models} options={prepareOptions} view={stage === 'eye' ? 'eye' : 'orbit'} />
+            <View3d
+              description={description}
+              models={models}
+              options={prepareOptions}
+              view="orbit"
+              perspective={perspective}
+              registerCapture={(capture) => { captureView.current = capture }}
+              onBusyChange={(busy) => { viewBusy.current = busy }}
+            />
           )}
 
           {wallEdit && (
@@ -675,12 +919,22 @@ export function SpacePlanner(props: SpacePlannerProps) {
             />
           )}
 
+          {exporting && (
+            <ExportDialog
+              busy={exportBusy}
+              signedIn={props.signedIn}
+              onCancel={() => setExporting(false)}
+              onExport={(options) => void exportPdf(options)}
+            />
+          )}
+
           {startAgain && (
             <StartAgainDialog
-              itemCount={placed.length}
+              itemCount={state.items.length}
               onCancel={() => setStartAgain(false)}
-              onConfirm={() => {
+              onConfirm={(clearItems) => {
                 commit()
+                if (clearItems) dispatch({ type: 'delete-items', ids: state.items.map((item) => item.id) })
                 setStartAgain(false)
                 setPlanMode('furnish')
                 setStage('plan')
@@ -703,6 +957,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 setRoomEdit(false)
                 setStage('plan')
                 setPlanMode('shape')
+              }}
+              onEditOpenings={() => {
+                setRoomEdit(false)
+                setStage('plan')
+                setOpeningSelection(null)
+                setPlanMode('openings')
               }}
               onDraw={startDrawing}
             />
@@ -750,6 +1010,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                   state={state}
                   products={products}
                   onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
+                  onRotate={(ids, deltaDeg) => { commit(); dispatch({ type: 'rotate-items', ids, deltaDeg, snap: false }) }}
                   onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
                   onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
                   onArray={(id, count, spacing) => {
@@ -827,25 +1088,195 @@ function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onC
 }
 
 /**
- * Starting the room again.
+ * What goes in the PDF.
  *
- * Confirmed, and the confirmation says what survives: the room goes, the
- * furniture does not. Somebody who has spent twenty minutes choosing twelve
- * desks needs to know that before they press it, not after.
+ * Three ticks, because the document is for three different audiences and nobody
+ * wants all of it every time: the flat plan is what a fitter measures off, the
+ * 3D view is what convinces whoever signs the order, and the quote page is what
+ * goes to whoever pays. Defaulting to the plan and the item list and letting the
+ * shopper add the rest is the honest arrangement - the picture is the slow part,
+ * and making everybody wait for one they did not want is how a button gets a
+ * reputation.
  */
-function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onConfirm: () => void }) {
+function ExportDialog(props: {
+  busy: boolean
+  signedIn: boolean
+  onCancel: () => void
+  onExport: (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean }) => void
+}) {
+  const ids = useId()
+  const [includePlanView, setIncludePlanView] = useState(true)
+  const [include3dView, setInclude3dView] = useState(false)
+  const [includeQuote, setIncludeQuote] = useState(false)
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !props.busy) props.onCancel() }}>
+      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Export as a PDF">
+        <h2>Save this as a PDF</h2>
+        <p className="spl-note">The room&apos;s measurements and everything in it, priced, are always included.</p>
+
+        <label className="spl-check" htmlFor={`${ids}-plan`}>
+          <input id={`${ids}-plan`} type="checkbox" checked={includePlanView} onChange={(event) => setIncludePlanView(event.target.checked)} />
+          <span>The flat plan, as you have it on screen</span>
+        </label>
+        <label className="spl-check" htmlFor={`${ids}-3d`}>
+          <input id={`${ids}-3d`} type="checkbox" checked={include3dView} onChange={(event) => setInclude3dView(event.target.checked)} />
+          <span>The 3D view - takes a few seconds longer</span>
+        </label>
+        <label className="spl-check" htmlFor={`${ids}-quote`}>
+          <input id={`${ids}-quote`} type="checkbox" checked={includeQuote} onChange={(event) => setIncludeQuote(event.target.checked)} />
+          <span>A quote page, on our usual quote wording and terms</span>
+        </label>
+
+        {!props.signedIn && (
+          <p className="spl-note">You will be asked to sign in first - the PDF is made from your saved plan.</p>
+        )}
+
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onCancel} disabled={props.busy}>Cancel</button>
+          <button
+            type="button"
+            className="spl-btn spl-btn-primary"
+            disabled={props.busy}
+            onClick={() => props.onExport({ includePlanView, include3dView, includeQuote })}
+          >
+            {props.busy ? 'Making it…' : 'Make the PDF'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The doors-and-windows toolbar.
+ *
+ * In the top bar rather than in a dialog, because putting a door in is a
+ * sequence - tap a wall, nudge it along, get the width right, then the next one -
+ * and a dialog between each step turns four doors into twelve interruptions.
+ *
+ * The measurements are the ordinary ones on a set of plans: how wide, how tall,
+ * and how far off the floor. A door's sill is nought and stays out of the way
+ * until somebody puts a window in.
+ */
+function OpeningsBar(props: {
+  geometry: RoomGeometry
+  kind: OpeningKind
+  onKind: (kind: OpeningKind) => void
+  selection: string | null
+  onPatch: (patch: { widthMm?: number; heightMm?: number; sillMm?: number; kind?: OpeningKind }) => void
+  onRemove: () => void
+  onDone: () => void
+}) {
+  const selected = props.geometry.openings.find((opening) => opening.id === props.selection) ?? null
+  const units = props.geometry.units
+
+  return (
+    <div className="spl-bar-actions">
+      {selected ? (
+        <>
+          <select
+            className="spl-select spl-select-sm"
+            aria-label="What this is"
+            value={selected.kind}
+            onChange={(event) => props.onPatch({ kind: event.target.value as OpeningKind })}
+          >
+            <option value="door">Door</option>
+            <option value="window">Window</option>
+            <option value="opening">Opening</option>
+          </select>
+          <LengthField label="Wide" mm={selected.widthMm} units={units} onChange={(mm) => props.onPatch({ widthMm: mm })} />
+          <LengthField label="Tall" mm={selected.heightMm} units={units} onChange={(mm) => props.onPatch({ heightMm: mm })} />
+          {selected.kind !== 'door' && (
+            <LengthField label="Off the floor" mm={selected.sillMm} units={units} onChange={(mm) => props.onPatch({ sillMm: mm })} />
+          )}
+          <button type="button" className="spl-btn spl-btn-danger" onClick={props.onRemove}>Remove</button>
+        </>
+      ) : (
+        <>
+          <span className="spl-note">Adding:</span>
+          <select
+            className="spl-select spl-select-sm"
+            aria-label="What a tap on a wall adds"
+            value={props.kind}
+            onChange={(event) => props.onKind(event.target.value as OpeningKind)}
+          >
+            <option value="door">Doors</option>
+            <option value="window">Windows</option>
+            <option value="opening">Openings</option>
+          </select>
+        </>
+      )}
+      <button type="button" className="spl-btn spl-btn-primary" onClick={props.onDone}>Done</button>
+    </div>
+  )
+}
+
+/**
+ * A length in whatever units the room is in, typed rather than spun.
+ *
+ * Held as text while it is being edited, so a half-typed "1" is not read as a
+ * one-millimetre window and clamped to the minimum before the second digit
+ * arrives.
+ */
+function LengthField(props: { label: string; mm: number; units: RoomGeometry['units']; onChange: (mm: number) => void }) {
+  const id = useId()
+  const [text, setText] = useState(() => formatLength(props.mm, props.units))
+  const [editing, setEditing] = useState(false)
+
+  return (
+    <div className="spl-field spl-field-inline">
+      <label htmlFor={id}>{props.label}</label>
+      <input
+        id={id}
+        className="spl-input spl-input-sm"
+        value={editing ? text : formatLength(props.mm, props.units)}
+        onFocus={() => { setText(formatLength(props.mm, props.units)); setEditing(true) }}
+        onChange={(event) => setText(event.target.value)}
+        onBlur={() => {
+          setEditing(false)
+          const mm = parseLengthMm(text, props.units === 'imperial' ? 'in' : 'mm')
+          if (mm !== null && mm > 0) props.onChange(mm)
+        }}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
+      />
+    </div>
+  )
+}
+
+/**
+ * Starting again.
+ *
+ * Confirmed, and the confirmation says what survives: by default the room goes
+ * and the furniture does not. Somebody who has spent twenty minutes choosing
+ * twelve desks needs to know that before they press it, not after - and somebody
+ * starting a genuinely different job needs the one tick that clears the lot,
+ * rather than removing twelve things one at a time.
+ */
+function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onConfirm: (clearItems: boolean) => void }) {
+  const fieldId = useId()
+  const [clearItems, setClearItems] = useState(false)
+
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
-      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Start the room again">
-        <h2>Start the room again?</h2>
+      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Start again">
+        <h2>Start again?</h2>
         <p className="spl-note">
           {props.itemCount === 0
             ? 'You will go back to picking a shape for the room.'
-            : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept and put back in the room afterwards.`}
+            : clearItems
+              ? `You will go back to picking a shape, and ${props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen will be taken out.`
+              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits in the tray for you to drop back in.`}
         </p>
+        {props.itemCount > 0 && (
+          <label className="spl-check" htmlFor={fieldId}>
+            <input id={fieldId} type="checkbox" checked={clearItems} onChange={(event) => setClearItems(event.target.checked)} />
+            <span>Take everything out of the room as well</span>
+          </label>
+        )}
         <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={props.onCancel}>Keep this room</button>
-          <button type="button" className="spl-btn spl-btn-danger" autoFocus onClick={props.onConfirm}>Start again</button>
+          <button type="button" className="spl-btn spl-btn-danger" autoFocus onClick={() => props.onConfirm(clearItems)}>Start again</button>
         </div>
       </div>
     </div>
@@ -858,6 +1289,7 @@ function RoomDialog(props: {
   onCancel: () => void
   onCeiling: (mm: number) => void
   onEditShape: () => void
+  onEditOpenings: () => void
   onDraw: () => void
 }) {
   const fieldId = useId()
@@ -887,11 +1319,15 @@ function RoomDialog(props: {
         </p>
         <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={props.onEditShape}>Change the shape</button>
+          <button type="button" className="spl-btn" onClick={props.onEditOpenings}>
+            Doors &amp; windows{props.geometry.openings.length > 0 ? ` (${props.geometry.openings.length})` : ''}
+          </button>
           <button type="button" className="spl-btn" onClick={props.onDraw}>Draw a new one</button>
         </div>
         <p className="spl-note">
           Changing the shape lets you drag the corners about and add new ones, so an L-shape, a bay or a return is a
-          couple of taps rather than a compromise.
+          couple of taps rather than a compromise. Doors and windows go on the walls themselves - worth putting in
+          before you arrange anything, since a desk in front of a doorway is the whole reason for drawing the room.
         </p>
         <div className="spl-field">
           <label htmlFor={fieldId}>Ceiling height</label>
@@ -1059,6 +1495,7 @@ function SelectedPanel(props: {
   state: PlannerState
   products: Record<string, ProductInfo>
   onPatch: (id: string, patch: Partial<PlanItem>) => void
+  onRotate: (ids: string[], deltaDeg: number) => void
   onDelete: (ids: string[]) => void
   onDuplicate: (ids: string[]) => void
   onArray: (id: string, count: number, spacingMm: number) => void
@@ -1092,7 +1529,9 @@ function SelectedPanel(props: {
       )}
 
       <div className="spl-buttons">
-        <button type="button" className="spl-btn" onClick={() => props.onPatch(first.id, { yaw: Math.round(first.yaw) + 90 })}>Turn 90°</button>
+        {/* Through the rotate action rather than as a field edit, so whatever is
+            mounted on it or tucked under it comes round with it. */}
+        <button type="button" className="spl-btn" onClick={() => props.onRotate([first.id], 90)}>Turn 90°</button>
         <button type="button" className="spl-btn" onClick={() => props.onDuplicate(props.state.selection)}>Duplicate</button>
         <button type="button" className="spl-btn" onClick={() => props.onArray(first.id, 3, first.widthMm + 100)}>Row of four</button>
         <button type="button" className="spl-btn spl-btn-danger" onClick={() => props.onDelete(props.state.selection)}>Remove</button>

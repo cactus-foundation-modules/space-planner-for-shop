@@ -77,6 +77,53 @@ export async function saveDimensions(entry: SplDimensions): Promise<void> {
 }
 
 /**
+ * The same write, for a set.
+ *
+ * One statement rather than one per product, because the callers are the ones
+ * that hurt: a browse page resolves 24, a plan load resolves everything in the
+ * room, and the nightly sweep resolves up to five hundred. Against a pooled
+ * connection each of those was a separate round trip - four of them, on
+ * PgBouncer - for a row of six integers.
+ *
+ * Chunked, because a parameterised statement has a ceiling on how many
+ * placeholders it may carry and eleven per row reaches it sooner than anybody
+ * expects.
+ */
+export async function saveDimensionsMany(entries: SplDimensions[]): Promise<void> {
+  const CHUNK = 200
+  for (let start = 0; start < entries.length; start += CHUNK) {
+    const chunk = entries.slice(start, start + CHUNK)
+    if (chunk.length === 0) continue
+    const values = Prisma.join(
+      chunk.map(
+        (entry) => Prisma.sql`(
+          ${entry.productId}, ${entry.widthMm}, ${entry.depthMm}, ${entry.heightMm}, ${entry.source}, ${entry.parsedFrom},
+          ${entry.conflict}, ${entry.conflictNote}, ${entry.mountType}, ${entry.productUpdatedAt}, false, CURRENT_TIMESTAMP
+        )`,
+      ),
+    )
+    await prisma.$executeRaw`
+      INSERT INTO "spl_dimension_cache" (
+        "product_id", "width_mm", "depth_mm", "height_mm", "source", "parsed_from",
+        "conflict", "conflict_note", "mount_type", "product_updated_at", "stale", "resolved_at"
+      ) VALUES ${values}
+      ON CONFLICT ("product_id") DO UPDATE SET
+        "width_mm" = EXCLUDED."width_mm",
+        "depth_mm" = EXCLUDED."depth_mm",
+        "height_mm" = EXCLUDED."height_mm",
+        "source" = EXCLUDED."source",
+        "parsed_from" = EXCLUDED."parsed_from",
+        "conflict" = EXCLUDED."conflict",
+        "conflict_note" = EXCLUDED."conflict_note",
+        "mount_type" = EXCLUDED."mount_type",
+        "product_updated_at" = EXCLUDED."product_updated_at",
+        "stale" = false,
+        "resolved_at" = CURRENT_TIMESTAMP
+    `
+  }
+}
+
+/**
  * Which of these products have moved on since we last measured them.
  *
  * One query, comparing the product's own stamp with the one banked at resolution

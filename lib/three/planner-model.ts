@@ -69,6 +69,13 @@ export function clearPreparedModels(): void {
 async function build(url: string, format: P3dFormat, options: PrepareOptions): Promise<PreparedModel> {
   const object = await loadModel(url, format)
 
+  // The file's own yaw correction goes on FIRST, and the file's own idea of
+  // where the origin is goes in the bin. Both matter to what is measured next: a
+  // model turned a quarter turn has its width and its depth the other way round,
+  // and a footprint measured before the turn is the wrong way round for ever.
+  object.position.set(0, 0, 0)
+  object.rotation.y = (-options.yawOffsetDeg * Math.PI) / 180
+
   // Measure BEFORE anything is moved, with node world transforms applied.
   // Box3.setFromObject walks the graph and multiplies each geometry by its
   // node's world matrix, which is the whole point: node scales vary wildly
@@ -81,8 +88,11 @@ async function build(url: string, format: P3dFormat, options: PrepareOptions): P
   // Stand it on the floor, centred on its own footprint. Nothing here trusts the
   // file's own idea of where the origin is, because across this catalogue the
   // file's own idea is not consistent.
+  //
+  // The local matrix is translate-then-rotate, so setting the position after the
+  // rotation places the ALREADY-TURNED model - which is what makes measuring it
+  // turned the right thing to have done.
   object.position.set(-centre.x, -box.min.y, -centre.z)
-  object.rotation.y = (-options.yawOffsetDeg * Math.PI) / 180
 
   if (!options.noDecimation) {
     await decimate(object, options.decimationTarget)
@@ -191,13 +201,30 @@ function downscaleTextures(object: Object3D, maxPx: number): void {
         const texture = (material as unknown as Record<string, Texture | null>)[key]
         if (!texture?.image || seen.has(texture)) continue
         seen.add(texture)
-        const image = texture.image as { width?: number; height?: number }
-        if (!image.width || !image.height) continue
-        if (Math.max(image.width, image.height) <= maxPx) continue
-        texture.userData.plannerDownscaleTarget = maxPx
-        // three resamples on upload when the source is larger than the cap and
-        // the renderer's capabilities say so; setting the hint here keeps the
-        // decision in one place rather than scattered through the scene builder.
+        const source = texture.image as CanvasImageSource & { width?: number; height?: number }
+        if (!source.width || !source.height) continue
+        if (Math.max(source.width, source.height) <= maxPx) continue
+
+        // Actually resample it. This used to set a userData hint and trust three
+        // to act on it, which three has never done - so the whole texture budget
+        // was a setting the owner could move with no effect whatsoever, and a
+        // room of twelve models still arrived at the GPU carrying twelve 4K
+        // texture sets.
+        const scale = maxPx / Math.max(source.width, source.height)
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(source.width * scale))
+        canvas.height = Math.max(1, Math.round(source.height * scale))
+        const context = canvas.getContext('2d')
+        if (!context) continue
+        try {
+          context.drawImage(source, 0, 0, canvas.width, canvas.height)
+        } catch {
+          // A source the canvas will not take (a compressed texture, a tainted
+          // image). Full detail is a slower planner, not a broken one.
+          continue
+        }
+        texture.image = canvas
+        texture.needsUpdate = true
       }
     }
   })

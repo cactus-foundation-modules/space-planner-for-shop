@@ -1,9 +1,9 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { boundingBox, itemCorners, openingSpan, pointInPolygon, walls } from '@/modules/space-planner-for-shop/lib/geometry'
+import { boundingBox, distanceToWallAlong, itemCorners, offsetAlongWall, openingSpan, pointInPolygon, rotatePoint, walls } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength } from '@/modules/space-planner-for-shop/lib/units'
-import type { PlanItem, RoomGeometry, Vertex } from '@/modules/space-planner-for-shop/lib/types'
+import type { OpeningKind, PlanItem, RoomGeometry, Vertex, WallOpening } from '@/modules/space-planner-for-shop/lib/types'
 
 // The top-down plan. This is the front door and the surface everybody touches
 // first, so it gets the polish budget - and it is plain 2D canvas, which means
@@ -25,7 +25,7 @@ import type { PlanItem, RoomGeometry, Vertex } from '@/modules/space-planner-for
 // chimney breasts and returns - so an outline of any number of walls is the
 // point of the tool rather than a refinement of it.
 
-export type PlanMode = 'furnish' | 'shape' | 'draw'
+export type PlanMode = 'furnish' | 'shape' | 'draw' | 'openings'
 
 export type Plan2dProps = {
   geometry: RoomGeometry
@@ -38,6 +38,16 @@ export type Plan2dProps = {
   mode: PlanMode
   onSelect: (ids: string[]) => void
   onDragItems: (ids: string[], dx: number, dy: number, snap: boolean) => void
+  /** Turning the selected item by its handle. Degrees, relative to where it is now. */
+  onRotateItems: (ids: string[], deltaDeg: number, snap: boolean) => void
+  /**
+   * A gesture is starting.
+   *
+   * This is where the undo step belongs. Banking it on release records the state
+   * the drag PRODUCED, so the first press of undo appeared to do nothing at all
+   * and the second one went back too far.
+   */
+  onDragStart: () => void
   onDragEnd: () => void
   onWallClick: (wallIndex: number, currentLengthMm: number) => void
   /** A new outline. `settle` marks the end of a gesture - see the reducer. */
@@ -46,6 +56,19 @@ export type Plan2dProps = {
   onDrawDone: (vertices: Vertex[]) => void
   onDrawCancel: () => void
   onDropAt?: (x: number, y: number) => void
+
+  // ---- doors and windows -------------------------------------------------
+  /** Which opening is being edited, and what a fresh one would be. */
+  openingSelection?: string | null
+  openingKind?: OpeningKind
+  /** A tap on bare wall in openings mode: put one here, centred on the tap. */
+  onAddOpening?: (wallIndex: number, offsetMm: number) => void
+  onSelectOpening?: (id: string | null) => void
+  /** Sliding one along its own wall. Millimetres from that wall's start. */
+  onMoveOpening?: (id: string, offsetMm: number) => void
+
+  /** Hands the parent a way to photograph the plan, for the PDF export. */
+  registerCapture?: (capture: (() => string | null) | null) => void
 }
 
 type View = { scale: number; offsetX: number; offsetY: number }
@@ -55,6 +78,12 @@ const PADDING = 44
 const WALL_HIT_PX = 18
 /** How near a corner counts as grabbing it, in screen pixels. Generous: fingers. */
 const CORNER_HIT_PX = 16
+/** How far beyond the front edge the turn handle floats, in screen pixels. */
+const ROTATE_HANDLE_PX = 30
+/** How near the turn handle a press has to land. Bigger than a corner: it is smaller. */
+const ROTATE_HIT_PX = 18
+/** What the turn handle rounds to unless the override key is held. */
+const ROTATE_SNAP_DEG = 15
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 6
 /** Everything drawn lands on a 10 mm grid. Nobody measures a room to the millimetre. */
@@ -104,6 +133,10 @@ export function Plan2d(props: Plan2dProps) {
   } | null>(null)
   const pointersRef = useRef(new Map<number, { x: number; y: number }>())
   const pinchRef = useRef<{ distance: number; zoom: number } | null>(null)
+  /** The turn in progress: which item, where it and the pointer started, and how far it has come. */
+  const rotateRef = useRef<{ id: string; startYaw: number; startAngleDeg: number; appliedDeg?: number } | null>(null)
+  /** The door or window being slid along its wall. */
+  const openingDragRef = useRef<{ id: string; wallIndex: number; grabOffsetMm: number } | null>(null)
   /** The corner being edited in shape mode, and the outline being drawn in draw mode. */
   const [corner, setCorner] = useState<number | null>(null)
   const cornerDragRef = useRef<number | null>(null)
@@ -148,6 +181,11 @@ export function Plan2d(props: Plan2dProps) {
   )
 
   useEffect(() => {
+    // Not while a corner is under the pointer. Re-fitting keys on the room, and
+    // dragging a corner changes the room on every pointer event - so the view
+    // recentred, and the canvas was resized (and so cleared) between every pair
+    // of them. The room crawled out from under the cursor as it was dragged.
+    if (cornerDragRef.current !== null) return
     fit(false)
   }, [fit])
 
@@ -214,6 +252,18 @@ export function Plan2d(props: Plan2dProps) {
   const toScreen = useCallback((point: Vertex) => ({ x: point.x * view.scale + view.offsetX, y: point.y * view.scale + view.offsetY }), [view])
   const toPlan = useCallback((x: number, y: number) => ({ x: (x - view.offsetX) / view.scale, y: (y - view.offsetY) / view.scale }), [view])
 
+  /**
+   * The one item a turn handle would belong to.
+   *
+   * One at a time and placed only: a handle on every item in a multi-selection
+   * is six things to press by accident, and a handle on something still in the
+   * tray points at nothing.
+   */
+  const sole =
+    props.mode === 'furnish' && props.selection.length === 1
+      ? props.items.find((item) => item.id === props.selection[0] && !item.staged) ?? null
+      : null
+
   /** Zoom about a fixed screen point, so the thing under the cursor stays under it. */
   const zoomAt = useCallback((factor: number, screenX: number, screenY: number) => {
     const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoomRef.current * factor))
@@ -226,6 +276,38 @@ export function Plan2d(props: Plan2dProps) {
       return { scale, offsetX: screenX - planX * scale, offsetY: screenY - planY * scale }
     })
   }, [])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    // Registered by hand, and NOT passive. React attaches wheel at the root as a
+    // passive listener, so preventDefault from a JSX onWheel handler is ignored
+    // and the page scrolled away underneath the plan while somebody zoomed it.
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      zoomAt(Math.exp(-event.deltaY * 0.0015), event.clientX - rect.left, event.clientY - rect.top)
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [zoomAt])
+
+  useEffect(() => {
+    const register = props.registerCapture
+    if (!register) return
+    // Plain 2D canvas, so what is on screen is what comes out - no re-render
+    // needed, and no context to lose.
+    register(() => {
+      const canvas = canvasRef.current
+      if (!canvas) return null
+      try {
+        return canvas.toDataURL('image/png')
+      } catch {
+        return null
+      }
+    })
+    return () => register(null)
+  }, [props.registerCapture])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -405,9 +487,8 @@ export function Plan2d(props: Plan2dProps) {
 
     // What the selected thing has around it, in numbers. A gap you can see is a
     // guess; a gap with 780 written on it is a decision.
-    const onlySelected = props.selection.length === 1 ? props.items.find((item) => item.id === props.selection[0]) : null
-    if (onlySelected && !onlySelected.staged && props.mode === 'furnish') {
-      drawClearances(context, onlySelected, props.geometry, toScreen, {
+    if (sole) {
+      drawClearances(context, sole, props.geometry, toScreen, {
         accent,
         muted,
         danger,
@@ -415,6 +496,41 @@ export function Plan2d(props: Plan2dProps) {
         warnBelowMm: props.walkwayClearanceMm,
         units: props.geometry.units,
       })
+      drawRotateHandle(context, sole, view.scale, toScreen, { accent, surface })
+    }
+
+    // Doors and windows, while they are the thing being edited. The wall stroke
+    // already breaks around them - that is the plan-reading convention and it
+    // stays - so this adds only what an editor needs: something to grab, and
+    // which one is selected.
+    if (props.mode === 'openings') {
+      for (const opening of props.geometry.openings) {
+        const span = openingSpan(props.geometry, opening)
+        const centre = openingCentre(props.geometry, opening)
+        if (!span || !centre) continue
+        const selected = props.openingSelection === opening.id
+        const from = toScreen(span.start)
+        const to = toScreen(span.end)
+        const at = toScreen(centre)
+
+        context.save()
+        context.strokeStyle = selected ? accent : muted
+        // A window keeps the glazing line convention; a door and a plain gap are
+        // drawn open, because that is what they are.
+        context.lineWidth = opening.kind === 'window' ? 4 : 3
+        context.setLineDash(opening.kind === 'door' ? [5, 4] : [])
+        drawSegment(context, from, to)
+        context.setLineDash([])
+
+        context.beginPath()
+        context.arc(at.x, at.y, 6, 0, Math.PI * 2)
+        context.fillStyle = selected ? accent : surface
+        context.fill()
+        context.lineWidth = 2
+        context.strokeStyle = selected ? accent : ink
+        context.stroke()
+        context.restore()
+      }
     }
 
     // The corners themselves, once somebody is editing the room rather than what
@@ -433,7 +549,7 @@ export function Plan2d(props: Plan2dProps) {
         context.stroke()
       })
     }
-  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, props.mode, corner, draft, hover, view, toScreen])
+  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, props.mode, props.openingSelection, sole, corner, draft, hover, view, toScreen])
 
   const hitTest = useCallback(
     (x: number, y: number): PlanItem | null => {
@@ -495,6 +611,47 @@ export function Plan2d(props: Plan2dProps) {
       return
     }
 
+    if (props.mode === 'openings') {
+      // An existing one first: they sit ON the wall, so a tap near a door is
+      // also a tap near the wall, and grabbing what is already there is what
+      // somebody aiming at it meant.
+      const point = toPlan(x, y)
+      const grabbed = props.geometry.openings.find((opening) => {
+        const centre = openingCentre(props.geometry, opening)
+        if (!centre) return false
+        const at = toScreen(centre)
+        return Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX
+      })
+      if (grabbed) {
+        props.onSelectOpening?.(grabbed.id)
+        const along = offsetAlongWall(props.geometry.vertices, grabbed.wallIndex, point)
+        openingDragRef.current = {
+          id: grabbed.id,
+          wallIndex: grabbed.wallIndex,
+          // Where along the opening it was grabbed, so it does not jump to
+          // centre itself under the finger on the first pixel of the drag.
+          grabOffsetMm: along === null ? grabbed.widthMm / 2 : along - grabbed.offsetMm,
+        }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        props.onDragStart()
+        return
+      }
+
+      const wall = nearestWallWithin(props.geometry, point, WALL_HIT_PX * 2 / view.scale)
+      if (wall) {
+        const along = offsetAlongWall(props.geometry.vertices, wall.index, point)
+        if (along !== null) {
+          props.onDragStart()
+          props.onAddOpening?.(wall.index, along)
+        }
+        return
+      }
+      props.onSelectOpening?.(null)
+      dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
+      event.currentTarget.setPointerCapture(event.pointerId)
+      return
+    }
+
     if (props.mode === 'shape') {
       const index = props.geometry.vertices.findIndex((vertex) => {
         const at = toScreen(vertex)
@@ -517,7 +674,25 @@ export function Plan2d(props: Plan2dProps) {
       const [a, b] = [...pointersRef.current.values()]
       if (a && b) pinchRef.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom: zoomRef.current }
       dragRef.current = null
+      rotateRef.current = null
       return
+    }
+
+    // The turn handle is tested before the furniture, because it floats over the
+    // floor and sometimes over a neighbour: whoever is holding it meant to.
+    if (sole) {
+      const handle = toScreen(rotateHandlePoint(sole, view.scale))
+      if (Math.hypot(handle.x - x, handle.y - y) <= ROTATE_HIT_PX) {
+        const point = toPlan(x, y)
+        rotateRef.current = {
+          id: sole.id,
+          startYaw: sole.yaw,
+          startAngleDeg: (Math.atan2(point.y - sole.y, point.x - sole.x) * 180) / Math.PI,
+        }
+        props.onDragStart()
+        event.currentTarget.setPointerCapture(event.pointerId)
+        return
+      }
     }
 
     const hit = hitTest(x, y)
@@ -531,6 +706,7 @@ export function Plan2d(props: Plan2dProps) {
           : [hit.id]
       props.onSelect(ids)
       dragRef.current = { kind: 'items', ids, startX: x, startY: y, lastX: x, lastY: y, moved: false }
+      props.onDragStart()
     } else {
       dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
     }
@@ -543,6 +719,33 @@ export function Plan2d(props: Plan2dProps) {
 
     if (props.mode === 'draw') {
       setHover(snapDraw(toPlan(x, y), draft[draft.length - 1]))
+      return
+    }
+
+    const sliding = openingDragRef.current
+    if (sliding) {
+      const along = offsetAlongWall(props.geometry.vertices, sliding.wallIndex, toPlan(x, y))
+      if (along !== null) props.onMoveOpening?.(sliding.id, Math.round(along - sliding.grabOffsetMm))
+      return
+    }
+
+    const turning = rotateRef.current
+    if (turning) {
+      const point = toPlan(x, y)
+      const item = props.items.find((candidate) => candidate.id === turning.id)
+      if (!item) return
+      const angle = (Math.atan2(point.y - item.y, point.x - item.x) * 180) / Math.PI
+      const wanted = turning.startYaw + (angle - turning.startAngleDeg)
+      // Holding alt escapes the fifteen-degree steps, the same key that escapes
+      // the wall and furniture snaps.
+      const target = event.altKey ? wanted : Math.round(wanted / ROTATE_SNAP_DEG) * ROTATE_SNAP_DEG
+      // Measured against what this gesture has already applied rather than
+      // against the item's current angle: state arrives a render later than the
+      // pointer does, and a delta taken from a stale angle turns twice.
+      const delta = target - turning.startYaw - (turning.appliedDeg ?? 0)
+      if (Math.abs(delta) < 0.01) return
+      turning.appliedDeg = (turning.appliedDeg ?? 0) + delta
+      props.onRotateItems([turning.id], delta, false)
       return
     }
 
@@ -589,6 +792,21 @@ export function Plan2d(props: Plan2dProps) {
     pointersRef.current.delete(event.pointerId)
     if (pointersRef.current.size < 2) pinchRef.current = null
 
+    if (openingDragRef.current) {
+      openingDragRef.current = null
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      props.onDragEnd()
+      return
+    }
+
+    if (rotateRef.current) {
+      const turned = rotateRef.current.appliedDeg ?? 0
+      rotateRef.current = null
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      if (turned !== 0) props.onDragEnd()
+      return
+    }
+
     if (cornerDragRef.current !== null) {
       cornerDragRef.current = null
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
@@ -632,10 +850,6 @@ export function Plan2d(props: Plan2dProps) {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        onWheel={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect()
-          zoomAt(Math.exp(-event.deltaY * 0.0015), event.clientX - rect.left, event.clientY - rect.top)
-        }}
         onDoubleClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect()
           const point = toPlan(event.clientX - rect.left, event.clientY - rect.top)
@@ -656,6 +870,14 @@ export function Plan2d(props: Plan2dProps) {
         role="application"
         aria-label="Room plan. Every item here is also listed, with its exact position, in the panel beside it."
       />
+      {props.mode === 'openings' && (
+        <div className="spl-stage-bar">
+          <span className="spl-note">
+            Tap a wall to put a {props.openingKind ?? 'door'} in it. Drag one along to move it.
+          </span>
+        </div>
+      )}
+
       {props.mode === 'shape' && (
         <div className="spl-stage-bar">
           <span className="spl-note">Drag a corner. Double-tap a wall to add one, or tap a wall to type its length.</span>
@@ -812,6 +1034,71 @@ function drawSegment(context: CanvasRenderingContext2D, from: { x: number; y: nu
   context.stroke()
 }
 
+/** The middle of an opening, in plan coordinates - what you grab to slide it. */
+function openingCentre(geometry: RoomGeometry, opening: WallOpening): Vertex | null {
+  const span = openingSpan(geometry, opening)
+  if (!span) return null
+  return { x: (span.start.x + span.end.x) / 2, y: (span.start.y + span.end.y) / 2 }
+}
+
+/**
+ * Where the turn handle floats: off the item's front edge, a fixed number of
+ * screen pixels clear of it.
+ *
+ * Fixed in PIXELS rather than in millimetres, so it is the same easy target on a
+ * pedestal as on a boardroom table - a handle sized in room units is either
+ * inside the furniture or halfway across the office.
+ */
+export function rotateHandlePoint(item: Pick<PlanItem, 'x' | 'y' | 'yaw' | 'depthMm'>, scale: number): Vertex {
+  const reach = item.depthMm / 2 + ROTATE_HANDLE_PX / Math.max(scale, 1e-6)
+  const offset = rotatePoint(0, reach, item.yaw)
+  return { x: item.x + offset.x, y: item.y + offset.y }
+}
+
+/**
+ * The turn handle itself.
+ *
+ * Direct manipulation, because rotation was reachable only from the properties
+ * panel and from a keyboard shortcut nobody was ever told about - and an item
+ * you can drag but cannot turn reads as an item that does not turn.
+ */
+function drawRotateHandle(
+  context: CanvasRenderingContext2D,
+  item: PlanItem,
+  scale: number,
+  toScreen: (point: Vertex) => { x: number; y: number },
+  style: { accent: string; surface: string },
+): void {
+  const handle = toScreen(rotateHandlePoint(item, scale))
+  const corners = itemCorners(item)
+  const a = corners[3]
+  const b = corners[2]
+  if (!a || !b) return
+  const front = toScreen({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+
+  context.save()
+  context.strokeStyle = style.accent
+  context.lineWidth = 1.5
+  context.setLineDash([3, 3])
+  drawSegment(context, front, handle)
+  context.setLineDash([])
+
+  context.beginPath()
+  context.arc(handle.x, handle.y, 7, 0, Math.PI * 2)
+  context.fillStyle = style.surface
+  context.fill()
+  context.lineWidth = 2
+  context.stroke()
+
+  // A three-quarter ring inside it, so the handle reads as "turn" rather than as
+  // one more corner to drag.
+  context.beginPath()
+  context.arc(handle.x, handle.y, 3.5, 0.6, Math.PI * 1.7)
+  context.lineWidth = 1.5
+  context.stroke()
+  context.restore()
+}
+
 /** A small notch on the item's front edge, so a desk turned round looks turned round. */
 function drawFacingMark(
   context: CanvasRenderingContext2D,
@@ -863,15 +1150,33 @@ function drawClearances(
   style: ClearanceStyle,
 ): void {
   const corners = itemCorners(item)
-  const xs = corners.map((corner) => corner.x)
-  const ys = corners.map((corner) => corner.y)
-  const room = boundingBox(geometry.vertices)
-  const gaps: Array<{ from: Vertex; to: Vertex; mm: number }> = [
-    { from: { x: room.minX, y: item.y }, to: { x: Math.min(...xs), y: item.y }, mm: Math.min(...xs) - room.minX },
-    { from: { x: Math.max(...xs), y: item.y }, to: { x: room.maxX, y: item.y }, mm: room.maxX - Math.max(...xs) },
-    { from: { x: item.x, y: room.minY }, to: { x: item.x, y: Math.min(...ys) }, mm: Math.min(...ys) - room.minY },
-    { from: { x: item.x, y: Math.max(...ys) }, to: { x: item.x, y: room.maxY }, mm: room.maxY - Math.max(...ys) },
-  ]
+
+  // One gap per face, cast straight out from the middle of that face to
+  // whichever wall it actually reaches.
+  //
+  // This used to measure to the room's BOUNDING BOX along the screen axes, which
+  // is wrong twice over: in an L-shaped room the box includes the corner that
+  // was cut out, so the figure was the distance to a wall that is not there; and
+  // a turned desk was measured across its own diagonal. Neither is a number
+  // anybody should be arranging an office by.
+  const gaps: Array<{ from: Vertex; to: Vertex; mm: number }> = []
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i]
+    const b = corners[(i + 1) % corners.length]
+    if (!a || !b) continue
+    const from = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    // Straight out of the item: for a rectangle, away from its own centre.
+    const outX = from.x - item.x
+    const outY = from.y - item.y
+    const reach = distanceToWallAlong(from, outX, outY, geometry.vertices)
+    if (reach === null) continue
+    const scale = Math.hypot(outX, outY) || 1
+    gaps.push({
+      from,
+      to: { x: from.x + (outX / scale) * reach, y: from.y + (outY / scale) * reach },
+      mm: reach,
+    })
+  }
 
   context.save()
   context.font = '500 11px system-ui, sans-serif'

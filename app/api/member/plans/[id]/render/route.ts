@@ -3,7 +3,7 @@ import { getSiteUrl } from '@/lib/config/env'
 import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
 import { getPlanForMember, listPlansForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
-import { createRenderJob, getLiveRenderForPlan, listRendersForPlan, markRenderRunning } from '@/modules/space-planner-for-shop/lib/db/jobs'
+import { createRenderJob, finishRenderJob, getLiveRenderForPlan, listRendersForPlan, markRenderRunning } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
@@ -86,6 +86,11 @@ export async function POST(_request: NextRequest, context: { params: Promise<{ i
   // Fire the worker and do not wait for the picture. It calls back.
   const dispatched = await dispatchToWorker(job.id, scene, models)
   if (!dispatched) {
+    // Close the job before answering. It was created a moment ago and nothing is
+    // ever going to finish it, and a job left sitting at QUEUED is a live job -
+    // so "one live job per plan" would lock this plan out of pictures entirely
+    // until the nightly sweep aged it out, up to a day later.
+    await finishRenderJob(job.id, { error: 'The picture service did not answer.' })
     return NextResponse.json({ error: 'The picture service did not answer. Please try again shortly.' }, { status: 502 })
   }
   await markRenderRunning(job.id)

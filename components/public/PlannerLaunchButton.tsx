@@ -32,9 +32,13 @@ export function PlannerLaunchButton(props: PlannerLaunchButtonProps) {
 
   useEffect(() => {
     if (!props.hideWhenCartEmpty) return
-    // Subscribed rather than read: the state settles from the store's own
-    // notification, so nothing is set synchronously out of the effect.
-    return watchCart(() => setEmpty(readCart().length === 0))
+    // Read once AND subscribed. Subscribing alone does not fire, so the state
+    // only ever settled when the basket next changed - which on the one page
+    // this matters on, an empty basket, it never does. The button sat there
+    // offering to plan a room around nothing.
+    const check = () => setEmpty(readCart().length === 0)
+    check()
+    return watchCart(check)
   }, [props.hideWhenCartEmpty])
 
   if (props.hideWhenCartEmpty && empty && !props.preview) return null

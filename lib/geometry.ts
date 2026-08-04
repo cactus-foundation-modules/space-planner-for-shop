@@ -1,4 +1,4 @@
-import type { PlanItem, RoomGeometry, Vertex, WallOpening } from '@/modules/space-planner-for-shop/lib/types'
+import type { OpeningKind, PlanItem, RoomGeometry, Vertex, WallOpening } from '@/modules/space-planner-for-shop/lib/types'
 
 // Pure floor-plan maths. No three.js, no DOM, no database - the 2D editor, the
 // 3D scene, the server-side validator and the render worker all reach for the
@@ -298,6 +298,55 @@ export function validateRoomGeometry(geometry: RoomGeometry): GeometryIssue[] {
   return issues
 }
 
+/**
+ * How far along a wall a point falls, in millimetres from that wall's start.
+ *
+ * Clamped to the wall, so a pointer that has wandered off the end of it gives
+ * the end rather than a number off the wall entirely - which is what somebody
+ * dragging a door towards a corner means.
+ */
+export function offsetAlongWall(vertices: Vertex[], wallIndex: number, point: Vertex): number | null {
+  const wall = walls(vertices)[wallIndex]
+  if (!wall || wall.lengthMm < EPSILON) return null
+  const dx = wall.b.x - wall.a.x
+  const dy = wall.b.y - wall.a.y
+  const t = ((point.x - wall.a.x) * dx + (point.y - wall.a.y) * dy) / (dx * dx + dy * dy)
+  return Math.max(0, Math.min(1, t)) * wall.lengthMm
+}
+
+/**
+ * An opening put back where it fits.
+ *
+ * Doors and windows are held as a distance along a wall, so anything that
+ * changes the wall - typing a length, dragging a corner - can leave one hanging
+ * off the end of it. Everything that writes an opening comes through here, and
+ * null means the wall is too short to hold it at all.
+ */
+export function fitOpeningToWall(geometry: RoomGeometry, opening: WallOpening): WallOpening | null {
+  const wall = walls(geometry.vertices)[opening.wallIndex]
+  if (!wall) return null
+  const widthMm = Math.max(MIN_OPENING_MM, Math.min(opening.widthMm, wall.lengthMm))
+  if (wall.lengthMm < MIN_OPENING_MM) return null
+  const heightMm = Math.max(MIN_OPENING_MM, Math.min(opening.heightMm, geometry.ceilingMm - opening.sillMm))
+  return {
+    ...opening,
+    widthMm,
+    heightMm,
+    offsetMm: Math.round(Math.max(0, Math.min(opening.offsetMm, wall.lengthMm - widthMm))),
+    sillMm: Math.max(0, Math.min(opening.sillMm, Math.max(0, geometry.ceilingMm - MIN_OPENING_MM))),
+  }
+}
+
+/** Nothing narrower or shorter than this is a door, a window or anything else. */
+export const MIN_OPENING_MM = 100
+
+/** What a new one starts as. Ordinary UK sizes, so most need no adjusting at all. */
+export const OPENING_DEFAULTS: Record<OpeningKind, { widthMm: number; heightMm: number; sillMm: number }> = {
+  door: { widthMm: 900, heightMm: 2040, sillMm: 0 },
+  window: { widthMm: 1200, heightMm: 1200, sillMm: 900 },
+  opening: { widthMm: 1000, heightMm: 2100, sillMm: 0 },
+}
+
 /** Where an opening sits in plan coordinates, for drawing and for cutting the wall. */
 export function openingSpan(geometry: RoomGeometry, opening: WallOpening): { start: Vertex; end: Vertex } | null {
   const wall = walls(geometry.vertices)[opening.wallIndex]
@@ -394,6 +443,65 @@ export function itemsClash(a: PlanItem, b: PlanItem, toleranceMm = 10): boolean 
   return heightBandsClash(a, b, toleranceMm)
 }
 
+/** What the catalogue knows about the space under a product's top, per product. */
+export type UnderTopSizes = Record<string, { heightMm: number | null; widthMm: number | null } | undefined>
+
+/** A worktop is this tall, give or take. Below it is a shelf; above it is a cupboard. */
+const WORKTOP_MIN_MM = 600
+const WORKTOP_MAX_MM = 1100
+/** And this wide, at least. Narrower than this and nothing is going under it. */
+const WORKTOP_MIN_WIDTH_MM = 800
+/** Allowance for the thickness of the top itself when nobody has published one. */
+const WORKTOP_THICKNESS_MM = 40
+
+/**
+ * Whether this item is the sort of thing other things go underneath.
+ *
+ * Answered from the catalogue where the catalogue has an answer - "Height Under
+ * Top" is published on desks and worktops and on nothing else, which makes its
+ * mere presence the statement. Where it is missing, the shape stands in for it:
+ * desk-height, desk-width, and a top thick enough to take off the clearance.
+ */
+export function spaceUnderneathMm(item: PlanItem, underTop: UnderTopSizes = {}): number | null {
+  const published = underTop[item.productId]?.heightMm
+  if (published && published > 0) return published
+  if (item.heightMm < WORKTOP_MIN_MM || item.heightMm > WORKTOP_MAX_MM) return null
+  if (item.widthMm < WORKTOP_MIN_WIDTH_MM) return null
+  return item.heightMm - WORKTOP_THICKNESS_MM
+}
+
+/**
+ * Whether the first item is tucked under the second rather than fighting it.
+ *
+ * This is the difference between a planner people trust and one they stop
+ * reading. A chair pushed under a desk overlaps it in plan AND in height - the
+ * backrest stands well above the worktop - so the height-band test calls it a
+ * collision and paints both of them red, which is exactly the arrangement the
+ * shopper was aiming for. Two desks in the same square metre have to stay red,
+ * though, so what separates them is whether the thing would actually GO under:
+ * narrow enough for the published clearance width, and no deeper than the top
+ * it is going beneath.
+ */
+export function tucksUnder(child: PlanItem, parent: PlanItem, underTop: UnderTopSizes = {}): boolean {
+  const clearance = spaceUnderneathMm(parent, underTop)
+  if (clearance === null) return false
+  // Standing on the floor of the space underneath, not hung across the top of it.
+  if (child.z >= clearance) return false
+  const clearWidth = underTop[parent.productId]?.widthMm ?? parent.widthMm - 100
+  return child.widthMm <= clearWidth && child.depthMm <= parent.depthMm
+}
+
+/**
+ * Whether two items genuinely fight, as against sharing floor space on purpose.
+ *
+ * The one the warning colours should use. `itemsClash` is the raw geometry and
+ * knows nothing about furniture.
+ */
+export function itemsFight(a: PlanItem, b: PlanItem, underTop: UnderTopSizes = {}, toleranceMm = 10): boolean {
+  if (!itemsClash(a, b, toleranceMm)) return false
+  return !tucksUnder(a, b, underTop) && !tucksUnder(b, a, underTop)
+}
+
 /** True when every corner of the item's footprint is inside the room outline. */
 export function itemInsideRoom(item: PlanItem, geometry: RoomGeometry): boolean {
   return itemCorners(item).every((corner) => pointInPolygon(corner, geometry.vertices))
@@ -478,6 +586,37 @@ export function displacedItems(items: PlanItem[], geometry: RoomGeometry): PlanI
   })
 }
 
+/**
+ * How far it is to a wall, going that way.
+ *
+ * Cast rather than measured to a bounding box, because a bounding box is not the
+ * room: in an L-shape the box includes the bit that was cut out, so the gap
+ * shown beside a desk in the short leg was the distance to a wall that is not
+ * there. Returns null when the ray leaves through no wall at all, which for a
+ * point inside a closed outline means the numbers have gone wrong somewhere.
+ */
+export function distanceToWallAlong(origin: Vertex, dirX: number, dirY: number, vertices: Vertex[]): number | null {
+  const length = Math.hypot(dirX, dirY)
+  if (length < EPSILON) return null
+  const dx = dirX / length
+  const dy = dirY / length
+
+  let nearest: number | null = null
+  for (const wall of walls(vertices)) {
+    const ex = wall.b.x - wall.a.x
+    const ey = wall.b.y - wall.a.y
+    const det = ex * dy - dx * ey
+    if (Math.abs(det) < EPSILON) continue // parallel: it never crosses this one
+    const ax = wall.a.x - origin.x
+    const ay = wall.a.y - origin.y
+    const t = (ex * ay - ax * ey) / det
+    const u = (dx * ay - ax * dy) / det
+    if (t < 0 || u < -EPSILON || u > 1 + EPSILON) continue
+    if (nearest === null || t < nearest) nearest = t
+  }
+  return nearest
+}
+
 /** Shortest distance from a point to any wall, and which wall it was. */
 export function nearestWall(point: Vertex, vertices: Vertex[]): { wallIndex: number; distanceMm: number } | null {
   const wallList = walls(vertices)
@@ -530,6 +669,153 @@ export function snapToWall(item: PlanItem, geometry: RoomGeometry, toleranceMm =
 export function snapYaw(yaw: number, stepDeg = 15): number {
   if (stepDeg <= 0) return yaw
   return Math.round(yaw / stepDeg) * stepDeg
+}
+
+// ---------------------------------------------------------------------------
+// Snapping to the furniture already in the room
+// ---------------------------------------------------------------------------
+
+/**
+ * How near two items have to be, in millimetres, before they click together.
+ *
+ * Generous on purpose. The whole job here is to make "two desks in a bank" a
+ * thing somebody achieves with a mouse rather than a thing they achieve by
+ * typing coordinates into the panel, and a tolerance that only works at maximum
+ * zoom achieves neither.
+ */
+export const ITEM_SNAP_MM = 150
+
+/** How far off square a neighbour may be and still count as square-on. */
+const SQUARE_TOLERANCE_DEG = 3
+
+type LocalBox = { minX: number; maxX: number; minY: number; maxY: number }
+
+function normaliseDegrees(degrees: number): number {
+  return ((degrees % 360) + 360) % 360
+}
+
+/**
+ * Another item's footprint, expressed in the subject's own frame.
+ *
+ * Null when the neighbour is not square-on to the subject. Two rectangles at
+ * seventeen degrees to each other have no "flush" position worth guessing at,
+ * and a snap that fires there moves furniture somewhere nobody asked for -
+ * which is far worse than no snap at all.
+ */
+function neighbourBox(subject: Pick<PlanItem, 'x' | 'y' | 'yaw'>, other: Pick<PlanItem, 'x' | 'y' | 'yaw' | 'widthMm' | 'depthMm'>): LocalBox | null {
+  const turn = normaliseDegrees(other.yaw - subject.yaw)
+  const quarter = Math.round(turn / 90) % 4
+  if (Math.abs(turn - quarter * 90) > SQUARE_TOLERANCE_DEG && Math.abs(turn - 360) > SQUARE_TOLERANCE_DEG) return null
+
+  // A quarter or three-quarter turn swaps which way round the neighbour's own
+  // width and depth read in this frame.
+  const swapped = quarter === 1 || quarter === 3
+  const halfX = (swapped ? other.depthMm : other.widthMm) / 2
+  const halfY = (swapped ? other.widthMm : other.depthMm) / 2
+
+  const centre = rotatePoint(other.x - subject.x, other.y - subject.y, -subject.yaw)
+  return { minX: centre.x - halfX, maxX: centre.x + halfX, minY: centre.y - halfY, maxY: centre.y + halfY }
+}
+
+function gapOnAxis(aMin: number, aMax: number, bMin: number, bMax: number): number {
+  if (aMax < bMin) return bMin - aMax
+  if (bMax < aMin) return aMin - bMax
+  return 0
+}
+
+/** Whether this item may be snapped to that one at all. */
+function snappable(item: PlanItem, other: PlanItem): boolean {
+  if (other.id === item.id || other.staged) return false
+  if (other.parentId === item.id || item.parentId === other.id) return false
+  // Things at different heights are not side by side, they are one above the
+  // other: a shelf on the wall has no business clicking onto the desk below it.
+  return heightBandsClash(item, other)
+}
+
+/**
+ * Smallest face-to-face gap between this item and anything near it, or null when
+ * there is nothing to measure against. Overlapping counts as zero.
+ */
+export function nearestItemGapMm(item: PlanItem, others: PlanItem[]): number | null {
+  let smallest: number | null = null
+  for (const other of others) {
+    if (!snappable(item, other)) continue
+    const box = neighbourBox(item, other)
+    if (!box) continue
+    const gap = Math.hypot(
+      gapOnAxis(-item.widthMm / 2, item.widthMm / 2, box.minX, box.maxX),
+      gapOnAxis(-item.depthMm / 2, item.depthMm / 2, box.minY, box.maxY),
+    )
+    if (smallest === null || gap < smallest) smallest = gap
+  }
+  return smallest
+}
+
+/**
+ * Click an item against the furniture already in the room.
+ *
+ * Two desks that are meant to be a bank of two have to actually touch, and doing
+ * that by mouse alone - to the millimetre, on a plan where one pixel is several
+ * centimetres - is not a thing anybody can do. So each axis takes the nearest of
+ * five offers from every square-on neighbour: the two that put the faces
+ * together, the two that line the far edges up, and the one that lines the
+ * centres up. Faces first, because "against" is what people are usually after
+ * and "lined up with" is what they want at the same time on the other axis.
+ *
+ * A neighbour only gets a say on an axis when it is actually beside the item on
+ * the other one - otherwise a desk across the room drags everything into line
+ * with it, which reads as the plan having a mind of its own.
+ *
+ * Escapable: the caller passes tolerance 0 while the override key is held, and
+ * the reducer stops offering snaps at all on a drag step that is moving away.
+ */
+export function snapToItems(item: PlanItem, others: PlanItem[], toleranceMm = ITEM_SNAP_MM): PlanItem {
+  if (toleranceMm <= 0) return item
+
+  const halfWidth = item.widthMm / 2
+  const halfDepth = item.depthMm / 2
+  // Faces beat alignments at equal distance, so they are offered first and a
+  // later candidate has to be strictly nearer to displace one.
+  let bestX: { delta: number; distance: number } | null = null
+  let bestY: { delta: number; distance: number } | null = null
+
+  const offer = (best: { delta: number; distance: number } | null, delta: number): { delta: number; distance: number } | null => {
+    const distance = Math.abs(delta)
+    if (distance > toleranceMm) return best
+    return best === null || distance < best.distance ? { delta, distance } : best
+  }
+
+  for (const other of others) {
+    if (!snappable(item, other)) continue
+    const box = neighbourBox(item, other)
+    if (!box) continue
+
+    const gapX = gapOnAxis(-halfWidth, halfWidth, box.minX, box.maxX)
+    const gapY = gapOnAxis(-halfDepth, halfDepth, box.minY, box.maxY)
+
+    // Beside each other on the far axis, give or take the tolerance: only then
+    // does lining this one up mean anything.
+    if (gapY <= toleranceMm) {
+      bestX = offer(bestX, box.minX - halfWidth)
+      bestX = offer(bestX, box.maxX + halfWidth)
+      bestX = offer(bestX, box.minX + halfWidth)
+      bestX = offer(bestX, box.maxX - halfWidth)
+      bestX = offer(bestX, (box.minX + box.maxX) / 2)
+    }
+    if (gapX <= toleranceMm) {
+      bestY = offer(bestY, box.minY - halfDepth)
+      bestY = offer(bestY, box.maxY + halfDepth)
+      bestY = offer(bestY, box.minY + halfDepth)
+      bestY = offer(bestY, box.maxY - halfDepth)
+      bestY = offer(bestY, (box.minY + box.maxY) / 2)
+    }
+  }
+
+  if (!bestX && !bestY) return item
+
+  // The offers are in the item's own frame; the item's position is not.
+  const world = rotatePoint(bestX?.delta ?? 0, bestY?.delta ?? 0, item.yaw)
+  return { ...item, x: Math.round(item.x + world.x), y: Math.round(item.y + world.y) }
 }
 
 /**

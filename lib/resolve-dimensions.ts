@@ -16,7 +16,7 @@ import {
   getCategoryDefaultsMap,
   getDimensionsForProducts,
   getPrimaryCategoryForProducts,
-  saveDimensions,
+  saveDimensionsMany,
 } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
 import { getModelMetaForProducts } from '@/modules/space-planner-for-shop/lib/db/model-meta'
 import { getSpecValues } from '@/modules/space-planner-for-shop/lib/spec-attributes'
@@ -79,6 +79,8 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
   ])
 
   const updatedAtById = new Map(products.map((row) => [row.id, row.updated_at]))
+  // Banked and written once at the end rather than a round trip per product.
+  const toSave: SplDimensions[] = []
 
   for (const id of ids) {
     const productUpdatedAt = updatedAtById.get(id) ?? null
@@ -107,9 +109,11 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
       mountOverride: productMeta.get(id)?.mountType ?? null,
     })
 
-    await saveDimensions(resolved)
+    toSave.push(resolved)
     out.set(id, { ...resolved, underTop: underTopFrom(specValues.get(id) ?? []) })
   }
+
+  if (toSave.length > 0) await saveDimensionsMany(toSave)
 
   return out
 }
@@ -178,7 +182,12 @@ export function resolveOne(input: ResolveInput): SplDimensions {
   if (depthMm === null) { depthMm = DEFAULT_FALLBACK.depthMm; usedDefault = true }
   if (heightMm === null) { heightMm = DEFAULT_FALLBACK.heightMm; usedDefault = true }
 
-  if (source === 'attribute' && usedDefault) source = 'attribute'
+  // Any axis that came off a fallback makes the whole size approximate, and the
+  // planner says so - "never a silent guess" is the rule the whole ladder is
+  // built around. This line used to assign 'attribute' to 'attribute', which is
+  // nothing at all: a desk with a real width and a guessed depth was badged as
+  // measured, on both the browse card and the item list.
+  if (source === 'attribute' && usedDefault) source = 'category_default'
   if (source === 'marker' && usedDefault) source = categoryDefault ? 'category_default' : 'marker'
 
   const conflictNote = measured && measured.source === 'glb'

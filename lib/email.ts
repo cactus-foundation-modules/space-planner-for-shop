@@ -80,7 +80,10 @@ export async function sendRenderDoneEmail(input: {
     siteName: input.siteName,
     planName: input.planName,
     planUrl: `${getSiteUrl()}${input.planPath}`,
-    stale: input.stale ? 'yes' : '',
+    // Literally 'true' or the template's {{#if stale}} block never survives -
+    // core's conditional compares against that exact string, so 'yes' meant the
+    // "this is how the room was on the fourth" line has never once been sent.
+    stale: input.stale ? 'true' : '',
     renderedFor: input.renderedFor,
   })
 }
