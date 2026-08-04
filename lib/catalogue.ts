@@ -2,6 +2,7 @@ import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { formatMoney } from '@/modules/shop/lib/money'
 import { effectivePrice } from '@/modules/shop/lib/pricing'
 import { makeDisplayAdjuster, resolveTaxDisplay } from '@/modules/shop/lib/tax-display'
+import { resolveCardFromPrices } from '@/modules/shop/lib/card-price'
 import { getPrimaryProductImages, listProducts } from '@/modules/shop/lib/db/products'
 import type { ListProductsFilter } from '@/modules/shop/lib/db/products'
 import type { ShpProduct } from '@/modules/shop/lib/types'
@@ -75,12 +76,18 @@ export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' 
   ])
 
   const ids = products.map((p) => p.id)
-  const [images, models, children, specValues, dimensions] = await Promise.all([
+  const [images, models, children, specValues, dimensions, fromPrices] = await Promise.all([
     getPrimaryProductImages(ids),
     getModelsForProducts(ids),
     getVariationChildrenForProducts(ids),
     getSpecValues(ids),
     resolveDimensions(ids),
+    // A listing whose price lives on its variations has a price of zero of its
+    // own, and printing that is worse than printing nothing: a browse panel full
+    // of "£0.00" reads as a broken shop. This is the same resolver every product
+    // grid on the site uses, so the planner can never disagree with the shop
+    // about what a thing costs.
+    resolveCardFromPrices(ids),
   ])
 
   // A listing counts as modelled when it, or any of its variant children, has a
@@ -94,8 +101,15 @@ export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' 
 
   const cards: CatalogueCard[] = products.map((product) => {
     const adjust = makeDisplayAdjuster(taxDisplay, product.taxClassId)
-    const net = effectivePrice(product, shopConfig.enabledPriceTypes)
+    const own = effectivePrice(product, shopConfig.enabledPriceTypes)
+    const from = fromPrices.get(product.id)
+    // The variation price wins where there is one - it is the only figure that
+    // means anything for a listing that is really a family of products. "From"
+    // is earned by a genuine range: a family whose every choice costs the same
+    // has one price, and prefixing it just makes the shopper hunt for the catch.
+    const net = from ? Number(from.price) : own
     const price = adjust ? adjust(net) : net
+    const priceFormatted = `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`
     const stock = stockState(product)
     const size = dimensions.get(product.id)
     const kids = children.get(product.id) ?? []
@@ -106,7 +120,7 @@ export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' 
       slug: product.slug,
       sku: product.sku ?? '',
       price,
-      priceFormatted: formatMoney(price, shopConfig.currencySymbol),
+      priceFormatted,
       image: images[product.id] ?? null,
       hasModel: modelled.has(product.id) || kids.some((childId) => modelledChildren.has(childId)),
       inStock: stock.inStock,

@@ -3,6 +3,7 @@
 import {
   ACESFilmicToneMapping,
   AmbientLight,
+  BackSide,
   BoxGeometry,
   CanvasTexture,
   Color,
@@ -120,7 +121,16 @@ export function buildRoom(description: SceneDescription): Group {
   floor.name = 'floor'
   group.add(floor)
 
-  const wallMaterial = new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: DoubleSide })
+  // BackSide, and the whole 3D view depends on it.
+  //
+  // A room is a closed box, so an orbit camera outside it sees six opaque
+  // outsides and nothing else - which is precisely what this used to draw: a
+  // grey crate with the furniture sealed inside. Rendering only the inward faces
+  // makes the near walls disappear as you come round to them and leaves the far
+  // ones standing, which is the dolls-house view everybody expects. From inside,
+  // at eye level, nothing changes: the inward faces are the ones you were
+  // looking at anyway.
+  const wallMaterial = new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: BackSide })
   for (const wall of description.walls) {
     for (const segment of wallSegments(wall)) {
       group.add(buildWallSegment(segment, wall, wallMaterial))
@@ -139,7 +149,9 @@ export function buildRoom(description: SceneDescription): Group {
     const cap = new ShapeGeometry(solid)
     cap.rotateX(Math.PI / 2)
     cap.translate(0, obstruction.heightM, 0)
-    group.add(new Mesh(cap, wallMaterial))
+    // The lid of a pillar is looked at from above, so unlike the walls it wants
+    // both sides.
+    group.add(new Mesh(cap, new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: DoubleSide })))
   }
 
   return group
@@ -249,11 +261,18 @@ export function buildPlaceholder(node: SceneNode): Object3D {
     )
   }
 
-  group.add(buildLabel(node.label, node.size.height + 0.12))
+  group.add(buildLabel(node.label, node.size.height + 0.12, node.size.width))
   return group
 }
 
-export function buildLabel(text: string, y: number): Sprite {
+// Label textures are shared by text. Twenty identical desks carry twenty labels
+// reading the same thing, and drawing that canvas twenty times - on every item
+// rebuild, which happens on every nudge - is pure waste.
+const labelTextures = new Map<string, CanvasTexture>()
+
+function labelTexture(text: string): CanvasTexture {
+  const existing = labelTextures.get(text)
+  if (existing) return existing
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 128
@@ -270,9 +289,25 @@ export function buildLabel(text: string, y: number): Sprite {
   }
   const texture = new CanvasTexture(canvas)
   texture.colorSpace = SRGBColorSpace
-  const sprite = new Sprite(new SpriteMaterial({ map: texture, transparent: true, depthTest: false }))
-  sprite.scale.set(0.9, 0.225, 1)
+  labelTextures.set(text, texture)
+  return texture
+}
+
+/**
+ * A name tag floating over an item.
+ *
+ * Sized to the thing it names, and clamped: a fixed world size means the tag on
+ * a pedestal is the same nine hundred millimetres wide as the tag on a boardroom
+ * table, which at eye level fills the room with billboards.
+ */
+export function buildLabel(text: string, y: number, widthM = 0.9): Sprite {
+  const width = Math.min(1.1, Math.max(0.45, widthM))
+  const sprite = new Sprite(new SpriteMaterial({ map: labelTexture(text), transparent: true, depthTest: false, opacity: 0.92 }))
+  sprite.scale.set(width, width * 0.25, 1)
   sprite.position.y = y
+  // Drawn last, so a tag is never hidden inside the furniture it names but is
+  // still ordered predictably against the other tags.
+  sprite.renderOrder = 10
   return sprite
 }
 
@@ -348,23 +383,61 @@ export async function buildItems(
   return { group, degraded }
 }
 
-/** Frame the whole room, from a height a person would see it from. */
-export function frameRoom(camera: PerspectiveCamera, description: SceneDescription): void {
-  const distance = Math.max(4, description.extentM * 1.4)
-  camera.position.set(description.centre.x + distance * 0.6, distance * 0.7, description.centre.z + distance * 0.9)
-  camera.lookAt(new Vector3(description.centre.x, 0.9, description.centre.z))
+/** The room's own bounding box in world metres, floor to ceiling. */
+function roomBounds(description: SceneDescription): { width: number; depth: number; height: number } {
+  const xs = description.floor.outline.map((point) => point.x)
+  const zs = description.floor.outline.map((point) => point.z)
+  return {
+    width: Math.max(0.5, Math.max(...xs) - Math.min(...xs)),
+    depth: Math.max(0.5, Math.max(...zs) - Math.min(...zs)),
+    height: Math.max(2, description.ceilingM),
+  }
+}
+
+/**
+ * Frame the whole room, from a height a person would see it from.
+ *
+ * The distance has to answer BOTH fields of view. A camera parked at a multiple
+ * of the room's longest side is right for a square canvas and hopelessly wrong
+ * for the tall narrow one a phone gives you - which is how a 4 m room ends up
+ * filling the screen with one wall.
+ */
+export function frameRoom(camera: PerspectiveCamera, description: SceneDescription): Vector3 {
+  const bounds = roomBounds(description)
+  const radius = 0.5 * Math.hypot(bounds.width, bounds.depth, bounds.height)
+  const vFov = (camera.fov * Math.PI) / 180
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.2, camera.aspect))
+  const distance = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 1.06
+  const target = new Vector3(description.centre.x, bounds.height * 0.35, description.centre.z)
+  // Looking down the room's diagonal from about thirty degrees up: high enough
+  // to read the layout, low enough that the furniture still looks like furniture
+  // rather than a floor plan with shadows.
+  camera.position.set(
+    target.x + distance * 0.62,
+    target.y + distance * 0.52,
+    target.z + distance * 0.62,
+  )
+  camera.lookAt(target)
+  return target
 }
 
 /** Stand in the room, roughly at eye level, looking across it. */
-export function eyeLevel(camera: PerspectiveCamera, description: SceneDescription): void {
-  camera.position.set(description.centre.x, 1.6, description.centre.z + description.extentM * 0.45)
-  camera.lookAt(new Vector3(description.centre.x, 1.2, description.centre.z - description.extentM))
+export function eyeLevel(camera: PerspectiveCamera, description: SceneDescription): Vector3 {
+  const bounds = roomBounds(description)
+  const target = new Vector3(description.centre.x, 1.2, description.centre.z)
+  camera.position.set(description.centre.x, 1.6, description.centre.z + Math.max(1.2, bounds.depth * 0.42))
+  camera.lookAt(target)
+  return target
 }
 
 export function disposeGroup(group: Object3D): void {
   group.traverse((child) => {
     const mesh = child as Mesh
-    if (mesh.geometry) mesh.geometry.dispose()
+    // Sprites share ONE geometry across every sprite three has ever made.
+    // Disposing it here takes every future label with it, and the symptom -
+    // name tags that vanish the second time you open the 3D view - looks
+    // nothing like its cause.
+    if (mesh.geometry && !(child as unknown as { isSprite?: boolean }).isSprite) mesh.geometry.dispose()
     const material = (mesh as unknown as { material?: MeshStandardMaterial | MeshStandardMaterial[] }).material
     if (!material) return
     for (const entry of Array.isArray(material) ? material : [material]) entry.dispose()

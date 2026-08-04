@@ -61,7 +61,7 @@ export function CataloguePanel(props: CataloguePanelProps) {
   const shown = modelledOnly ? cards.filter((card) => card.hasModel) : cards
 
   return (
-    <div style={{ display: 'grid', gap: '0.6rem' }}>
+    <div className="spl-stack">
       <div className="spl-field">
         <label htmlFor="spl-search">Search the catalogue</label>
         <input
@@ -103,17 +103,17 @@ export function CataloguePanel(props: CataloguePanelProps) {
               ) : (
                 <span aria-hidden style={{ width: '3rem', height: '3rem', borderRadius: 4, background: 'var(--color-surface)' }} />
               )}
-              <span>
+              <span className="spl-card-body">
                 <span className="spl-card-name">{card.name}</span>
-                <br />
                 <span className="spl-card-meta">
                   {card.priceFormatted} · {Math.round(card.widthMm)} × {Math.round(card.depthMm)} mm
                   {card.approximateSize && ' (approx.)'}
                 </span>
-                <br />
-                {card.hasModel && <span className="spl-badge spl-badge-3d">3D</span>}{' '}
-                {card.madeToOrder && <span className="spl-badge">Made to order</span>}{' '}
-                {card.stockLabel && <span className="spl-badge spl-badge-warn">{card.stockLabel}</span>}
+                <span className="spl-card-badges">
+                  {card.hasModel && <span className="spl-badge spl-badge-3d">3D</span>}
+                  {card.madeToOrder && <span className="spl-badge">Made to order</span>}
+                  {card.stockLabel && <span className="spl-badge spl-badge-warn">{card.stockLabel}</span>}
+                </span>
               </span>
             </button>
           </li>

@@ -1,8 +1,12 @@
 import {
+  boundingBox,
   clampItemIntoRoom,
+  footprintsOverlap,
+  itemCorners,
   itemsClash,
   normaliseOrigin,
   normaliseWinding,
+  pointInPolygon,
   setWallLength,
   snapToWall,
   snapYaw,
@@ -275,6 +279,48 @@ export function findClashes(items: PlanItem[]): Array<{ a: string; b: string }> 
     }
   }
   return out
+}
+
+/**
+ * Somewhere to put the next thing.
+ *
+ * Everything used to land dead centre, so placing four items produced one item
+ * and three hidden underneath it - which looks exactly like a planner that has
+ * stopped adding things. This walks outwards from the middle in rings until it
+ * finds a spot inside the room where the new footprint touches nothing, and
+ * gives up gracefully on the centre if the room is genuinely full: the shopper
+ * can always drag it out, and refusing to place would be worse.
+ */
+export function findFreeSpot(
+  items: PlanItem[],
+  geometry: RoomGeometry,
+  size: { widthMm: number; depthMm: number },
+): { x: number; y: number } {
+  const box = boundingBox(geometry.vertices)
+  const centre = { x: Math.round((box.minX + box.maxX) / 2), y: Math.round((box.minY + box.maxY) / 2) }
+  const placed = items.filter((item) => !item.staged)
+  const step = Math.max(300, Math.round(Math.max(size.widthMm, size.depthMm) * 0.75) + 150)
+
+  const free = (x: number, y: number): boolean => {
+    const probe = { x, y, yaw: 0, widthMm: size.widthMm, depthMm: size.depthMm }
+    if (!itemCorners(probe).every((corner) => pointInPolygon(corner, geometry.vertices))) return false
+    return !placed.some((item) => footprintsOverlap(probe, item, -20))
+  }
+
+  if (free(centre.x, centre.y)) return centre
+  for (let ring = 1; ring <= 14; ring++) {
+    for (let dy = -ring; dy <= ring; dy++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        // Only the ring itself, not the filled square - the inside was tried on
+        // the way out.
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue
+        const x = centre.x + dx * step
+        const y = centre.y + dy * step
+        if (free(x, y)) return { x, y }
+      }
+    }
+  }
+  return centre
 }
 
 /**

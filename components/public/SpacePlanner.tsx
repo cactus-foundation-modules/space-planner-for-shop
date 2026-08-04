@@ -1,7 +1,8 @@
 'use client'
 
 import dynamic from 'next/dynamic'
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
+import { formatMoney } from '@/modules/shop/lib/money'
 import { CataloguePanel } from '@/modules/space-planner-for-shop/components/public/CataloguePanel'
 import { Plan2d } from '@/modules/space-planner-for-shop/components/public/Plan2d'
 import { plannerCss } from '@/modules/space-planner-for-shop/components/public/planner-css'
@@ -10,6 +11,7 @@ import { clearScratch, readScratch, writeScratch } from '@/modules/space-planner
 import {
   emptyState,
   findClashes,
+  findFreeSpot,
   plannerReducer,
   pushHistory,
   redo,
@@ -31,13 +33,17 @@ import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalog
 // and hands it down. The 3D view is loaded on demand so the flat plan - which is
 // the primary surface and works without WebGL - costs nothing extra, and a page
 // merely carrying the teaser block never pulls three.js at all.
+//
+// The shell is an application rather than a document: a toolbar, a workspace of
+// a definite height, and two panes that scroll themselves. See planner-css.ts
+// for why the definite height is load-bearing rather than decorative.
 
 const View3d = dynamic(() => import('@/modules/space-planner-for-shop/components/public/View3d').then((m) => m.View3d), {
   ssr: false,
   loading: () => <div className="spl-coach">Loading the 3D view…</div>,
 })
 
-type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string }
+type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
 
 export type SpacePlannerProps = {
   signedIn: boolean
@@ -46,14 +52,19 @@ export type SpacePlannerProps = {
   intro: string
   budgets: { maxUniqueModels: number; decimationTarget: number; textureMaxPx: number; decimationEnabled: boolean }
   guidance: { walkwayClearanceMm: number; disclaimer: string; enabled: boolean }
+  /** Whatever this shop prints in front of a number. Never assumed to be a pound. */
+  currencySymbol: string
   /** Staged straight from the basket when the shopper arrived from the cart. */
   stageCart: boolean
   /** Pre-staged single product when they arrived from a product page. */
   stageProductId?: string | null
 }
 
-type Tab = 'catalogue' | 'selected' | 'items' | 'spaces'
+type Tab = 'catalogue' | 'selected' | 'items'
 type StageView = 'plan' | 'orbit' | 'eye'
+
+const VIEW_LABELS: Record<StageView, string> = { plan: 'Flat plan', orbit: '3D', eye: 'Stand in it' }
+const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', selected: 'Selected', items: 'Item list' }
 
 export function SpacePlanner(props: SpacePlannerProps) {
   const [state, dispatch] = useReducer(plannerReducer, undefined, () => emptyState(defaultRoomGeometry()))
@@ -67,7 +78,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [savedPlanId, setSavedPlanId] = useState<string | null>(null)
   const [savedRoomId, setSavedRoomId] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
+  const [wallEdit, setWallEdit] = useState<{ index: number; lengthMm: number } | null>(null)
+  const [roomEdit, setRoomEdit] = useState(false)
   const idCounter = useRef(0)
+  const stagedProductRef = useRef(false)
 
   const nextId = useCallback(() => {
     idCounter.current += 1
@@ -100,70 +114,82 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   const productIds = useMemo(() => [...new Set(state.items.map((item) => item.productId))], [state.items])
 
+  const fetchProducts = useCallback(async (ids: string[]): Promise<Array<ProductInfo & { id: string }>> => {
+    if (ids.length === 0) return []
+    const response = await fetch('/api/m/space-planner-for-shop/public/products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productIds: ids }),
+    })
+    if (!response.ok) return []
+    const data = (await response.json()) as {
+      items: Array<ProductInfo & { id: string }>
+      models: Array<{ productId: string; url: string; cacheKey: string; format: string }>
+    }
+    setProducts((current) => {
+      const next = { ...current }
+      for (const item of data.items) next[item.id] = { ...item, productId: item.id }
+      return next
+    })
+    setModels((current) => {
+      const next = new Map(current)
+      for (const model of data.models) next.set(model.productId, model)
+      return next
+    })
+    return data.items
+  }, [])
+
   useEffect(() => {
     const missing = productIds.filter((id) => !products[id])
     if (missing.length === 0) return
-    let cancelled = false
     void (async () => {
       try {
-        const response = await fetch('/api/m/space-planner-for-shop/public/products', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ productIds: missing }),
-        })
-        if (!response.ok) return
-        const data = (await response.json()) as {
-          items: Array<ProductInfo & { id: string }>
-          models: Array<{ productId: string; url: string; cacheKey: string; format: string }>
-        }
-        if (cancelled) return
-        setProducts((current) => {
-          const next = { ...current }
-          for (const item of data.items) next[item.id] = { ...item, productId: item.id }
-          return next
-        })
-        setModels((current) => {
-          const next = new Map(current)
-          for (const model of data.models) next.set(model.productId, model)
-          return next
-        })
+        await fetchProducts(missing)
       } catch {
         // The plan still draws: sizes come off the items themselves and the
         // models simply do not appear. Nothing here is worth an error message.
       }
     })()
-    return () => {
-      cancelled = true
-    }
-  }, [productIds, products])
+  }, [productIds, products, fetchProducts])
 
-  // ---- staging from the basket -----------------------------------------
+  // ---- staging from the basket and from a product page ------------------
 
   useEffect(() => {
     if (!props.stageCart || !started) return
     const staged = cartAsStagedItems()
     if (staged.length === 0) return
     void (async () => {
-      const ids = [...new Set(staged.map((entry) => entry.productId))]
-      const response = await fetch('/api/m/space-planner-for-shop/public/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productIds: ids }),
-      })
-      if (!response.ok) return
-      const data = (await response.json()) as { items: Array<ProductInfo & { id: string }> }
-      const byId = new Map(data.items.map((item) => [item.id, item]))
+      const items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))])
+      const byId = new Map(items.map((item) => [item.id, item]))
       for (const entry of staged) {
         const info = byId.get(entry.productId)
         if (!info) continue
         dispatch({ type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true })
       }
-      setMessage({ tone: 'info', text: 'Your basket is in the tray below - drag things into the room when you are ready.' })
+      setMessage({ tone: 'info', text: 'Your basket is in the tray - tap anything in it to drop it into the room.' })
     })()
     // Deliberately once per mount: re-staging on every basket change would
     // duplicate what the shopper has already placed.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.stageCart, started])
+
+  useEffect(() => {
+    // "See it in your room" from a product page. Unlike the basket, this is one
+    // thing the shopper explicitly asked to see, so it goes straight into the
+    // room rather than into the tray - having to find it in a tray first would
+    // be a strange answer to the button they pressed.
+    const wanted = props.stageProductId
+    if (!wanted || !started || stagedProductRef.current) return
+    stagedProductRef.current = true
+    void (async () => {
+      const [info] = await fetchProducts([wanted])
+      if (!info) return
+      const product = { ...info, productId: info.id }
+      const spot = findFreeSpot(state.items, state.geometry, product)
+      dispatch({ type: 'add-item', id: nextId(), product, x: spot.x, y: spot.y })
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the first render after the room exists
+  }, [props.stageProductId, started])
 
   // ---- scratch + unsaved-work guard ------------------------------------
 
@@ -194,7 +220,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const snapshot: ProductSnapshot = useMemo(() => {
     const out: ProductSnapshot = {}
     for (const [id, info] of Object.entries(products)) {
-      out[id] = { name: info.name, sku: '', slug: '', price: 0, taxClassId: null, image: info.image, parentId: null, optionSummary: '' }
+      out[id] = { name: info.name, sku: '', slug: '', price: info.price, taxClassId: null, image: info.image, parentId: null, optionSummary: '' }
     }
     return out
   }, [products])
@@ -224,8 +250,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
     [props.budgets],
   )
 
-  const placed = state.items.filter((item) => !item.staged)
-  const tray = state.items.filter((item) => item.staged)
+  const placed = useMemo(() => state.items.filter((item) => !item.staged), [state.items])
+  const tray = useMemo(() => state.items.filter((item) => item.staged), [state.items])
 
   // ---- actions ----------------------------------------------------------
 
@@ -237,6 +263,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         name: card.name,
         image: card.image,
         priceFormatted: card.priceFormatted,
+        price: card.price,
         widthMm: card.widthMm,
         depthMm: card.depthMm,
         heightMm: card.heightMm,
@@ -246,10 +273,20 @@ export function SpacePlanner(props: SpacePlannerProps) {
         underTopWidthMm: null,
       }
       setProducts((current) => ({ ...current, [card.id]: info }))
-      const centre = centreOf(state.geometry)
-      dispatch({ type: 'add-item', id: nextId(), product: info, x: centre.x, y: centre.y })
+      const spot = findFreeSpot(state.items, state.geometry, info)
+      dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
     },
-    [commit, nextId, state.geometry],
+    [commit, nextId, state.geometry, state.items],
+  )
+
+  const applyStep = useCallback(
+    (step: { history: History; snapshot: { geometry: RoomGeometry; items: PlanItem[] } } | null) => {
+      if (!step) return
+      setHistory(step.history)
+      dispatch({ type: 'load', snapshot: step.snapshot })
+      setDirty(true)
+    },
+    [],
   )
 
   const savePlan = useCallback(async () => {
@@ -314,12 +351,14 @@ export function SpacePlanner(props: SpacePlannerProps) {
       const target = event.target as HTMLElement | null
       if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
 
+      if (event.key === 'Escape') {
+        setWallEdit(null)
+        setRoomEdit(false)
+        return
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
-        const step = event.shiftKey ? redo(history, state) : undo(history, state)
-        if (!step) return
-        setHistory(step.history)
-        dispatch({ type: 'load', snapshot: step.snapshot })
+        applyStep(event.shiftKey ? redo(history, state) : undo(history, state))
         return
       }
       if (state.selection.length === 0) return
@@ -347,13 +386,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [state, history, commit])
+  }, [state, history, commit, applyStep])
 
   // ---- render -----------------------------------------------------------
 
   if (!started) {
     return (
-      <div className="spl-root">
+      <div className="spl-root spl-root-intro">
         <style dangerouslySetInnerHTML={{ __html: plannerCss() }} />
         <FirstRun
           heading={props.heading}
@@ -367,15 +406,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
     )
   }
 
+  const areaM2 = polygonAreaM2(state.geometry.vertices)
+
   return (
     <div className="spl-root">
       <style dangerouslySetInnerHTML={{ __html: plannerCss() }} />
 
       <div className="spl-bar">
-        <div>
+        <div className="spl-bar-heading">
           <h1 className="spl-title">{props.heading}</h1>
           <span className="spl-sub">
-            {polygonAreaM2(state.geometry.vertices).toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
+            {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
+            {tray.length > 0 && ` · ${tray.length} waiting`}
           </span>
         </div>
         <div className="spl-bar-spacer" />
@@ -389,25 +431,40 @@ export function SpacePlanner(props: SpacePlannerProps) {
               aria-selected={stage === option}
               onClick={() => setStage(option)}
             >
-              {option === 'plan' ? 'Flat plan' : option === 'orbit' ? '3D' : 'Stand in it'}
+              {VIEW_LABELS[option]}
             </button>
           ))}
         </div>
-        <button type="button" className="spl-btn" onClick={() => { const step = undo(history, state); if (!step) return; setHistory(step.history); dispatch({ type: 'load', snapshot: step.snapshot }) }} disabled={history.past.length === 0}>
-          Undo
-        </button>
-        <button type="button" className="spl-btn" onClick={() => window.print()}>
-          Print
-        </button>
-        <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
-          Add to basket
-        </button>
-        <button type="button" className="spl-btn spl-btn-primary" onClick={() => void savePlan()}>
-          {props.signedIn ? 'Save' : 'Save (sign in)'}
-        </button>
+        <div className="spl-bar-actions">
+          <button type="button" className="spl-btn" onClick={() => setRoomEdit(true)}>
+            Room
+          </button>
+          <button type="button" className="spl-btn" onClick={() => applyStep(undo(history, state))} disabled={history.past.length === 0}>
+            Undo
+          </button>
+          <button type="button" className="spl-btn" onClick={() => applyStep(redo(history, state))} disabled={history.future.length === 0}>
+            Redo
+          </button>
+          <button type="button" className="spl-btn" onClick={() => window.print()}>
+            Print
+          </button>
+          <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
+            Add to basket
+          </button>
+          <button type="button" className="spl-btn spl-btn-primary" onClick={() => void savePlan()}>
+            {props.signedIn ? 'Save' : 'Save (sign in)'}
+          </button>
+        </div>
       </div>
 
-      {message && <p className={message.tone === 'error' ? 'spl-alert spl-alert-error' : 'spl-alert'}>{message.text}</p>}
+      {message && (
+        <p className={message.tone === 'error' ? 'spl-alert spl-alert-error' : 'spl-alert'} role={message.tone === 'error' ? 'alert' : 'status'}>
+          <span className="spl-alert-text">{message.text}</span>
+          <button type="button" className="spl-alert-close" onClick={() => setMessage(null)} aria-label="Dismiss">
+            ×
+          </button>
+        </p>
+      )}
 
       <div className="spl-body">
         <div className="spl-stage">
@@ -418,23 +475,48 @@ export function SpacePlanner(props: SpacePlannerProps) {
               selection={state.selection}
               labels={labels}
               clashes={clashes}
-              onSelect={(ids) => dispatch({ type: 'select', ids })}
+              walkwayClearanceMm={props.guidance.enabled ? props.guidance.walkwayClearanceMm : 0}
+              onSelect={(ids) => {
+                dispatch({ type: 'select', ids })
+                if (ids.length > 0) setTab('selected')
+              }}
               onDragItems={(ids, dx, dy, snap) => dispatch({ type: 'move-items', ids, dx, dy, snap })}
               onDragEnd={commit}
-              onWallClick={(wallIndex, currentLengthMm) => {
-                const typed = window.prompt('How long is this wall?', formatLength(currentLengthMm, state.geometry.units))
-                if (typed === null) return
-                const mm = parseLengthMm(typed, state.geometry.units === 'imperial' ? 'in' : 'mm')
-                if (!mm || mm < 100) {
-                  setMessage({ tone: 'error', text: 'That did not read as a length. Try something like 3.2m or 3200.' })
-                  return
-                }
-                commit()
-                dispatch({ type: 'set-wall-length', wallIndex, lengthMm: mm })
-              }}
+              onWallClick={(wallIndex, currentLengthMm) => setWallEdit({ index: wallIndex, lengthMm: currentLengthMm })}
             />
           ) : (
             <View3d description={description} models={models} options={prepareOptions} view={stage === 'eye' ? 'eye' : 'orbit'} />
+          )}
+
+          {wallEdit && (
+            <WallDialog
+              units={state.geometry.units}
+              lengthMm={wallEdit.lengthMm}
+              onCancel={() => setWallEdit(null)}
+              onSave={(mm) => {
+                commit()
+                dispatch({ type: 'set-wall-length', wallIndex: wallEdit.index, lengthMm: mm })
+                setWallEdit(null)
+              }}
+            />
+          )}
+
+          {roomEdit && (
+            <RoomDialog
+              geometry={state.geometry}
+              itemCount={placed.length}
+              onCancel={() => setRoomEdit(false)}
+              onCeiling={(mm) => {
+                commit()
+                dispatch({ type: 'set-geometry', geometry: { ...state.geometry, ceilingMm: mm } })
+                setRoomEdit(false)
+              }}
+              onStartAgain={() => {
+                commit()
+                setRoomEdit(false)
+                setStarted(false)
+              }}
+            />
           )}
         </div>
 
@@ -442,60 +524,183 @@ export function SpacePlanner(props: SpacePlannerProps) {
           <div className="spl-tabs" role="tablist" aria-label="Panels">
             {(['catalogue', 'selected', 'items'] as Tab[]).map((option) => (
               <button key={option} type="button" role="tab" className="spl-tab" aria-selected={tab === option} onClick={() => setTab(option)}>
-                {option === 'catalogue' ? 'Add things' : option === 'selected' ? 'Selected' : 'Item list'}
+                {TAB_LABELS[option]}
+                {option === 'selected' && state.selection.length > 0 ? ` (${state.selection.length})` : ''}
               </button>
             ))}
           </div>
 
-          {tray.length > 0 && (
-            <div>
-              <p className="spl-note">In the tray - click one to drop it into the room.</p>
-              <div className="spl-tray">
-                {tray.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="spl-tray-item"
-                    onClick={() => {
-                      commit()
-                      const centre = centreOf(state.geometry)
-                      dispatch({ type: 'unstage-item', id: item.id, x: centre.x, y: centre.y })
-                    }}
-                  >
-                    {labels[item.productId] ?? 'Item'}
-                  </button>
-                ))}
-              </div>
+          <div className="spl-side-scroll">
+            <div className="spl-stack">
+              {tray.length > 0 && (
+                <div className="spl-stack">
+                  <p className="spl-note">Waiting to go in - tap one to drop it into the room.</p>
+                  <div className="spl-tray">
+                    {tray.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="spl-tray-item"
+                        onClick={() => {
+                          commit()
+                          const spot = findFreeSpot(state.items, state.geometry, item)
+                          dispatch({ type: 'unstage-item', id: item.id, x: spot.x, y: spot.y })
+                        }}
+                      >
+                        {labels[item.productId] ?? 'Item'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {tab === 'catalogue' && <CataloguePanel onPlace={place} />}
+
+              {tab === 'selected' && (
+                <SelectedPanel
+                  state={state}
+                  products={products}
+                  onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
+                  onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
+                  onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
+                  onArray={(id, count, spacing) => {
+                    commit()
+                    dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw: 0, newIds: Array.from({ length: count }, () => nextId()) })
+                  }}
+                />
+              )}
+
+              {tab === 'items' && <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />}
             </div>
-          )}
-
-          {tab === 'catalogue' && <CataloguePanel onPlace={place} />}
-
-          {tab === 'selected' && (
-            <SelectedPanel
-              state={state}
-              products={products}
-              onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
-              onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
-              onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
-              onArray={(id, count, spacing) => {
-                commit()
-                dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw: 0, newIds: Array.from({ length: count }, () => nextId()) })
-              }}
-            />
-          )}
-
-          {tab === 'items' && <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} />}
+          </div>
         </aside>
+      </div>
+
+      {/* The printed sheet. On screen this is display:none; on paper it is the
+          document somebody hands over, so it carries the item list and the
+          wording that says what the plan is and is not. */}
+      <div className="spl-print-only">
+        <div className="spl-print-head">
+          <h2>{props.heading}</h2>
+          <span>
+            {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
+          </span>
+        </div>
+        <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />
       </div>
     </div>
   )
 }
 
-function centreOf(geometry: RoomGeometry): { x: number; y: number } {
-  const xs = geometry.vertices.map((v) => v.x)
-  const ys = geometry.vertices.map((v) => v.y)
-  return { x: Math.round((Math.min(...xs) + Math.max(...xs)) / 2), y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) }
+// ---------------------------------------------------------------------------
+// Dialogs
+// ---------------------------------------------------------------------------
+
+/**
+ * Typing a wall's length.
+ *
+ * A dialog rather than window.prompt. prompt is styled by the browser, blocked
+ * outright by some of them, and to a shopper it looks like the page has been
+ * taken over by something else - which is not the impression you want at the
+ * moment somebody is telling you the size of their office.
+ */
+function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onCancel: () => void; onSave: (mm: number) => void }) {
+  const fieldId = useId()
+  const [value, setValue] = useState(() => formatLength(props.lengthMm, props.units))
+  const [error, setError] = useState('')
+
+  const submit = () => {
+    const mm = parseLengthMm(value, props.units === 'imperial' ? 'in' : 'mm')
+    if (!mm || mm < 100) {
+      setError('That did not read as a length. Try something like 3.2m or 3200.')
+      return
+    }
+    props.onSave(Math.round(mm))
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
+      <form
+        className="spl-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Wall length"
+        onSubmit={(event) => { event.preventDefault(); submit() }}
+      >
+        <h2>How long is this wall?</h2>
+        <div className="spl-field">
+          <label htmlFor={fieldId}>Inside measurement</label>
+          <input id={fieldId} className="spl-input" value={value} autoFocus onChange={(event) => { setValue(event.target.value); setError('') }} />
+        </div>
+        <p className="spl-note">4200, 4.2m and 13&apos; 9&quot; all work.</p>
+        {error && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{error}</span></p>}
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onCancel}>Cancel</button>
+          <button type="submit" className="spl-btn spl-btn-primary">Set the length</button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+/** The room itself, after the first run: ceiling height, and the way back out. */
+function RoomDialog(props: {
+  geometry: RoomGeometry
+  itemCount: number
+  onCancel: () => void
+  onCeiling: (mm: number) => void
+  onStartAgain: () => void
+}) {
+  const fieldId = useId()
+  const [value, setValue] = useState(() => formatLength(props.geometry.ceilingMm, props.geometry.units))
+  const [error, setError] = useState('')
+  const [confirming, setConfirming] = useState(false)
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
+      <form
+        className="spl-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Room"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const mm = parseLengthMm(value, props.geometry.units === 'imperial' ? 'in' : 'mm')
+          if (!mm || mm < 1500 || mm > 20_000) {
+            setError('Ceilings between 1.5 m and 20 m, please.')
+            return
+          }
+          props.onCeiling(Math.round(mm))
+        }}
+      >
+        <h2>Your room</h2>
+        <p className="spl-note">To change a wall, click it on the flat plan and type its length.</p>
+        <div className="spl-field">
+          <label htmlFor={fieldId}>Ceiling height</label>
+          <input id={fieldId} className="spl-input" value={value} autoFocus onChange={(event) => { setValue(event.target.value); setError('') }} />
+        </div>
+        {error && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{error}</span></p>}
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onCancel}>Close</button>
+          <button type="submit" className="spl-btn spl-btn-primary">Save the height</button>
+        </div>
+        <hr style={{ border: 0, borderTop: '1px solid var(--color-border)', margin: 0 }} />
+        {confirming ? (
+          <>
+            <p className="spl-note">
+              Starting again keeps {props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen but throws the room away.
+            </p>
+            <div className="spl-buttons">
+              <button type="button" className="spl-btn" onClick={() => setConfirming(false)}>Keep this room</button>
+              <button type="button" className="spl-btn spl-btn-danger" onClick={props.onStartAgain}>Start again</button>
+            </div>
+          </>
+        ) : (
+          <button type="button" className="spl-btn" onClick={() => setConfirming(true)}>Start the room again</button>
+        )}
+      </form>
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +720,7 @@ function centreOf(geometry: RoomGeometry): { x: number; y: number } {
  * with a tape measure actually holds the information.
  */
 function FirstRun(props: { heading: string; intro: string; onReady: (geometry: RoomGeometry) => void }) {
+  const ids = useId()
   const [mode, setMode] = useState<'choose' | 'type'>('choose')
   const [width, setWidth] = useState('6.2m')
   const [depth, setDepth] = useState('4.1m')
@@ -540,20 +746,20 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
         <p className="spl-note">Inside measurements, in whatever units you like - 4200, 4.2m and 13&apos; 9&quot; all work.</p>
         <div className="spl-row">
           <div className="spl-field">
-            <label htmlFor="spl-w">Width</label>
-            <input id="spl-w" className="spl-input" value={width} onChange={(event) => setWidth(event.target.value)} />
+            <label htmlFor={`${ids}-w`}>Width</label>
+            <input id={`${ids}-w`} className="spl-input" value={width} onChange={(event) => setWidth(event.target.value)} />
           </div>
           <div className="spl-field">
-            <label htmlFor="spl-d">Depth</label>
-            <input id="spl-d" className="spl-input" value={depth} onChange={(event) => setDepth(event.target.value)} />
+            <label htmlFor={`${ids}-d`}>Depth</label>
+            <input id={`${ids}-d`} className="spl-input" value={depth} onChange={(event) => setDepth(event.target.value)} />
           </div>
           <div className="spl-field">
-            <label htmlFor="spl-c">Ceiling</label>
-            <input id="spl-c" className="spl-input" value={ceiling} onChange={(event) => setCeiling(event.target.value)} />
+            <label htmlFor={`${ids}-c`}>Ceiling</label>
+            <input id={`${ids}-c`} className="spl-input" value={ceiling} onChange={(event) => setCeiling(event.target.value)} />
           </div>
         </div>
-        {error && <p className="spl-alert spl-alert-error">{error}</p>}
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        {error && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{error}</span></p>}
+        <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={() => setMode('choose')}>Back</button>
           <button
             type="button"
@@ -632,10 +838,10 @@ function SelectedPanel(props: {
   const selected = props.state.items.filter((item) => props.state.selection.includes(item.id))
   const first = selected[0]
 
-  if (!first) return <p className="spl-note">Nothing selected. Click something in the room.</p>
+  if (!first) return <p className="spl-note">Nothing selected. Click something in the room, or add something from Add things.</p>
 
   return (
-    <div style={{ display: 'grid', gap: '0.6rem' }}>
+    <div className="spl-stack">
       <strong>{props.products[first.productId]?.name ?? 'Item'}</strong>
       {selected.length > 1 && <span className="spl-note">{selected.length} selected - changes apply to the first.</span>}
 
@@ -657,7 +863,8 @@ function SelectedPanel(props: {
         </p>
       )}
 
-      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+      <div className="spl-buttons">
+        <button type="button" className="spl-btn" onClick={() => props.onPatch(first.id, { yaw: Math.round(first.yaw) + 90 })}>Turn 90°</button>
         <button type="button" className="spl-btn" onClick={() => props.onDuplicate(props.state.selection)}>Duplicate</button>
         <button type="button" className="spl-btn" onClick={() => props.onArray(first.id, 3, first.widthMm + 100)}>Row of four</button>
         <button type="button" className="spl-btn spl-btn-danger" onClick={() => props.onDelete(props.state.selection)}>Remove</button>
@@ -667,10 +874,12 @@ function SelectedPanel(props: {
 }
 
 function NumberField(props: { label: string; value: number; onChange: (value: number) => void }) {
+  const id = useId()
   return (
     <div className="spl-field">
-      <label>{props.label}</label>
+      <label htmlFor={id}>{props.label}</label>
       <input
+        id={id}
         className="spl-input"
         type="number"
         value={Math.round(props.value)}
@@ -686,16 +895,20 @@ function NumberField(props: { label: string; value: number; onChange: (value: nu
 /**
  * The item list, which doubles as the accessible representation of the scene:
  * everything in the room, enumerated, with its size. A screen reader gets the
- * whole plan from this table.
+ * whole plan from this table, and so does the printer.
  */
-function ItemListPanel(props: { items: PlanItem[]; products: Record<string, ProductInfo>; disclaimer: string }) {
+function ItemListPanel(props: { items: PlanItem[]; products: Record<string, ProductInfo>; disclaimer: string; currencySymbol: string }) {
   const counts = new Map<string, number>()
   for (const item of props.items) counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1)
 
   if (counts.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
 
+  const rows = [...counts.entries()]
+  const total = rows.reduce((sum, [productId, quantity]) => sum + (props.products[productId]?.price ?? 0) * quantity, 0)
+  const anyPriced = rows.some(([productId]) => (props.products[productId]?.price ?? 0) > 0)
+
   return (
-    <div style={{ display: 'grid', gap: '0.6rem' }}>
+    <div className="spl-stack">
       <table className="spl-bom">
         <caption className="spl-note" style={{ textAlign: 'left', paddingBottom: '0.3rem' }}>
           Everything in the room
@@ -708,7 +921,7 @@ function ItemListPanel(props: { items: PlanItem[]; products: Record<string, Prod
           </tr>
         </thead>
         <tbody>
-          {[...counts.entries()].map(([productId, quantity]) => (
+          {rows.map(([productId, quantity]) => (
             <tr key={productId}>
               <td>{props.products[productId]?.name ?? 'Item'}</td>
               <td className="spl-num">{quantity}</td>
@@ -716,6 +929,15 @@ function ItemListPanel(props: { items: PlanItem[]; products: Record<string, Prod
             </tr>
           ))}
         </tbody>
+        {anyPriced && (
+          <tfoot>
+            <tr>
+              <td>Roughly</td>
+              <td className="spl-num">{props.items.length}</td>
+              <td className="spl-num">{formatMoney(total, props.currencySymbol)}</td>
+            </tr>
+          </tfoot>
+        )}
       </table>
       <p className="spl-note">{props.disclaimer}</p>
     </div>

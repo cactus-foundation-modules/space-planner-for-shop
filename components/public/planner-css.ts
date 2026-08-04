@@ -5,23 +5,53 @@
 // without a second set of rules. The only literal colours in this module are
 // inside the 3D scene, where they are materials rather than chrome.
 //
-// Layout target: full-bleed inside <main>. Module public pages always render
-// inside the site header and footer on this platform - there is no chrome-free
-// route - so "full screen" means the viewport minus the sticky header, and the
-// nav stays where a shopper mid-purchase wants it.
+// Layout target: an APPLICATION, not a document. Module public pages always
+// render inside the site header and footer on this platform - there is no
+// chrome-free route - so "full screen" means the viewport minus the sticky
+// header. The planner claims exactly that much and no more: the workspace has a
+// definite height, and the two things inside it scroll themselves.
+//
+// That is not a nicety. Without a definite height the browse panel - which is a
+// catalogue page, two dozen cards long - decides how tall the row is, the plan
+// canvas stretches to match, and the whole page ends up eight thousand pixels
+// tall with the room drawn postage-stamp size in the middle of it.
 export const PLANNER_HEADER_ALLOWANCE = '76px'
 
 export function plannerCss(): string {
   return `
 .spl-root {
+  /* The sticky site header, plus the page wrapper's own padding top and bottom.
+     Both are real and both have to come off, or the workspace overflows the
+     viewport by exactly the amount nobody can see. */
+  --spl-chrome: ${PLANNER_HEADER_ALLOWANCE};
   --spl-gap: var(--space-3, 0.75rem);
   --spl-radius: var(--radius-md, 10px);
-  display: grid;
-  grid-template-rows: auto 1fr;
+  --spl-control-h: 2.25rem;
+  /* Muted text, mixed from the theme's OWN text and background rather than taken
+     from --color-text-muted, which on this theme sits at about 2.4:1 on white -
+     fine for a decorative caption, nowhere near AA for the twelve-point print
+     this tool is full of. Mixing keeps it theme-following and automatically
+     correct in dark mode, where the mix runs the other way. */
+  --spl-muted: color-mix(in srgb, var(--color-text) 68%, var(--color-bg));
+  display: flex;
+  flex-direction: column;
   gap: var(--spl-gap);
-  min-height: calc(100vh - ${PLANNER_HEADER_ALLOWANCE});
+  /* dvh, not vh: on a phone the browser's own chrome slides in and out, and vh
+     measures the tallest it ever gets - which is how a toolbar ends up under the
+     address bar. */
+  height: calc(100dvh - var(--spl-chrome) - (var(--spl-gap) * 2));
+  min-height: 34rem;
   color: var(--color-text);
 }
+/* The opening screen is a card, not an application: it sizes to its content and
+   sits in the middle of the page rather than propping open a viewport-tall box
+   with nothing in it. */
+.spl-root.spl-root-intro {
+  height: auto;
+  min-height: 0;
+  display: block;
+}
+
 .spl-bar {
   display: flex;
   flex-wrap: wrap;
@@ -31,26 +61,29 @@ export function plannerCss(): string {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--spl-radius);
+  flex: 0 0 auto;
 }
+.spl-bar-heading { display: grid; gap: 0.1rem; min-width: 0; }
 .spl-bar-spacer { flex: 1 1 auto; }
+.spl-bar-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 .spl-title {
   font-size: var(--text-lg, 1.1rem);
   font-weight: 600;
   margin: 0;
   color: var(--color-text);
+  line-height: 1.2;
 }
-.spl-sub { color: var(--color-text-muted); font-size: var(--text-sm, 0.875rem); }
+.spl-sub { color: var(--spl-muted); font-size: var(--text-sm, 0.875rem); }
 
 .spl-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 22rem;
   gap: var(--spl-gap);
   align-items: stretch;
+  /* Both of these matter: flex:1 claims the leftover height, min-height:0 lets
+     the children be shorter than their content and scroll instead. */
+  flex: 1 1 auto;
   min-height: 0;
-}
-@media (max-width: 1024px) {
-  .spl-body { grid-template-columns: minmax(0, 1fr); }
-  .spl-side { max-height: 26rem; }
 }
 
 .spl-stage {
@@ -59,7 +92,7 @@ export function plannerCss(): string {
   border: 1px solid var(--color-border);
   border-radius: var(--spl-radius);
   overflow: hidden;
-  min-height: 26rem;
+  min-height: 0;
 }
 .spl-stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
@@ -71,8 +104,38 @@ export function plannerCss(): string {
   border: 1px solid var(--color-border);
   border-radius: var(--spl-radius);
   padding: var(--spl-gap);
-  overflow: auto;
+  overflow: hidden;
   min-height: 0;
+}
+/* The panel's tabs stay put and only the panel's contents move - a browse list
+   that scrolls its own switcher off the top is a list you have to scroll back up
+   to escape. */
+.spl-side > .spl-tabs { flex: 0 0 auto; }
+.spl-side-scroll { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; }
+
+@media (max-width: 1024px) {
+  .spl-body {
+    grid-template-columns: minmax(0, 1fr);
+    /* The room gets the top of the screen and the panel the rest. Both scroll
+       themselves, so neither can push the other off. */
+    grid-template-rows: minmax(11rem, 42fr) minmax(0, 58fr);
+  }
+}
+@media (max-width: 640px) {
+  .spl-root {
+    --spl-gap: var(--space-2, 0.5rem);
+    --spl-control-h: 2.5rem;
+    min-height: 32rem;
+  }
+  .spl-bar { gap: 0.5rem; }
+  .spl-bar-heading { flex: 1 1 100%; }
+  .spl-bar-spacer { display: none; }
+  /* The view switcher is the thing people reach for most, so it gets a full
+     row of its own with three equal targets rather than a place in the queue. */
+  .spl-bar > .spl-tabs { flex: 1 1 100%; }
+  .spl-bar > .spl-tabs .spl-tab { flex: 1 1 0; text-align: center; }
+  .spl-bar-actions { flex: 1 1 100%; }
+  .spl-bar-actions .spl-btn { flex: 1 1 auto; justify-content: center; }
 }
 
 .spl-tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
@@ -80,31 +143,43 @@ export function plannerCss(): string {
   appearance: none;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  color: var(--color-text-muted);
+  color: var(--color-text);
   border-radius: var(--radius-sm, 6px);
-  padding: 0.35rem 0.7rem;
+  padding: 0 0.7rem;
+  min-height: var(--spl-control-h);
   font-size: var(--text-sm, 0.875rem);
+  font-family: inherit;
   cursor: pointer;
 }
-.spl-tab[aria-selected="true"] {
+.spl-tab[aria-selected="true"],
+.spl-tab[aria-selected="true"]:hover,
+.spl-tab[aria-selected="true"]:focus {
   background: var(--color-primary);
   border-color: var(--color-primary);
   color: var(--color-primary-contrast, #fff);
 }
-.spl-tab:focus-visible, .spl-btn:focus-visible, .spl-input:focus-visible {
+.spl-tab:hover:not([aria-selected="true"]) { border-color: var(--color-primary); background: var(--color-surface); color: var(--color-text); }
+.spl-tab:focus-visible, .spl-btn:focus-visible, .spl-input:focus-visible, .spl-select:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 
 .spl-btn {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
   color: var(--color-text);
   border-radius: var(--radius-sm, 6px);
-  padding: 0.4rem 0.75rem;
+  padding: 0 0.75rem;
+  min-height: var(--spl-control-h);
   font-size: var(--text-sm, 0.875rem);
+  font-family: inherit;
+  line-height: 1;
   cursor: pointer;
+  white-space: nowrap;
 }
 .spl-btn:hover:not(:disabled) { border-color: var(--color-primary); }
 .spl-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -114,6 +189,7 @@ export function plannerCss(): string {
   color: var(--color-primary-contrast, #fff);
 }
 .spl-btn-danger { color: var(--color-danger, #b3261e); border-color: var(--color-danger, #b3261e); }
+.spl-btn-icon { padding: 0 0.5rem; }
 
 .spl-input, .spl-select {
   width: 100%;
@@ -122,11 +198,15 @@ export function plannerCss(): string {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm, 6px);
   padding: 0.4rem 0.5rem;
+  min-height: var(--spl-control-h);
   font-size: var(--text-sm, 0.875rem);
+  font-family: inherit;
 }
-.spl-field { display: grid; gap: 0.25rem; }
-.spl-field label { font-size: var(--text-xs, 0.75rem); color: var(--color-text-muted); }
+.spl-field { display: grid; gap: 0.25rem; min-width: 0; }
+.spl-field label { font-size: var(--text-xs, 0.75rem); color: var(--spl-muted); }
 .spl-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+.spl-stack { display: grid; gap: 0.6rem; }
+.spl-buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
 .spl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .spl-card {
@@ -142,11 +222,16 @@ export function plannerCss(): string {
   width: 100%;
   cursor: pointer;
   color: var(--color-text);
+  font-family: inherit;
 }
 .spl-card:hover { border-color: var(--color-primary); }
+.spl-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .spl-card img { width: 3rem; height: 3rem; object-fit: contain; border-radius: 4px; background: var(--color-surface); }
+.spl-card-body { display: grid; gap: 0.15rem; min-width: 0; }
 .spl-card-name { font-size: var(--text-sm, 0.875rem); line-height: 1.25; }
-.spl-card-meta { font-size: var(--text-xs, 0.75rem); color: var(--color-text-muted); }
+.spl-card-meta { font-size: var(--text-xs, 0.75rem); color: var(--spl-muted); }
+.spl-card-badges { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+.spl-card-badges:empty { display: none; }
 
 .spl-badge {
   display: inline-block;
@@ -154,29 +239,50 @@ export function plannerCss(): string {
   padding: 0.05rem 0.35rem;
   border-radius: 999px;
   border: 1px solid var(--color-border);
-  color: var(--color-text-muted);
+  color: var(--spl-muted);
 }
 .spl-badge-3d { border-color: var(--color-primary); color: var(--color-primary); }
 .spl-badge-warn { border-color: var(--color-warning, #a16207); color: var(--color-warning, #a16207); }
 
 .spl-note {
   font-size: var(--text-xs, 0.75rem);
-  color: var(--color-text-muted);
+  color: var(--spl-muted);
   line-height: 1.4;
+  margin: 0;
 }
 .spl-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-warning, #a16207);
   border-radius: var(--radius-sm, 6px);
   padding: 0.5rem 0.6rem;
   font-size: var(--text-sm, 0.875rem);
   background: var(--color-bg);
+  flex: 0 0 auto;
+  margin: 0;
 }
 .spl-alert-error { border-left-color: var(--color-danger, #b3261e); }
+.spl-alert-text { flex: 1 1 auto; min-width: 0; }
+.spl-alert-close {
+  appearance: none;
+  background: none;
+  border: 0;
+  color: var(--spl-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: var(--radius-sm, 6px);
+  font-family: inherit;
+}
+.spl-alert-close:hover { color: var(--color-text); }
+.spl-alert-close:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
 .spl-bom { width: 100%; border-collapse: collapse; font-size: var(--text-sm, 0.875rem); }
 .spl-bom th, .spl-bom td { padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--color-border); text-align: left; }
-.spl-bom td.spl-num, .spl-bom th.spl-num { text-align: right; }
+.spl-bom td.spl-num, .spl-bom th.spl-num { text-align: right; white-space: nowrap; }
 .spl-bom tfoot td { font-weight: 600; border-bottom: none; }
 
 .spl-tray {
@@ -186,19 +292,25 @@ export function plannerCss(): string {
   padding: 0.4rem;
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-sm, 6px);
+  max-height: 6rem;
+  overflow: auto;
 }
 .spl-tray-item {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm, 6px);
-  padding: 0.2rem 0.45rem;
+  padding: 0.25rem 0.5rem;
   font-size: var(--text-xs, 0.75rem);
   background: var(--color-bg);
   cursor: pointer;
   color: var(--color-text);
+  font-family: inherit;
 }
+.spl-tray-item:hover { border-color: var(--color-primary); }
 
-.spl-first-run { display: grid; gap: var(--spl-gap); max-width: 42rem; margin: 0 auto; padding: 2rem 0; }
-.spl-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--spl-gap); }
+.spl-first-run { display: grid; gap: var(--spl-gap); max-width: 46rem; margin: 0 auto; padding: clamp(1.5rem, 5vw, 3.5rem) 0; }
+.spl-first-run .spl-title { font-size: var(--text-2xl, 1.6rem); }
+.spl-first-run .spl-note { font-size: var(--text-sm, 0.875rem); }
+.spl-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: var(--spl-gap); }
 .spl-choice {
   border: 1px solid var(--color-border);
   border-radius: var(--spl-radius);
@@ -209,22 +321,62 @@ export function plannerCss(): string {
   color: var(--color-text);
   display: grid;
   gap: 0.3rem;
+  align-content: start;
+  font-family: inherit;
 }
 .spl-choice:hover { border-color: var(--color-primary); }
+.spl-choice:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .spl-choice strong { font-size: var(--text-base, 1rem); }
 
+/* Floating notes over the stage: the loading line, the degraded-items note, and
+   the hint about what a click does. Pointer-events off so a note can never eat a
+   drag that was meant for the room underneath it. */
 .spl-coach {
   position: absolute;
   left: var(--spl-gap);
   bottom: var(--spl-gap);
-  max-width: 20rem;
+  max-width: min(20rem, calc(100% - (var(--spl-gap) * 2)));
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--spl-radius);
-  padding: 0.6rem 0.75rem;
+  padding: 0.5rem 0.7rem;
   font-size: var(--text-sm, 0.875rem);
   box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,0.12));
+  pointer-events: none;
 }
+.spl-stage-tools {
+  position: absolute;
+  right: var(--spl-gap);
+  top: var(--spl-gap);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.spl-stage-tools .spl-btn { background: var(--color-surface); box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1)); }
+
+/* The wall-length editor. A dialog rather than window.prompt: prompt is styled
+   by the browser, blocked outright in some of them, and looks like the page has
+   been hijacked. */
+.spl-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--color-text) 35%, transparent);
+  padding: var(--spl-gap);
+  z-index: 5;
+}
+.spl-dialog {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  padding: var(--spl-gap);
+  display: grid;
+  gap: 0.6rem;
+  width: min(22rem, 100%);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0,0,0,0.2));
+}
+.spl-dialog h2 { margin: 0; font-size: var(--text-base, 1rem); font-weight: 600; }
 
 .spl-launch {
   display: inline-flex;
@@ -232,12 +384,22 @@ export function plannerCss(): string {
   gap: 0.4rem;
 }
 
-@media print {
-  .spl-bar, .spl-side, .spl-coach, .spl-tabs { display: none !important; }
-  .spl-body { grid-template-columns: 1fr; }
-  .spl-stage { border: none; }
-  .spl-print-only { display: block !important; }
-}
+/* ---- Print --------------------------------------------------------------
+   A printed plan is a document somebody hands to whoever signs the cheque, so
+   it carries the room, the item list and the disclaimer - not a screenshot of
+   an application with its toolbar in it. */
 .spl-print-only { display: none; }
+@media print {
+  .spl-bar, .spl-side, .spl-coach, .spl-stage-tools, .spl-alert, .spl-dialog-backdrop { display: none !important; }
+  .spl-root { height: auto !important; min-height: 0 !important; display: block !important; }
+  .spl-body { display: block !important; }
+  .spl-stage { border: 1px solid #999; height: 12cm; page-break-inside: avoid; }
+  .spl-print-only { display: block !important; }
+  .spl-print-head { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem; }
+  .spl-print-head h2 { margin: 0; font-size: 1.1rem; }
+  .spl-print-only .spl-bom { margin-top: 0.6rem; page-break-inside: auto; }
+  .spl-print-only .spl-bom th, .spl-print-only .spl-bom td { border-bottom: 1px solid #ccc; }
+  .spl-print-foot { margin-top: 0.5rem; font-size: 0.75rem; color: #444; }
+}
 `
 }

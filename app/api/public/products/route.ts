@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { shopClosedResponse } from '@/modules/shop/lib/access'
+import { resolveCardFromPrices } from '@/modules/shop/lib/card-price'
 import { getPrimaryProductImages, getProductsByIds } from '@/modules/shop/lib/db/products'
 import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { effectivePrice } from '@/modules/shop/lib/pricing'
@@ -27,13 +28,16 @@ export async function POST(request: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: 'Bad request' }, { status: 400 })
 
   const ids = [...new Set(parsed.data.productIds)]
-  const [products, images, dimensions, models, shopConfig, taxDisplay] = await Promise.all([
+  const [products, images, dimensions, models, shopConfig, taxDisplay, fromPrices] = await Promise.all([
     getProductsByIds(ids),
     getPrimaryProductImages(ids),
     resolveDimensions(ids),
     resolveModelsForProducts(ids),
     getShopConfigCached(),
     resolveTaxDisplay(),
+    // A listing priced through its variations has no price of its own. Without
+    // this the item list totals a room full of furniture at nothing.
+    resolveCardFromPrices(ids),
   ])
 
   const items = ids
@@ -42,7 +46,8 @@ export async function POST(request: NextRequest) {
       if (!product) return null
       const size = dimensions.get(id)
       const adjust = makeDisplayAdjuster(taxDisplay, product.taxClassId)
-      const net = effectivePrice(product, shopConfig.enabledPriceTypes)
+      const from = fromPrices.get(id)
+      const net = from ? Number(from.price) : effectivePrice(product, shopConfig.enabledPriceTypes)
       const price = adjust ? adjust(net) : net
       return {
         id,
@@ -51,7 +56,7 @@ export async function POST(request: NextRequest) {
         slug: product.slug,
         image: images[id] ?? null,
         price,
-        priceFormatted: formatMoney(price, shopConfig.currencySymbol),
+        priceFormatted: `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`,
         widthMm: size?.widthMm ?? 800,
         depthMm: size?.depthMm ?? 600,
         heightMm: size?.heightMm ?? 750,

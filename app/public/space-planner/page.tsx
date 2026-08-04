@@ -1,6 +1,7 @@
 import { getMemberFromCookie } from '@/lib/members/session'
 import { getMemberAreaPath } from '@/lib/members/paths'
 import { getShopGate } from '@/modules/shop/lib/access'
+import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { ShopClosedNotice } from '@/modules/shop/components/public/ShopClosedNotice'
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
@@ -24,7 +25,7 @@ export default async function SpacePlannerPage({
   if (gate.blocked) return <ShopClosedNotice message={gate.message} />
 
   const params = await searchParams
-  const [config, member] = await Promise.all([getSplConfigCached(), getMemberFromCookie()])
+  const [config, member, shopConfig] = await Promise.all([getSplConfigCached(), getMemberFromCookie(), getShopConfigCached()])
   const signInHref = `/${getMemberAreaPath()}/login`
 
   const productSlug = typeof params.productSlug === 'string' ? params.productSlug : null
@@ -48,6 +49,7 @@ export default async function SpacePlannerPage({
           disclaimer: config.guidanceDisclaimer,
           enabled: config.clearanceWarningsEnabled,
         }}
+        currencySymbol={shopConfig.currencySymbol}
         stageCart={params.from === 'cart'}
         stageProductId={typeof params.product === 'string' ? params.product : staged?.id ?? null}
       />
