@@ -11,6 +11,6 @@ export async function GET() {
 
   return NextResponse.json({
     jobs: await listRenderJobsForAdmin(),
-    workerConfigured: renderWorkerConfigured(),
+    workerConfigured: await renderWorkerConfigured(),
   })
 }

@@ -235,6 +235,9 @@ export type SplRenderJob = {
   resultMediaId: string | null
   resultUrl: string
   error: string
+  /** The Fly machine rendering this one, so it can be destroyed the moment the
+   * picture lands. Empty on a job that never got as far as a machine. */
+  machineId: string
   startedAt: Date | null
   finishedAt: Date | null
   createdAt: Date

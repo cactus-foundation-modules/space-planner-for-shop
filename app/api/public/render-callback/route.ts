@@ -2,8 +2,11 @@ import { timingSafeEqual } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
+import { getActiveMediaProvider } from '@/lib/config/env'
+import { confirmedSizeBytes, saveMediaRecord } from '@/lib/media/upload'
 import { finishRenderJob, getRenderCallbackToken, getRenderJob } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { getPlanForAdmin } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { destroyRenderMachine } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
 import { sendRenderDoneEmail } from '@/modules/space-planner-for-shop/lib/email'
 
 // The render worker saying it has finished.
@@ -14,14 +17,19 @@ import { sendRenderDoneEmail } from '@/modules/space-planner-for-shop/lib/email'
 // anybody overwrite anybody's picture, whereas a per-job token is useless the
 // moment that job is done.
 //
-// The worker uploads the image itself with a signed upload token and tells us
-// where it landed; nothing here accepts image bytes.
+// The worker uploads the image itself with a signed upload token and says only
+// that it is done; nothing here accepts image bytes, and nothing here takes the
+// worker's word for WHERE the bytes went - the storage key was decided at
+// enqueue time and kept on the job.
+//
+// This is also where the machine dies. It is the prompt path of the three
+// described in lib/fly/render-worker.ts, and the one that runs almost every
+// time: picture lands, machine goes, meter stops.
 
 const Body = z.object({
   jobId: z.string().min(1).max(64),
   token: z.string().min(1).max(200),
-  mediaId: z.string().max(64).nullable().optional(),
-  url: z.string().max(2000).optional(),
+  sizeBytes: z.number().int().positive().max(200_000_000).optional(),
   error: z.string().max(1000).optional(),
 })
 
@@ -34,11 +42,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const finished = await finishRenderJob(parsed.data.jobId, {
-    mediaId: parsed.data.mediaId ?? null,
-    url: parsed.data.url ?? '',
-    error: parsed.data.error,
-  })
+  // Read the job BEFORE finishing it: finishing clears nothing, but the machine
+  // id is wanted either way and a second read after the fact is a second query
+  // for no reason.
+  const job = await getRenderJob(parsed.data.jobId)
+
+  let result: { mediaId?: string | null; url?: string; error?: string }
+  if (parsed.data.error) {
+    result = { error: parsed.data.error }
+  } else {
+    result = await register(job?.params, parsed.data.sizeBytes)
+  }
+
+  const finished = await finishRenderJob(parsed.data.jobId, result)
+
+  // Whatever happened to the picture, the machine is done with. Destroyed even
+  // on a duplicate callback: the second one is free, and a machine still
+  // standing is not.
+  if (job?.machineId) await destroyRenderMachine(job.machineId)
+
   if (!finished) return NextResponse.json({ ok: true, alreadyFinished: true })
 
   if (finished.status === 'DONE' && finished.memberId) {
@@ -46,6 +68,43 @@ export async function POST(request: NextRequest) {
   }
 
   return NextResponse.json({ ok: true })
+}
+
+/**
+ * Write the Media row for bytes that are already in storage.
+ *
+ * The key comes off the job, never off the request: a worker that could name the
+ * key could register a row pointing at any object in the library. The size is
+ * confirmed against storage for the same reason the ordinary upload path
+ * confirms it - so the library's totals describe the objects rather than
+ * somebody's account of them.
+ */
+async function register(
+  params: Record<string, unknown> | undefined,
+  sizeBytes: number | undefined,
+): Promise<{ mediaId?: string | null; url?: string; error?: string }> {
+  const key = typeof params?.uploadKey === 'string' ? params.uploadKey : ''
+  if (!key) return { error: 'The picture arrived but the site had lost track of where it was going.' }
+
+  try {
+    const provider = await getActiveMediaProvider()
+    if (!provider) return { error: 'The picture arrived but media storage is no longer set up.' }
+
+    const confirmed = await confirmedSizeBytes(provider, key, sizeBytes ?? 0)
+    if (!confirmed) return { error: 'The picture was reported as done but nothing arrived in storage.' }
+
+    const media = await saveMediaRecord({
+      key,
+      url: '', // saveMediaRecord rebuilds the serving url for proxied providers
+      provider,
+      mimeType: 'image/webp',
+      sizeBytes: confirmed,
+      originalName: 'Space planner picture.webp',
+    })
+    return { mediaId: media.id, url: media.url }
+  } catch (error) {
+    return { error: `The picture could not be filed: ${error instanceof Error ? error.message : String(error)}` }
+  }
 }
 
 function constantTimeEqual(a: string, b: string): boolean {

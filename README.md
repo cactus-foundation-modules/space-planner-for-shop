@@ -92,11 +92,10 @@ Named rather than quietly missing:
 - **Persisting crunched models to IndexedDB.** Prepared models are cached in memory
   for the life of the page, so a second visit re-downloads. This is the obvious next
   saving.
-- **The photoreal render worker itself.** The enqueue route, the job table, the
-  polling and the authenticated callback are all here, to the contract below; the
-  Fly app that does the rendering is not part of this repo.
-  Pictures stay switched off until `SPACE_PLANNER_RENDER_URL` and
-  `SPACE_PLANNER_RENDER_SECRET` are set, and the admin says so plainly.
+- **Persisting the picture machine's browser between jobs.** Every render pays a
+  cold Chromium start. Worth doing only if renders ever become frequent enough
+  for a machine to catch a second job before its idle clock runs out, which today
+  they are not.
 - **Delivery dates on the item list.** Wired to a `shop.delivery-estimates`
   extension point that `advanced-shipping-for-shop` does not publish yet. Absent,
   the column simply does not appear.
@@ -148,30 +147,65 @@ quote page takes its heading, intro, terms, validity note and hide-prices rule
 from quote-for-shop's settings, and carries the real quote number when the plan
 has already been through the quote flow.
 
-## Render worker contract
+## The picture service
 
-The worker receives `POST { jobId, scene, models, callbackUrl, callbackToken }`
-with a `Bearer` of `SPACE_PLANNER_RENDER_SECRET`, renders the scene, uploads the
-image itself, and calls back with `{ jobId, token, mediaId?, url?, error? }`. The
-token is per job, so a leaked one is worthless the moment that job finishes.
+Owner-provisioned, from the Pictures screen. One button when the site already has
+a Fly.io key - which it usually does, because the video converter wanted one
+first (`lib/media/media-worker-config.ts`, or `MEDIA_WORKER_FLY_TOKEN` /
+`SEQUENCE_FLY_TOKEN`) - and one box plus one button when it does not. Pressing it
+creates a Fly app and a shared IPv4 and nothing else: **no machine exists between
+renders**.
 
-`scene` is exactly what the browser draws from (`lib/scene/scene-plan.ts`). One
-scene-assembly library, two consumers - a render assembled a second way is how
-pictures quietly stop matching plans.
+Each render then gets a machine of its own (`performance-8x`, 16GB, the same
+shape as core's video converter) created at enqueue time and destroyed when the
+picture lands. Ten shoppers asking at once get ten machines and ten pictures at
+once, which costs what ten one after another would have cost and takes a tenth as
+long. `maxRenderMachines` is a spend ceiling, not a queue depth: past it a
+shopper is asked to try again in a minute.
+
+Three independent things end a machine, because the one that costs money is the
+one that outlives its job:
+
+1. the callback destroys it the moment the picture is filed;
+2. `auto_destroy` + `restart: 'no'` + the worker's own idle exit;
+3. the nightly sweep destroys anything no live job claims.
+
+`SPACE_PLANNER_RENDER_URL` still works and still wins, for a worker somebody runs
+themselves. Nothing is created for it and nothing is destroyed - not our machine,
+not our lifecycle.
+
+### Worker contract
+
+The worker gets `POST { jobId, pageUrl, width, height, uploadUrl, uploadToken,
+uploadContentType, callbackUrl, callbackToken }` with a `Bearer` of the app's
+worker token, and answers `{ jobId, token, sizeBytes }` or `{ jobId, token,
+error }`. Both tokens are per job, so a leaked one is worthless the moment that
+job finishes, and nothing accepts image bytes - the picture goes straight to
+storage under a key the site chose before the machine existed.
+
+**The worker does not draw the room.** It opens `pageUrl` - served by this module
+at `/space-planner/render/[id]` - waits for that page to set
+`window.__splRenderReady`, and photographs it. So the renderer is
+`lib/three/planner-scene.ts`, the same code the shopper was looking at when they
+pressed the button, and there is no second implementation to drift from it.
+Source: `cactus-foundation-modules/space-planner-render-worker`.
 
 ## Environment
 
 | Variable | Required | What it does |
 |---|---|---|
-| `SPACE_PLANNER_RENDER_URL` | No | Where to send render jobs |
-| `SPACE_PLANNER_RENDER_SECRET` | No | Shared secret for the outbound job |
+| `SPACE_PLANNER_RENDER_URL` | No | A picture service you run yourself. Set, and the button is not offered |
+| `SPACE_PLANNER_RENDER_SECRET` | No | Shared secret for that outbound job |
 | `CRON_SECRET` | No | Already documented in core; guards the nightly sweep |
+
+Nothing needs setting for the provisioned path - the Fly key, the app name and
+the worker token all live in `spl_render_worker`.
 
 ## Tables
 
 `spl_settings`, `spl_rooms`, `spl_plans`, `spl_plan_versions`, `spl_model_meta`,
 `spl_category_defaults`, `spl_dimension_cache`, `spl_backfill_jobs`,
-`spl_render_jobs`, `spl_events`.
+`spl_render_jobs`, `spl_render_worker`, `spl_events`.
 
 Uninstalling with data removes all of them - and unlike an order or a review, the
 customer has no copy of a plan anywhere else, so `code_only` (core's default, and

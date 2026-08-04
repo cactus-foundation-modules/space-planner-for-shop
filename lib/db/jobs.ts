@@ -126,6 +126,7 @@ type RenderRow = {
   result_media_id: string | null
   result_url: string
   error: string
+  machine_id: string
   callback_token: string
   started_at: Date | null
   finished_at: Date | null
@@ -144,6 +145,7 @@ function toRender(row: RenderRow): SplRenderJob {
     resultMediaId: row.result_media_id,
     resultUrl: row.result_url,
     error: row.error,
+    machineId: row.machine_id ?? '',
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     createdAt: row.created_at,
@@ -195,6 +197,25 @@ export async function getRenderCallbackToken(id: string): Promise<string | null>
     SELECT "callback_token" FROM "spl_render_jobs" WHERE "id" = ${id} LIMIT 1
   `
   return rows[0]?.callback_token ?? null
+}
+
+/** Remember which machine is doing this one. Written the moment Fly hands the
+ * machine over, BEFORE the job is dispatched to it - a machine created and then
+ * forgotten because the next line threw is exactly the machine nobody finds. */
+export async function setRenderMachine(id: string, machineId: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE "spl_render_jobs" SET "machine_id" = ${machineId}, "updated_at" = CURRENT_TIMESTAMP WHERE "id" = ${id}
+  `
+}
+
+/** The machines live jobs still have a claim on. Everything else running in the
+ * app is fair game for the sweep. */
+export async function claimedMachineIds(): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ machine_id: string }[]>`
+    SELECT "machine_id" FROM "spl_render_jobs"
+    WHERE "status" IN ('QUEUED', 'RUNNING') AND "machine_id" <> ''
+  `
+  return rows.map((row) => row.machine_id)
 }
 
 export async function markRenderRunning(id: string): Promise<void> {

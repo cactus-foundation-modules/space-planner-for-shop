@@ -84,6 +84,14 @@ export const SplConfigSchema = z.object({
   // ---- Abuse ----------------------------------------------------------------
   rateLimitWindowMin: z.number().int().min(1).max(1440).default(60),
   maxRendersPerWindow: z.number().int().min(1).max(200).default(10),
+  /**
+   * How many picture machines may run at once. Each render gets its own machine
+   * and destroys it when it is done, so this is not a queue depth - it is the
+   * most this site is willing to be spending at any one moment. Past it, a
+   * customer is told to try again in a minute rather than joining a queue behind
+   * a route that has sixty seconds to live.
+   */
+  maxRenderMachines: z.number().int().min(1).max(50).default(6),
   maxQuotesPerWindow: z.number().int().min(1).max(200).default(5),
   maxPlanEmailsPerWindow: z.number().int().min(1).max(200).default(10),
 })
@@ -134,7 +142,21 @@ export async function updateSplConfig(patch: Partial<SplConfig>): Promise<SplCon
   return next
 }
 
-/** Whether the render worker is actually reachable, as opposed to merely enabled. */
-export function renderWorkerConfigured(): boolean {
+/**
+ * Whether the render worker is actually reachable, as opposed to merely enabled.
+ *
+ * Two ways to be set up, and the hand-wired one wins. SPACE_PLANNER_RENDER_URL
+ * means somebody runs their own worker and has told us where it is; anything we
+ * provisioned ourselves would be second-guessing them. Everything else uses the
+ * Fly app the owner made by pressing the button.
+ */
+export function renderEnvConfigured(): boolean {
   return Boolean(process.env.SPACE_PLANNER_RENDER_URL && process.env.SPACE_PLANNER_RENDER_SECRET)
+}
+
+export async function renderWorkerConfigured(): Promise<boolean> {
+  if (renderEnvConfigured()) return true
+  const { getRenderWorker } = await import('@/modules/space-planner-for-shop/lib/db/render-worker')
+  const worker = await getRenderWorker()
+  return Boolean(worker.appName && worker.workerToken)
 }

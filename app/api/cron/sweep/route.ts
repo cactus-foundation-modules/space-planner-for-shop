@@ -4,7 +4,8 @@ import { listStaleProductIds } from '@/modules/space-planner-for-shop/lib/db/dim
 import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
 import { purgeOldEvents } from '@/modules/space-planner-for-shop/lib/db/events'
 import { deleteOrphanedRooms } from '@/modules/space-planner-for-shop/lib/db/rooms'
-import { failStaleRenderJobs } from '@/modules/space-planner-for-shop/lib/db/jobs'
+import { claimedMachineIds, failStaleRenderJobs } from '@/modules/space-planner-for-shop/lib/db/jobs'
+import { sweepOrphanMachines } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
 
 // The nightly tidy-up. Four small jobs, all bounded, declared as a cron in the
 // manifest so no core file needs editing.
@@ -47,6 +48,13 @@ export async function GET(request: NextRequest) {
   //    crash locks that plan out of ever being rendered again, because there is
   //    only ever one live job per plan.
   report.staleRendersFailed = await failStaleRenderJobs()
+
+  // 5. Picture machines nothing is waiting on any more. The third and last
+  //    layer of the shutdown story: the callback destroys a machine the moment
+  //    its picture lands, the machine destroys itself if it goes quiet, and this
+  //    catches the one that managed neither. Runs AFTER step 4, so a job just
+  //    aged out no longer claims its machine and the machine goes with it.
+  report.orphanMachinesDestroyed = await sweepOrphanMachines(await claimedMachineIds()).catch(() => 0)
 
   return NextResponse.json({ ok: true, ...report })
 }
