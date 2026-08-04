@@ -3,7 +3,6 @@
 import {
   ACESFilmicToneMapping,
   AmbientLight,
-  BackSide,
   BoxGeometry,
   CanvasTexture,
   Color,
@@ -52,9 +51,9 @@ export type SceneHandles = {
   dispose: () => void
 }
 
-const PLACEHOLDER_COLOUR = 0xb9c0c8
-const FLOOR_COLOUR = 0xd9d2c7
-const WALL_COLOUR = 0xf2f0ec
+const PLACEHOLDER_COLOUR = 0x9aa4ae
+const FLOOR_COLOUR = 0xbfb5a4
+const WALL_COLOUR = 0xeceae5
 
 export function createRenderer(canvas: HTMLCanvasElement): WebGLRenderer | null {
   try {
@@ -80,10 +79,13 @@ export function createScene(): { scene: Scene; camera: PerspectiveCamera } {
   const camera = new PerspectiveCamera(50, 1, 0.05, 200)
   camera.position.set(4, 3, 6)
 
-  const ambient = new AmbientLight(0xffffff, 1.4)
-  const key = new DirectionalLight(0xffffff, 2.2)
+  // Toned down from where this started. With ACES tone mapping on top, an
+  // ambient of 1.4 plus a key of 2.2 washed the floor and the walls to the same
+  // near-white and the room lost its corners.
+  const ambient = new AmbientLight(0xffffff, 0.85)
+  const key = new DirectionalLight(0xffffff, 1.5)
   key.position.set(4, 8, 6)
-  const fill = new DirectionalLight(0xffffff, 0.8)
+  const fill = new DirectionalLight(0xffffff, 0.45)
   fill.position.set(-6, 4, -4)
   scene.add(ambient, key, fill)
 
@@ -121,19 +123,15 @@ export function buildRoom(description: SceneDescription): Group {
   floor.name = 'floor'
   group.add(floor)
 
-  // BackSide, and the whole 3D view depends on it.
-  //
-  // A room is a closed box, so an orbit camera outside it sees six opaque
-  // outsides and nothing else - which is precisely what this used to draw: a
-  // grey crate with the furniture sealed inside. Rendering only the inward faces
-  // makes the near walls disappear as you come round to them and leaves the far
-  // ones standing, which is the dolls-house view everybody expects. From inside,
-  // at eye level, nothing changes: the inward faces are the ones you were
-  // looking at anyway.
-  const wallMaterial = new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: BackSide })
+  // Every wall carries the direction it faces, and the view hides the ones
+  // between the camera and the room each frame (updateWallVisibility). Without
+  // it a room is a closed box and an orbit camera outside it sees six opaque
+  // outsides and nothing else - which is exactly what this drew before: a grey
+  // crate with the furniture sealed inside.
+  const wallMaterial = new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: DoubleSide })
   for (const wall of description.walls) {
     for (const segment of wallSegments(wall)) {
-      group.add(buildWallSegment(segment, wall, wallMaterial))
+      group.add(buildWallSegment(segment, wall, wallMaterial, description.centre))
     }
   }
 
@@ -199,7 +197,12 @@ export function wallSegments(wall: SceneDescription['walls'][number]): WallSpan[
   return spans.filter((span) => span.toT - span.fromT > 0.001 && span.heightM > 0.001)
 }
 
-function buildWallSegment(span: WallSpan, wall: SceneDescription['walls'][number], material: MeshStandardMaterial): Mesh {
+function buildWallSegment(
+  span: WallSpan,
+  wall: SceneDescription['walls'][number],
+  material: MeshStandardMaterial,
+  roomCentre: { x: number; z: number },
+): Mesh {
   const dx = wall.b.x - wall.a.x
   const dz = wall.b.z - wall.a.z
   const length = Math.hypot(dx, dz)
@@ -208,13 +211,37 @@ function buildWallSegment(span: WallSpan, wall: SceneDescription['walls'][number
 
   const geometry = new BoxGeometry(segmentLength, span.heightM, wall.thicknessM)
   const mesh = new Mesh(geometry, material)
-  mesh.position.set(
-    wall.a.x + dx * midT,
-    span.baseM + span.heightM / 2,
-    wall.a.z + dz * midT,
-  )
+  const x = wall.a.x + dx * midT
+  const z = wall.a.z + dz * midT
+  mesh.position.set(x, span.baseM + span.heightM / 2, z)
   mesh.rotation.y = -Math.atan2(dz, dx)
+
+  // Which way this wall faces, pointing out of the room. Taken as the
+  // perpendicular to the wall, then flipped if it happens to point back at the
+  // middle - which is what keeps it right for an L-shaped room, where "away from
+  // the centre" on its own is not good enough.
+  const perpendicular = length > 0 ? { x: dz / length, z: -dx / length } : { x: 0, z: 1 }
+  const awayFromCentre = (x - roomCentre.x) * perpendicular.x + (z - roomCentre.z) * perpendicular.z
+  mesh.userData.outward = awayFromCentre >= 0 ? perpendicular : { x: -perpendicular.x, z: -perpendicular.z }
   return mesh
+}
+
+/**
+ * The dolls-house effect: hide whichever walls stand between the camera and the
+ * room.
+ *
+ * Cheap enough to run every frame (a handful of dot products) and the only thing
+ * that makes an orbiting camera useful at all - a room is a closed box, and a
+ * closed box seen from outside is a box. Inside the room every wall passes the
+ * test, so standing in it looks exactly as it should.
+ */
+export function updateWallVisibility(room: Group, camera: PerspectiveCamera): void {
+  for (const child of room.children) {
+    const outward = child.userData.outward as { x: number; z: number } | undefined
+    if (!outward) continue
+    const toCamera = { x: camera.position.x - child.position.x, z: camera.position.z - child.position.z }
+    child.visible = toCamera.x * outward.x + toCamera.z * outward.z <= 0.02
+  }
 }
 
 /**
@@ -261,7 +288,7 @@ export function buildPlaceholder(node: SceneNode): Object3D {
     )
   }
 
-  group.add(buildLabel(node.label, node.size.height + 0.12, node.size.width))
+  group.add(buildLabel(node.label, node.size.height + 0.12))
   return group
 }
 
@@ -300,10 +327,20 @@ function labelTexture(text: string): CanvasTexture {
  * a pedestal is the same nine hundred millimetres wide as the tag on a boardroom
  * table, which at eye level fills the room with billboards.
  */
-export function buildLabel(text: string, y: number, widthM = 0.9): Sprite {
-  const width = Math.min(1.1, Math.max(0.45, widthM))
-  const sprite = new Sprite(new SpriteMaterial({ map: labelTexture(text), transparent: true, depthTest: false, opacity: 0.92 }))
-  sprite.scale.set(width, width * 0.25, 1)
+export function buildLabel(text: string, y: number): Sprite {
+  const sprite = new Sprite(
+    new SpriteMaterial({
+      map: labelTexture(text),
+      transparent: true,
+      depthTest: false,
+      opacity: 0.85,
+      // Constant on screen rather than in the room. A tag sized in metres is
+      // legible from across the room and the size of a doormat when you stand
+      // next to the thing it names, which is exactly what "stand in it" does.
+      sizeAttenuation: false,
+    }),
+  )
+  sprite.scale.set(0.15, 0.0375, 1)
   sprite.position.y = y
   // Drawn last, so a tag is never hidden inside the furniture it names but is
   // still ordered predictably against the other tags.
@@ -407,25 +444,48 @@ export function frameRoom(camera: PerspectiveCamera, description: SceneDescripti
   const radius = 0.5 * Math.hypot(bounds.width, bounds.depth, bounds.height)
   const vFov = (camera.fov * Math.PI) / 180
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.2, camera.aspect))
-  const distance = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 1.06
+  const distance = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 0.98
   const target = new Vector3(description.centre.x, bounds.height * 0.35, description.centre.z)
   // Looking down the room's diagonal from about thirty degrees up: high enough
   // to read the layout, low enough that the furniture still looks like furniture
   // rather than a floor plan with shadows.
   camera.position.set(
-    target.x + distance * 0.62,
-    target.y + distance * 0.52,
-    target.z + distance * 0.62,
+    target.x + distance * 0.64,
+    target.y + distance * 0.44,
+    target.z + distance * 0.64,
   )
   camera.lookAt(target)
   return target
 }
 
-/** Stand in the room, roughly at eye level, looking across it. */
+/**
+ * Stand in the room, roughly at eye level, looking across it.
+ *
+ * At the wall rather than in the middle. The middle is where the furniture is -
+ * the first thing placed lands there - so a camera parked at the centre put the
+ * shopper's head inside a desk and showed them the underneath of a worktop.
+ */
 export function eyeLevel(camera: PerspectiveCamera, description: SceneDescription): Vector3 {
-  const bounds = roomBounds(description)
-  const target = new Vector3(description.centre.x, 1.2, description.centre.z)
-  camera.position.set(description.centre.x, 1.6, description.centre.z + Math.max(1.2, bounds.depth * 0.42))
+  const xs = description.floor.outline.map((point) => point.x)
+  const zs = description.floor.outline.map((point) => point.z)
+  const box = { minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs) }
+  const width = box.maxX - box.minX
+  const depth = box.maxZ - box.minZ
+
+  // Stand at the end of the room's LONGEST wall and look down it. Standing at
+  // the nearest wall of a small room means standing a metre from the furniture,
+  // and a view of the underside of one desktop is not what "stand in it"
+  // promises: it is meant to be the moment the room feels real.
+  const alongX = width >= depth
+  const stand = 0.6
+  const position = alongX
+    ? new Vector3(box.minX + stand, 1.6, description.centre.z)
+    : new Vector3(description.centre.x, 1.6, box.minZ + stand)
+  const target = alongX
+    ? new Vector3(box.maxX - 0.2, 1.15, description.centre.z)
+    : new Vector3(description.centre.x, 1.15, box.maxZ - 0.2)
+
+  camera.position.copy(position)
   camera.lookAt(target)
   return target
 }

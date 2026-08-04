@@ -3,7 +3,9 @@ import {
   clampItemIntoRoom,
   footprintsOverlap,
   itemCorners,
+  itemInsideRoom,
   itemsClash,
+  nearestWall,
   normaliseOrigin,
   normaliseWinding,
   pointInPolygon,
@@ -12,7 +14,7 @@ import {
   snapYaw,
 } from '@/modules/space-planner-for-shop/lib/geometry'
 import { PLAN_SCHEMA_VERSION } from '@/modules/space-planner-for-shop/lib/types'
-import type { MountType, PlanItem, PlanItems, RoomGeometry, SizeSource } from '@/modules/space-planner-for-shop/lib/types'
+import type { MountType, PlanItem, PlanItems, RoomGeometry, SizeSource, Vertex } from '@/modules/space-planner-for-shop/lib/types'
 
 // The planner's state and every way it can change, as a pure reducer.
 //
@@ -48,6 +50,18 @@ export type ProductSize = {
 export type PlannerAction =
   | { type: 'set-geometry'; geometry: RoomGeometry }
   | { type: 'set-wall-length'; wallIndex: number; lengthMm: number }
+  /**
+   * A new outline for the room, of any number of walls.
+   *
+   * `settle` separates the two halves of an edit. While a corner is under the
+   * pointer the vertices are taken exactly as given: re-winding them mid-drag
+   * would renumber the corner being dragged, and re-originning them would slide
+   * the whole room out from under the cursor. On release, `settle` tidies the
+   * winding and the origin, moves the furniture by the same amount so it stays
+   * where it was in the room, and puts anything now outside the walls in the
+   * tray rather than leaving it stranded in the garden.
+   */
+  | { type: 'set-shape'; vertices: Vertex[]; settle?: boolean }
   | { type: 'add-item'; product: ProductSize; x: number; y: number; staged?: boolean; id: string }
   | { type: 'move-items'; ids: string[]; dx: number; dy: number; snap: boolean }
   | { type: 'place-item'; id: string; x: number; y: number; snap: boolean }
@@ -65,6 +79,64 @@ export type PlannerAction =
 
 export function emptyState(geometry: RoomGeometry): PlannerState {
   return { geometry, items: [], selection: [], revision: 0 }
+}
+
+/**
+ * Put a new outline on the room without losing track of the furniture.
+ *
+ * Re-origining the outline is a translation of the whole room, and the items are
+ * held in the same coordinate space - so the identical translation has to reach
+ * them or the whole layout drifts a wall's width every time somebody types a
+ * length. That was true of the wall-length editor before rooms had corners you
+ * could drag, and it will be true of anything else that moves the origin.
+ */
+function applyShape(
+  state: PlannerState,
+  vertices: Vertex[],
+  settle: boolean,
+  bump: (next: Omit<PlannerState, 'revision'>) => PlannerState,
+): PlannerState {
+  if (vertices.length < 3) return state
+  if (!settle) {
+    return bump({ ...state, geometry: { ...state.geometry, vertices } })
+  }
+
+  const wound = normaliseWinding(vertices)
+  const moved = normaliseOrigin(wound)
+  const first = wound[0]
+  const shifted = moved[0]
+  const dx = first && shifted ? shifted.x - first.x : 0
+  const dy = first && shifted ? shifted.y - first.y : 0
+  const geometry = { ...state.geometry, vertices: moved }
+
+  const items = state.items.map((item) => {
+    if (item.staged) return item
+    const followed = { ...item, x: item.x + dx, y: item.y + dy }
+    // Anything the new outline no longer contains goes to the tray. Deleting it
+    // would throw away a choice somebody made; leaving it outside the walls would
+    // quietly put it in the car park.
+    return itemInsideRoom(followed, geometry) ? followed : { ...followed, staged: true, parentId: null }
+  })
+
+  return bump({ ...state, geometry, items })
+}
+
+/**
+ * Whether this step of a drag is taking the item away from the wall it is on.
+ *
+ * Snapping is applied per pointer event, and a drag arrives as a stream of them
+ * a few pixels apart. An item already flush against a wall therefore had every
+ * small step away from it undone by the very next snap, and no amount of
+ * dragging could ever accumulate the quarter-metre needed to escape - the thing
+ * was welded to the wall. Snapping should pull an item IN and never pull it
+ * back, so a step that increases the distance is left alone; the moment the
+ * shopper drags towards a wall again, snapping resumes as before.
+ */
+function movingAwayFromWall(before: PlanItem, after: PlanItem, geometry: RoomGeometry): boolean {
+  const from = nearestWall({ x: before.x, y: before.y }, geometry.vertices)
+  const to = nearestWall({ x: after.x, y: after.y }, geometry.vertices)
+  if (!from || !to) return false
+  return to.distanceMm > from.distanceMm + 0.5
 }
 
 function makeItem(id: string, product: ProductSize, x: number, y: number, staged: boolean): PlanItem {
@@ -99,13 +171,21 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
 
     case 'set-geometry': {
       const geometry = { ...action.geometry, vertices: normaliseOrigin(normaliseWinding(action.geometry.vertices)) }
-      return bump({ ...state, geometry })
+      // A wholesale replacement can be a much smaller room - "start the room
+      // again" is exactly that - so anything the new outline no longer contains
+      // goes to the tray. Deleting somebody's choices because they redrew the
+      // walls would be unforgivable; leaving them outside is merely baffling.
+      const items = state.items.map((item) =>
+        item.staged || itemInsideRoom(item, geometry) ? item : { ...item, staged: true, parentId: null },
+      )
+      return bump({ ...state, geometry, items })
     }
 
-    case 'set-wall-length': {
-      const vertices = normaliseOrigin(setWallLength(state.geometry.vertices, action.wallIndex, action.lengthMm))
-      return bump({ ...state, geometry: { ...state.geometry, vertices } })
-    }
+    case 'set-wall-length':
+      return applyShape(state, setWallLength(state.geometry.vertices, action.wallIndex, action.lengthMm), true, bump)
+
+    case 'set-shape':
+      return applyShape(state, action.vertices, action.settle ?? false, bump)
 
     case 'add-item': {
       const item = makeItem(action.id, action.product, action.x, action.y, action.staged ?? false)
@@ -124,7 +204,9 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       const items = state.items.map((item) => {
         if (!moving.has(item.id) || item.staged) return item
         const moved = { ...item, x: Math.round(item.x + action.dx), y: Math.round(item.y + action.dy) }
-        const snapped = action.snap && !item.parentId ? snapToWall(moved, state.geometry) : moved
+        const snapped = action.snap && !item.parentId && !movingAwayFromWall(item, moved, state.geometry)
+          ? snapToWall(moved, state.geometry)
+          : moved
         return clampItemIntoRoom(snapped, state.geometry)
       })
       return bump({ ...state, items })

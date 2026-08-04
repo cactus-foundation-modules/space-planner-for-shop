@@ -5,6 +5,7 @@ import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } 
 import { formatMoney } from '@/modules/shop/lib/money'
 import { CataloguePanel } from '@/modules/space-planner-for-shop/components/public/CataloguePanel'
 import { Plan2d } from '@/modules/space-planner-for-shop/components/public/Plan2d'
+import type { PlanMode } from '@/modules/space-planner-for-shop/components/public/Plan2d'
 import { plannerCss } from '@/modules/space-planner-for-shop/components/public/planner-css'
 import { addPlanToCart, cartAsStagedItems } from '@/modules/space-planner-for-shop/lib/client/cart-bridge'
 import { clearScratch, readScratch, writeScratch } from '@/modules/space-planner-for-shop/lib/client/scratch'
@@ -21,10 +22,10 @@ import {
 import type { History, PlannerState, ProductSize } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
-import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
+import { polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
-import type { PlanItem, ProductSnapshot, RoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
+import type { PlanItem, ProductSnapshot, RoomGeometry, Vertex } from '@/modules/space-planner-for-shop/lib/types'
 import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalogue'
 
 // The planner.
@@ -45,6 +46,23 @@ const View3d = dynamic(() => import('@/modules/space-planner-for-shop/components
 
 type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
 
+/**
+ * A saved room and layout, loaded on the server and handed straight in.
+ *
+ * Passed as a prop rather than fetched on mount so that opening something from
+ * "My spaces" comes up with the room already drawn, instead of showing the
+ * first-run screen for a beat to somebody who has plainly been past it.
+ */
+export type OpenPlan = {
+  /** Null when a room is opened for a NEW layout in it. */
+  planId: string | null
+  roomId: string
+  roomName: string
+  planName: string
+  geometry: RoomGeometry
+  items: PlanItem[]
+}
+
 export type SpacePlannerProps = {
   signedIn: boolean
   signInHref: string
@@ -54,6 +72,8 @@ export type SpacePlannerProps = {
   guidance: { walkwayClearanceMm: number; disclaimer: string; enabled: boolean }
   /** Whatever this shop prints in front of a number. Never assumed to be a pound. */
   currencySymbol: string
+  /** A room and layout the member already saved, opened from My spaces. */
+  openPlan?: OpenPlan | null
   /** Staged straight from the basket when the shopper arrived from the cart. */
   stageCart: boolean
   /** Pre-staged single product when they arrived from a product page. */
@@ -75,11 +95,25 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [products, setProducts] = useState<Record<string, ProductInfo>>({})
   const [models, setModels] = useState<Map<string, { url: string; cacheKey: string; format: string }>>(new Map())
   const [message, setMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null)
-  const [savedPlanId, setSavedPlanId] = useState<string | null>(null)
-  const [savedRoomId, setSavedRoomId] = useState<string | null>(null)
+  const [savedPlanId, setSavedPlanId] = useState<string | null>(props.openPlan?.planId ?? null)
+  const [savedRoomId, setSavedRoomId] = useState<string | null>(props.openPlan?.roomId ?? null)
+  // The names travel with the plan. Saving over somebody's "Ground floor, east
+  // wing" and calling it "My space" would be a small theft.
+  const [roomName] = useState(props.openPlan?.roomName ?? 'My space')
+  const [planName] = useState(props.openPlan?.planName ?? 'Option A')
   const [dirty, setDirty] = useState(false)
   const [wallEdit, setWallEdit] = useState<{ index: number; lengthMm: number } | null>(null)
   const [roomEdit, setRoomEdit] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [startAgain, setStartAgain] = useState(false)
+  /**
+   * What the flat plan's pointer means. Editing the room is a mode rather than a
+   * second screen, so the shopper never loses sight of what they have already
+   * put in it - and a room of any number of walls is reachable without leaving
+   * the surface they are already looking at.
+   */
+  const [planMode, setPlanMode] = useState<PlanMode>('furnish')
+  const shapeBeforeDraw = useRef<RoomGeometry | null>(null)
   const idCounter = useRef(0)
   const stagedProductRef = useRef(false)
 
@@ -95,20 +129,30 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   // ---- first run --------------------------------------------------------
 
+  const opened = props.openPlan
   useEffect(() => {
-    // Restoring what a signed-out visitor was in the middle of. It has to be an
-    // effect rather than a lazy initial state: localStorage does not exist while
-    // this renders on the server, and reading it during the first client render
-    // would hand back different markup than the server sent. Deferred by a
-    // microtask so the restore lands as its own update rather than cascading out
-    // of the first paint.
+    // A saved plan wins over the browser's scratch copy: it is the thing the
+    // shopper just clicked on.
+    if (opened) {
+      queueMicrotask(() => {
+        dispatch({ type: 'load', snapshot: { geometry: opened.geometry, items: opened.items } })
+        setStarted(true)
+      })
+      return
+    }
+    // Otherwise, restoring what a signed-out visitor was in the middle of. It
+    // has to be an effect rather than a lazy initial state: localStorage does
+    // not exist while this renders on the server, and reading it during the
+    // first client render would hand back different markup than the server sent.
+    // Deferred by a microtask so the restore lands as its own update rather than
+    // cascading out of the first paint.
     const scratch = readScratch()
     if (!scratch) return
     queueMicrotask(() => {
       dispatch({ type: 'load', snapshot: { geometry: scratch.geometry, items: scratch.items } })
       setStarted(true)
     })
-  }, [])
+  }, [opened])
 
   // ---- product data -----------------------------------------------------
 
@@ -194,9 +238,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
   // ---- scratch + unsaved-work guard ------------------------------------
 
   useEffect(() => {
-    if (!started) return
+    // Scratch is the safety net for work with nowhere else to live. A plan that
+    // is already saved has somewhere - and writing it here would have "continue
+    // where you left off" resurrect it on the next visit as if it were unsaved.
+    if (!started || savedPlanId) return
     writeScratch(state.geometry, state.items)
-  }, [state.geometry, state.items, started])
+  }, [state.geometry, state.items, started, savedPlanId])
 
   useEffect(() => {
     if (!dirty) return
@@ -275,8 +322,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
       setProducts((current) => ({ ...current, [card.id]: info }))
       const spot = findFreeSpot(state.items, state.geometry, info)
       dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
+      // The card carries enough to draw the thing at once, which is why it is
+      // used above - but it has no model and no under-desk measurements. Asking
+      // for those here rather than leaving it to the missing-products effect,
+      // because that effect looks for products it has never heard of and the
+      // line above has just introduced this one. Without it, placing from the
+      // browse panel drew a labelled box for a product whose card said "3D".
+      void fetchProducts([card.id]).catch(() => {
+        // The optimistic version stands. A model that never arrives is a
+        // placeholder, which is the main path for most of the catalogue anyway.
+      })
     },
-    [commit, nextId, state.geometry, state.items],
+    [commit, nextId, state.geometry, state.items, fetchProducts],
   )
 
   const applyStep = useCallback(
@@ -302,7 +359,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         const roomResponse = await fetch('/api/m/space-planner-for-shop/member/rooms', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: 'My space', notes: '', geometry: state.geometry }),
+          body: JSON.stringify({ name: roomName, notes: '', geometry: state.geometry }),
         })
         const roomData = (await roomResponse.json()) as { room?: { id: string }; error?: string }
         if (!roomResponse.ok || !roomData.room) throw new Error(roomData.error ?? 'Could not save the room')
@@ -312,11 +369,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
         await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: 'My space', notes: '', geometry: state.geometry }),
+          body: JSON.stringify({ name: roomName, notes: '', geometry: state.geometry }),
         })
       }
 
-      const body = JSON.stringify({ name: 'Option A', items: toPlanItems(state) })
+      const body = JSON.stringify({ name: planName, items: toPlanItems(state) })
       const planResponse = savedPlanId
         ? await fetch(`/api/m/space-planner-for-shop/member/plans/${savedPlanId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body })
         : await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/plans`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
@@ -331,7 +388,76 @@ export function SpacePlanner(props: SpacePlannerProps) {
     } catch (error) {
       setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not save that just now.' })
     }
-  }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state])
+  }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
+
+  // ---- the room's own outline -------------------------------------------
+
+  /**
+   * A new outline, live from the canvas.
+   *
+   * Validation happens on settle, never mid-drag: telling somebody their walls
+   * cross while their finger is still moving through the position where they
+   * briefly do is nagging, not helping. On release an outline that folds through
+   * itself is refused and the previous one is put back - which is why the undo
+   * snapshot is taken at the start of the gesture rather than at the end of it.
+   */
+  const applyShape = useCallback(
+    (vertices: Vertex[], settle: boolean) => {
+      if (!settle) {
+        dispatch({ type: 'set-shape', vertices, settle: false })
+        return
+      }
+      const candidate = { ...state.geometry, vertices }
+      const issues = validateRoomGeometry(candidate).filter((issue) => issue.code === 'self-intersecting' || issue.code === 'wall-too-short')
+      if (issues.length > 0) {
+        setMessage({ tone: 'error', text: issues[0]?.message ?? 'That shape will not work.' })
+        const step = undo(history, state)
+        if (step) {
+          setHistory(step.history)
+          dispatch({ type: 'load', snapshot: step.snapshot })
+        }
+        return
+      }
+      setMessage(null)
+      dispatch({ type: 'set-shape', vertices, settle: true })
+      setDirty(true)
+    },
+    [history, state],
+  )
+
+  const startDrawing = useCallback(() => {
+    commit()
+    shapeBeforeDraw.current = state.geometry
+    setRoomEdit(false)
+    setStage('plan')
+    setPlanMode('draw')
+    setMessage({ tone: 'info', text: 'Tap each corner of the room in turn, then tap the first one again to close it.' })
+  }, [commit, state.geometry])
+
+  const finishDrawing = useCallback(
+    (vertices: Vertex[]) => {
+      const candidate = { ...state.geometry, vertices }
+      const issues = validateRoomGeometry(candidate).filter((issue) => issue.code !== 'obstruction-outside' && issue.code !== 'opening-off-wall' && issue.code !== 'opening-too-wide')
+      if (issues.length > 0) {
+        setMessage({ tone: 'error', text: issues[0]?.message ?? 'That shape will not work.' })
+        return
+      }
+      dispatch({ type: 'set-shape', vertices, settle: true })
+      shapeBeforeDraw.current = null
+      setPlanMode('furnish')
+      setDirty(true)
+      setMessage({ tone: 'info', text: 'There is your room. Click any wall to type its exact length.' })
+    },
+    [state.geometry],
+  )
+
+  const cancelDrawing = useCallback(() => {
+    const previous = shapeBeforeDraw.current
+    shapeBeforeDraw.current = null
+    setPlanMode('furnish')
+    if (previous) dispatch({ type: 'set-geometry', geometry: previous })
+    setMessage(null)
+  }, [])
 
   const sendToCart = useCallback(() => {
     const counts = new Map<string, number>()
@@ -354,6 +480,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       if (event.key === 'Escape') {
         setWallEdit(null)
         setRoomEdit(false)
+        setStartAgain(false)
         return
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
@@ -401,6 +528,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
             dispatch({ type: 'set-geometry', geometry })
             setStarted(true)
           }}
+          onDraw={() => {
+            setStarted(true)
+            setPlanMode('draw')
+            setMessage({ tone: 'info', text: 'Tap each corner of the room in turn, then tap the first one again to close it.' })
+          }}
         />
       </div>
     )
@@ -429,23 +561,51 @@ export function SpacePlanner(props: SpacePlannerProps) {
               role="tab"
               className="spl-tab"
               aria-selected={stage === option}
-              onClick={() => setStage(option)}
+              onClick={() => {
+                setStage(option)
+                if (option !== 'plan') setPlanMode('furnish')
+              }}
             >
               {VIEW_LABELS[option]}
             </button>
           ))}
         </div>
-        <div className="spl-bar-actions">
-          <button type="button" className="spl-btn" onClick={() => setRoomEdit(true)}>
+        {planMode !== 'furnish' ? (
+          <div className="spl-bar-actions">
+            <span className="spl-note">{planMode === 'draw' ? 'Drawing the room' : 'Changing the shape'}</span>
+            {planMode === 'draw' ? (
+              <button type="button" className="spl-btn" onClick={cancelDrawing}>
+                Cancel
+              </button>
+            ) : (
+              <button type="button" className="spl-btn spl-btn-primary" onClick={() => setPlanMode('furnish')}>
+                Done with the room
+              </button>
+            )}
+          </div>
+        ) : (
+        <div className={moreOpen ? 'spl-bar-actions is-open' : 'spl-bar-actions'}>
+          <button
+            type="button"
+            className="spl-btn spl-more-toggle"
+            aria-expanded={moreOpen}
+            onClick={() => setMoreOpen((open) => !open)}
+          >
+            {moreOpen ? 'Fewer' : 'More'}
+          </button>
+          <button type="button" className="spl-btn spl-secondary" onClick={() => setRoomEdit(true)}>
             Room
           </button>
-          <button type="button" className="spl-btn" onClick={() => applyStep(undo(history, state))} disabled={history.past.length === 0}>
+          <button type="button" className="spl-btn spl-secondary" onClick={() => setStartAgain(true)}>
+            Start the room again
+          </button>
+          <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(undo(history, state))} disabled={history.past.length === 0}>
             Undo
           </button>
-          <button type="button" className="spl-btn" onClick={() => applyStep(redo(history, state))} disabled={history.future.length === 0}>
+          <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(redo(history, state))} disabled={history.future.length === 0}>
             Redo
           </button>
-          <button type="button" className="spl-btn" onClick={() => window.print()}>
+          <button type="button" className="spl-btn spl-secondary" onClick={() => window.print()}>
             Print
           </button>
           <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
@@ -455,6 +615,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
             {props.signedIn ? 'Save' : 'Save (sign in)'}
           </button>
         </div>
+        )}
       </div>
 
       {message && (
@@ -466,7 +627,16 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </p>
       )}
 
-      <div className="spl-body">
+      {/* On paper the heading comes before the plan and the item list after it,
+          which is why this is two blocks rather than one. */}
+      <div className="spl-print-only spl-print-head">
+        <h2>{props.heading}</h2>
+        <span>
+          {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'} · {state.geometry.vertices.length} walls
+        </span>
+      </div>
+
+      <div className={planMode === 'furnish' ? 'spl-body' : 'spl-body spl-body-editing'}>
         <div className="spl-stage">
           {stage === 'plan' ? (
             <Plan2d
@@ -476,6 +646,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
               labels={labels}
               clashes={clashes}
               walkwayClearanceMm={props.guidance.enabled ? props.guidance.walkwayClearanceMm : 0}
+              mode={planMode}
               onSelect={(ids) => {
                 dispatch({ type: 'select', ids })
                 if (ids.length > 0) setTab('selected')
@@ -483,6 +654,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
               onDragItems={(ids, dx, dy, snap) => dispatch({ type: 'move-items', ids, dx, dy, snap })}
               onDragEnd={commit}
               onWallClick={(wallIndex, currentLengthMm) => setWallEdit({ index: wallIndex, lengthMm: currentLengthMm })}
+              onShape={applyShape}
+              onDrawDone={finishDrawing}
+              onDrawCancel={cancelDrawing}
             />
           ) : (
             <View3d description={description} models={models} options={prepareOptions} view={stage === 'eye' ? 'eye' : 'orbit'} />
@@ -501,21 +675,36 @@ export function SpacePlanner(props: SpacePlannerProps) {
             />
           )}
 
+          {startAgain && (
+            <StartAgainDialog
+              itemCount={placed.length}
+              onCancel={() => setStartAgain(false)}
+              onConfirm={() => {
+                commit()
+                setStartAgain(false)
+                setPlanMode('furnish')
+                setStage('plan')
+                setStarted(false)
+              }}
+            />
+          )}
+
           {roomEdit && (
             <RoomDialog
               geometry={state.geometry}
-              itemCount={placed.length}
               onCancel={() => setRoomEdit(false)}
               onCeiling={(mm) => {
                 commit()
                 dispatch({ type: 'set-geometry', geometry: { ...state.geometry, ceilingMm: mm } })
                 setRoomEdit(false)
               }}
-              onStartAgain={() => {
+              onEditShape={() => {
                 commit()
                 setRoomEdit(false)
-                setStarted(false)
+                setStage('plan')
+                setPlanMode('shape')
               }}
+              onDraw={startDrawing}
             />
           )}
         </div>
@@ -576,16 +765,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </aside>
       </div>
 
-      {/* The printed sheet. On screen this is display:none; on paper it is the
-          document somebody hands over, so it carries the item list and the
-          wording that says what the plan is and is not. */}
+      {/* The printed sheet's second half: the document somebody hands over, so it
+          carries the item list and the wording that says what the plan is and is
+          not. */}
       <div className="spl-print-only">
-        <div className="spl-print-head">
-          <h2>{props.heading}</h2>
-          <span>
-            {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
-          </span>
-        </div>
         <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />
       </div>
     </div>
@@ -643,18 +826,43 @@ function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onC
   )
 }
 
+/**
+ * Starting the room again.
+ *
+ * Confirmed, and the confirmation says what survives: the room goes, the
+ * furniture does not. Somebody who has spent twenty minutes choosing twelve
+ * desks needs to know that before they press it, not after.
+ */
+function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
+      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Start the room again">
+        <h2>Start the room again?</h2>
+        <p className="spl-note">
+          {props.itemCount === 0
+            ? 'You will go back to picking a shape for the room.'
+            : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept and put back in the room afterwards.`}
+        </p>
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onCancel}>Keep this room</button>
+          <button type="button" className="spl-btn spl-btn-danger" autoFocus onClick={props.onConfirm}>Start again</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** The room itself, after the first run: ceiling height, and the way back out. */
 function RoomDialog(props: {
   geometry: RoomGeometry
-  itemCount: number
   onCancel: () => void
   onCeiling: (mm: number) => void
-  onStartAgain: () => void
+  onEditShape: () => void
+  onDraw: () => void
 }) {
   const fieldId = useId()
   const [value, setValue] = useState(() => formatLength(props.geometry.ceilingMm, props.geometry.units))
   const [error, setError] = useState('')
-  const [confirming, setConfirming] = useState(false)
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
@@ -674,7 +882,17 @@ function RoomDialog(props: {
         }}
       >
         <h2>Your room</h2>
-        <p className="spl-note">To change a wall, click it on the flat plan and type its length.</p>
+        <p className="spl-note">
+          {props.geometry.vertices.length} walls. Click any one of them on the flat plan to type its length.
+        </p>
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onEditShape}>Change the shape</button>
+          <button type="button" className="spl-btn" onClick={props.onDraw}>Draw a new one</button>
+        </div>
+        <p className="spl-note">
+          Changing the shape lets you drag the corners about and add new ones, so an L-shape, a bay or a return is a
+          couple of taps rather than a compromise.
+        </p>
         <div className="spl-field">
           <label htmlFor={fieldId}>Ceiling height</label>
           <input id={fieldId} className="spl-input" value={value} autoFocus onChange={(event) => { setValue(event.target.value); setError('') }} />
@@ -684,20 +902,6 @@ function RoomDialog(props: {
           <button type="button" className="spl-btn" onClick={props.onCancel}>Close</button>
           <button type="submit" className="spl-btn spl-btn-primary">Save the height</button>
         </div>
-        <hr style={{ border: 0, borderTop: '1px solid var(--color-border)', margin: 0 }} />
-        {confirming ? (
-          <>
-            <p className="spl-note">
-              Starting again keeps {props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen but throws the room away.
-            </p>
-            <div className="spl-buttons">
-              <button type="button" className="spl-btn" onClick={() => setConfirming(false)}>Keep this room</button>
-              <button type="button" className="spl-btn spl-btn-danger" onClick={props.onStartAgain}>Start again</button>
-            </div>
-          </>
-        ) : (
-          <button type="button" className="spl-btn" onClick={() => setConfirming(true)}>Start the room again</button>
-        )}
       </form>
     </div>
   )
@@ -719,7 +923,7 @@ function RoomDialog(props: {
  * keyboard or screen-reader user, and it is how somebody standing in the room
  * with a tape measure actually holds the information.
  */
-function FirstRun(props: { heading: string; intro: string; onReady: (geometry: RoomGeometry) => void }) {
+function FirstRun(props: { heading: string; intro: string; onReady: (geometry: RoomGeometry) => void; onDraw: () => void }) {
   const ids = useId()
   const [mode, setMode] = useState<'choose' | 'type'>('choose')
   const [width, setWidth] = useState('6.2m')
@@ -727,16 +931,17 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
   const [ceiling, setCeiling] = useState('2.4m')
   const [error, setError] = useState('')
 
+  const shape = (vertices: RoomGeometry['vertices']) => {
+    props.onReady({ ...defaultRoomGeometry(), vertices })
+  }
+
   const preset = (widthMm: number, depthMm: number) => {
-    props.onReady({
-      ...defaultRoomGeometry(),
-      vertices: [
-        { x: 0, y: 0 },
-        { x: widthMm, y: 0 },
-        { x: widthMm, y: depthMm },
-        { x: 0, y: depthMm },
-      ],
-    })
+    shape([
+      { x: 0, y: 0 },
+      { x: widthMm, y: 0 },
+      { x: widthMm, y: depthMm },
+      { x: 0, y: depthMm },
+    ])
   }
 
   if (mode === 'type') {
@@ -795,22 +1000,45 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
     <div className="spl-first-run">
       <h1 className="spl-title">{props.heading}</h1>
       <p className="spl-note">{props.intro}</p>
+      {/* Two ways to say what the room is, and three shapes to start from and
+          change. Split rather than five equal cards: "type it" and "draw it" are
+          decisions about how you work, the presets are just a head start, and
+          five identical boxes make the choice look harder than it is. */}
       <div className="spl-choices">
         <button type="button" className="spl-choice" onClick={() => setMode('type')}>
           <strong>I know the measurements</strong>
           <span className="spl-note">Type the width and depth. Quickest by a mile.</span>
         </button>
-        <button type="button" className="spl-choice" onClick={() => preset(4000, 3000)}>
-          <strong>Small office</strong>
-          <span className="spl-note">4 × 3 m to start with. Change any wall afterwards.</span>
+        <button type="button" className="spl-choice" onClick={props.onDraw}>
+          <strong>Draw it myself</strong>
+          <span className="spl-note">Tap out the corners, however many there are. Bays, returns, the lot.</span>
         </button>
-        <button type="button" className="spl-choice" onClick={() => preset(8000, 6000)}>
-          <strong>Open plan</strong>
-          <span className="spl-note">8 × 6 m. Room for a bank of desks.</span>
+      </div>
+      <p className="spl-note">Or start from a shape and change it:</p>
+      <div className="spl-buttons">
+        <button type="button" className="spl-btn" onClick={() => preset(4000, 3000)}>Small office, 4 × 3 m</button>
+        <button type="button" className="spl-btn" onClick={() => preset(8000, 6000)}>Open plan, 8 × 6 m</button>
+        <button
+          type="button"
+          className="spl-btn"
+          onClick={() =>
+            // Six walls, the commonest awkward office shape there is.
+            shape([
+              { x: 0, y: 0 },
+              { x: 7000, y: 0 },
+              { x: 7000, y: 3000 },
+              { x: 4000, y: 3000 },
+              { x: 4000, y: 5500 },
+              { x: 0, y: 5500 },
+            ])
+          }
+        >
+          L-shaped
         </button>
       </div>
       <p className="spl-note">
-        Whichever you pick, you can click any wall afterwards and type its real length - the rest of the room follows.
+        Whichever you pick, you can click any wall afterwards and type its real length - the rest of the room follows -
+        and <strong>Room</strong> lets you drag the corners about or add new ones.
       </p>
     </div>
   )

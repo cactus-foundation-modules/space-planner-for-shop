@@ -17,6 +17,15 @@ import type { PlanItem, RoomGeometry, Vertex } from '@/modules/space-planner-for
 // the whole trick: grab an item and you drag it; grab bare floor and you pan;
 // let go of bare floor without having moved, next to a wall, and you get the
 // wall's length to type. A click is only ever a click if nothing moved.
+//
+// The same canvas is also the room's own editor. `mode` swaps what the pointer
+// means rather than putting a second surface beside the first: FURNISH arranges
+// the furniture, SHAPE drags the corners of the room itself, and DRAW puts a new
+// outline down from scratch. Rooms are not rectangles - offices have bays,
+// chimney breasts and returns - so an outline of any number of walls is the
+// point of the tool rather than a refinement of it.
+
+export type PlanMode = 'furnish' | 'shape' | 'draw'
 
 export type Plan2dProps = {
   geometry: RoomGeometry
@@ -26,10 +35,16 @@ export type Plan2dProps = {
   clashes: Array<{ a: string; b: string }>
   /** Millimetres. Zero switches the clearance guides off. */
   walkwayClearanceMm: number
+  mode: PlanMode
   onSelect: (ids: string[]) => void
   onDragItems: (ids: string[], dx: number, dy: number, snap: boolean) => void
   onDragEnd: () => void
   onWallClick: (wallIndex: number, currentLengthMm: number) => void
+  /** A new outline. `settle` marks the end of a gesture - see the reducer. */
+  onShape: (vertices: Vertex[], settle: boolean) => void
+  /** A finished drawing, in plan millimetres, wound in the order it was drawn. */
+  onDrawDone: (vertices: Vertex[]) => void
+  onDrawCancel: () => void
   onDropAt?: (x: number, y: number) => void
 }
 
@@ -38,8 +53,23 @@ type View = { scale: number; offsetX: number; offsetY: number }
 const PADDING = 44
 /** How near a wall a click has to land, in screen pixels, to mean "edit this wall". */
 const WALL_HIT_PX = 18
+/** How near a corner counts as grabbing it, in screen pixels. Generous: fingers. */
+const CORNER_HIT_PX = 16
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 6
+/** Everything drawn lands on a 10 mm grid. Nobody measures a room to the millimetre. */
+const DRAW_SNAP_MM = 10
+/**
+ * A blank canvas needs a size, and it cannot come from the room being replaced -
+ * that is what is being thrown away. Sixteen metres by twelve covers the offices
+ * this shop furnishes with room to spare, and the zoom and pan cover the rest.
+ */
+const DRAW_CANVAS: Vertex[] = [
+  { x: 0, y: 0 },
+  { x: 16_000, y: 0 },
+  { x: 16_000, y: 12_000 },
+  { x: 0, y: 12_000 },
+]
 
 export function Plan2d(props: Plan2dProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -74,6 +104,11 @@ export function Plan2d(props: Plan2dProps) {
   } | null>(null)
   const pointersRef = useRef(new Map<number, { x: number; y: number }>())
   const pinchRef = useRef<{ distance: number; zoom: number } | null>(null)
+  /** The corner being edited in shape mode, and the outline being drawn in draw mode. */
+  const [corner, setCorner] = useState<number | null>(null)
+  const cornerDragRef = useRef<number | null>(null)
+  const [draft, setDraft] = useState<Vertex[]>([])
+  const [hover, setHover] = useState<Vertex | null>(null)
 
   // Fit the room to the canvas. Recomputed whenever the room or the box changes,
   // because a shopper who has just typed a wall length expects to see the result
@@ -92,7 +127,7 @@ export function Plan2d(props: Plan2dProps) {
       canvas.style.width = `${width}px`
       canvas.style.height = `${height}px`
 
-      const box = boundingBox(props.geometry.vertices)
+      const box = boundingBox(props.mode === 'draw' ? DRAW_CANVAS : props.geometry.vertices)
       const roomWidth = Math.max(1, box.maxX - box.minX)
       const roomHeight = Math.max(1, box.maxY - box.minY)
       const pad = Math.min(PADDING, Math.min(width, height) * 0.12)
@@ -109,12 +144,25 @@ export function Plan2d(props: Plan2dProps) {
         offsetY: (height - roomHeight * scale) / 2 - box.minY * scale,
       })
     },
-    [props.geometry],
+    [props.geometry, props.mode],
   )
 
   useEffect(() => {
     fit(false)
   }, [fit])
+
+  // Leaving a mode clears whatever that mode was holding, so coming back to it
+  // starts clean rather than resuming a gesture from ten minutes ago. Adjusted
+  // during render rather than in an effect: React re-runs this component before
+  // anything is painted, so the canvas never gets a frame showing the last
+  // mode's half-drawn outline.
+  const [lastMode, setLastMode] = useState(props.mode)
+  if (lastMode !== props.mode) {
+    setLastMode(props.mode)
+    setCorner(null)
+    setDraft([])
+    setHover(null)
+  }
 
   useEffect(() => {
     const observer = new ResizeObserver(() => fit(false))
@@ -124,6 +172,44 @@ export function Plan2d(props: Plan2dProps) {
     // re-subscribing on every geometry change costs a disconnect per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [])
+
+  const removeCorner = useCallback(
+    (index: number) => {
+      if (props.geometry.vertices.length <= 3) return
+      props.onShape(props.geometry.vertices.filter((_, at) => at !== index), true)
+      setCorner(null)
+    },
+    [props],
+  )
+
+  useEffect(() => {
+    if (props.mode === 'furnish') return
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      if (props.mode === 'draw') {
+        if (event.key === 'Backspace') {
+          event.preventDefault()
+          setDraft((current) => current.slice(0, -1))
+        } else if (event.key === 'Enter') {
+          event.preventDefault()
+          setDraft((current) => {
+            if (current.length >= 3) props.onDrawDone(current)
+            return current
+          })
+        } else if (event.key === 'Escape') {
+          props.onDrawCancel()
+        }
+        return
+      }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && corner !== null) {
+        event.preventDefault()
+        removeCorner(corner)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [props, corner, removeCorner])
 
   const toScreen = useCallback((point: Vertex) => ({ x: point.x * view.scale + view.offsetX, y: point.y * view.scale + view.offsetY }), [view])
   const toPlan = useCallback((x: number, y: number) => ({ x: (x - view.offsetX) / view.scale, y: (y - view.offsetY) / view.scale }), [view])
@@ -165,9 +251,15 @@ export function Plan2d(props: Plan2dProps) {
     const surface = style.getPropertyValue('--color-bg').trim() || '#fff'
     const danger = style.getPropertyValue('--color-danger').trim() || '#b3261e'
 
+    // In draw mode the old room is gone from the canvas entirely. Leaving it
+    // underneath while somebody draws a new one is the fastest way to have them
+    // trace the shape they were trying to replace.
+    const drawing = props.mode === 'draw'
+    const outline = drawing ? DRAW_CANVAS : props.geometry.vertices
+
     // Floor
     context.beginPath()
-    props.geometry.vertices.forEach((vertex, index) => {
+    outline.forEach((vertex, index) => {
       const point = toScreen(vertex)
       if (index === 0) context.moveTo(point.x, point.y)
       else context.lineTo(point.x, point.y)
@@ -182,7 +274,7 @@ export function Plan2d(props: Plan2dProps) {
     context.save()
     context.clip()
     const gridMm = view.scale * 1000 < 26 ? 5000 : view.scale * 1000 > 90 ? 500 : 1000
-    const box = boundingBox(props.geometry.vertices)
+    const box = boundingBox(outline)
     context.strokeStyle = withAlpha(line, 0.55)
     context.lineWidth = 1
     context.beginPath()
@@ -198,6 +290,11 @@ export function Plan2d(props: Plan2dProps) {
     }
     context.stroke()
     context.restore()
+
+    if (drawing) {
+      drawDraft(context, draft, hover, toScreen, { ink, accent, muted, surface, units: props.geometry.units })
+      return
+    }
 
     // Walls, with the door and window gaps drawn as breaks rather than as lines
     // over the top - a plan where the doorway is a thin rectangle is a plan
@@ -231,7 +328,11 @@ export function Plan2d(props: Plan2dProps) {
       context.font = '500 12px system-ui, sans-serif'
       context.textAlign = 'center'
       context.textBaseline = 'middle'
-      const at = { x: mid.x + inward.x * 16, y: mid.y + inward.y * 16 }
+      // Clear of the wall band, not merely inside the room: the wall is drawn as
+      // a thick stroke centred on the line, so a fixed sixteen pixels put the
+      // label half on top of it at anything but a small zoom.
+      const clearance = 14 + (props.geometry.wallThicknessMm * view.scale) / 2
+      const at = { x: mid.x + inward.x * clearance, y: mid.y + inward.y * clearance }
       const boxWidth = context.measureText(text).width + 10
       context.fillStyle = withAlpha(surface, 0.85)
       context.fillRect(at.x - boxWidth / 2, at.y - 8, boxWidth, 16)
@@ -305,7 +406,7 @@ export function Plan2d(props: Plan2dProps) {
     // What the selected thing has around it, in numbers. A gap you can see is a
     // guess; a gap with 780 written on it is a decision.
     const onlySelected = props.selection.length === 1 ? props.items.find((item) => item.id === props.selection[0]) : null
-    if (onlySelected && !onlySelected.staged) {
+    if (onlySelected && !onlySelected.staged && props.mode === 'furnish') {
       drawClearances(context, onlySelected, props.geometry, toScreen, {
         accent,
         muted,
@@ -315,7 +416,24 @@ export function Plan2d(props: Plan2dProps) {
         units: props.geometry.units,
       })
     }
-  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, view, toScreen])
+
+    // The corners themselves, once somebody is editing the room rather than what
+    // is standing in it. Only in shape mode: handles on every corner all the time
+    // would be six more things to hit by accident while dragging a desk.
+    if (props.mode === 'shape') {
+      props.geometry.vertices.forEach((vertex, index) => {
+        const at = toScreen(vertex)
+        const active = corner === index
+        context.beginPath()
+        context.rect(at.x - 6, at.y - 6, 12, 12)
+        context.fillStyle = active ? accent : surface
+        context.fill()
+        context.lineWidth = 2
+        context.strokeStyle = active ? accent : ink
+        context.stroke()
+      })
+    }
+  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, props.mode, corner, draft, hover, view, toScreen])
 
   const hitTest = useCallback(
     (x: number, y: number): PlanItem | null => {
@@ -336,9 +454,63 @@ export function Plan2d(props: Plan2dProps) {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top }
   }
 
+  /** Where a drawn point lands: on the 10 mm grid, and square to the last one. */
+  const snapDraw = useCallback(
+    (point: Vertex, previous: Vertex | undefined): Vertex => {
+      const round = (value: number) => Math.round(value / DRAW_SNAP_MM) * DRAW_SNAP_MM
+      if (!previous) return { x: round(point.x), y: round(point.y) }
+      const dx = point.x - previous.x
+      const dy = point.y - previous.y
+      // Rooms are overwhelmingly square, so a wall within a few degrees of
+      // straight is meant to be straight. The 45s are for the bays.
+      const angle = Math.atan2(dy, dx)
+      const step = Math.PI / 4
+      const nearest = Math.round(angle / step) * step
+      const length = Math.hypot(dx, dy)
+      if (Math.abs(angle - nearest) < 0.12) {
+        return { x: round(previous.x + Math.cos(nearest) * length), y: round(previous.y + Math.sin(nearest) * length) }
+      }
+      return { x: round(point.x), y: round(point.y) }
+    },
+    [],
+  )
+
   function onPointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
     const { x, y } = localPoint(event)
     pointersRef.current.set(event.pointerId, { x, y })
+
+    if (props.mode === 'draw') {
+      // Drawing is a sequence of clicks, not a drag: a drag on a phone is how you
+      // scroll, and a room drawn by dragging is a room you cannot correct.
+      const point = snapDraw(toPlan(x, y), draft[draft.length - 1])
+      const first = draft[0]
+      if (first && draft.length >= 3) {
+        const at = toScreen(first)
+        if (Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX) {
+          props.onDrawDone(draft)
+          return
+        }
+      }
+      setDraft([...draft, point])
+      return
+    }
+
+    if (props.mode === 'shape') {
+      const index = props.geometry.vertices.findIndex((vertex) => {
+        const at = toScreen(vertex)
+        return Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX
+      })
+      if (index >= 0) {
+        setCorner(index)
+        cornerDragRef.current = index
+        event.currentTarget.setPointerCapture(event.pointerId)
+        return
+      }
+      setCorner(null)
+      dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
+      event.currentTarget.setPointerCapture(event.pointerId)
+      return
+    }
     if (pointersRef.current.size === 2) {
       // Second finger down: this is a pinch, not a drag. Whatever the first
       // finger had started is abandoned rather than fought with.
@@ -368,6 +540,19 @@ export function Plan2d(props: Plan2dProps) {
   function onPointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
     const { x, y } = localPoint(event)
     if (pointersRef.current.has(event.pointerId)) pointersRef.current.set(event.pointerId, { x, y })
+
+    if (props.mode === 'draw') {
+      setHover(snapDraw(toPlan(x, y), draft[draft.length - 1]))
+      return
+    }
+
+    const dragging = cornerDragRef.current
+    if (dragging !== null) {
+      const point = snapDraw(toPlan(x, y), props.geometry.vertices[(dragging + props.geometry.vertices.length - 1) % props.geometry.vertices.length])
+      const next = props.geometry.vertices.map((vertex, index) => (index === dragging ? point : vertex))
+      props.onShape(next, false)
+      return
+    }
 
     const pinch = pinchRef.current
     if (pinch && pointersRef.current.size === 2) {
@@ -403,6 +588,15 @@ export function Plan2d(props: Plan2dProps) {
     const { x, y } = localPoint(event)
     pointersRef.current.delete(event.pointerId)
     if (pointersRef.current.size < 2) pinchRef.current = null
+
+    if (cornerDragRef.current !== null) {
+      cornerDragRef.current = null
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      // Settle on release, never during: see the reducer's set-shape.
+      props.onShape(props.geometry.vertices, true)
+      return
+    }
+
     const drag = dragRef.current
     dragRef.current = null
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -431,7 +625,7 @@ export function Plan2d(props: Plan2dProps) {
   }
 
   return (
-    <div ref={wrapRef} style={{ position: 'absolute', inset: 0 }}>
+    <div ref={wrapRef} className="spl-plan-wrap" style={{ position: 'absolute', inset: 0 }}>
       <canvas
         ref={canvasRef}
         onPointerDown={onPointerDown}
@@ -443,14 +637,57 @@ export function Plan2d(props: Plan2dProps) {
           zoomAt(Math.exp(-event.deltaY * 0.0015), event.clientX - rect.left, event.clientY - rect.top)
         }}
         onDoubleClick={(event) => {
-          if (!props.onDropAt) return
           const rect = event.currentTarget.getBoundingClientRect()
           const point = toPlan(event.clientX - rect.left, event.clientY - rect.top)
+          if (props.mode === 'shape') {
+            // Split the nearest wall where it was double-clicked. This is how a
+            // rectangle becomes an L: add a corner, then drag it.
+            const wall = nearestWallWithin(props.geometry, point, WALL_HIT_PX * 2 / view.scale)
+            if (!wall) return
+            const next = [...props.geometry.vertices]
+            next.splice(wall.index + 1, 0, { x: Math.round(point.x), y: Math.round(point.y) })
+            props.onShape(next, true)
+            setCorner(wall.index + 1)
+            return
+          }
+          if (!props.onDropAt) return
           props.onDropAt(Math.round(point.x), Math.round(point.y))
         }}
         role="application"
         aria-label="Room plan. Every item here is also listed, with its exact position, in the panel beside it."
       />
+      {props.mode === 'shape' && (
+        <div className="spl-stage-bar">
+          <span className="spl-note">Drag a corner. Double-tap a wall to add one, or tap a wall to type its length.</span>
+          <button
+            type="button"
+            className="spl-btn spl-btn-danger"
+            disabled={corner === null || props.geometry.vertices.length <= 3}
+            onClick={() => corner !== null && removeCorner(corner)}
+          >
+            Remove corner
+          </button>
+        </div>
+      )}
+
+      {props.mode === 'draw' && (
+        <div className="spl-stage-bar">
+          <span className="spl-note">
+            {draft.length === 0
+              ? 'Tap each corner of your room in turn.'
+              : draft.length < 3
+                ? `${draft.length} corner${draft.length === 1 ? '' : 's'} so far - keep going.`
+                : 'Tap the first corner again to close the room.'}
+          </span>
+          <button type="button" className="spl-btn" disabled={draft.length === 0} onClick={() => setDraft(draft.slice(0, -1))}>
+            Back a corner
+          </button>
+          <button type="button" className="spl-btn spl-btn-primary" disabled={draft.length < 3} onClick={() => props.onDrawDone(draft)}>
+            Finish
+          </button>
+        </div>
+      )}
+
       <div className="spl-stage-tools">
         <button
           type="button"
@@ -482,6 +719,90 @@ export function Plan2d(props: Plan2dProps) {
       </div>
     </div>
   )
+}
+
+/**
+ * The outline being drawn: what has been put down, the wall following the
+ * pointer, and the length of it as it goes.
+ *
+ * The running length matters more than it looks. Somebody drawing their office
+ * is translating a tape measure into clicks, and a wall that says 3.2 m while
+ * they are still holding it is the difference between drawing the room and
+ * drawing a shape that has to be corrected afterwards.
+ */
+function drawDraft(
+  context: CanvasRenderingContext2D,
+  draft: Vertex[],
+  hover: Vertex | null,
+  toScreen: (point: Vertex) => { x: number; y: number },
+  style: { ink: string; accent: string; muted: string; surface: string; units: RoomGeometry['units'] },
+): void {
+  const points = draft.map(toScreen)
+
+  if (points.length > 1) {
+    context.beginPath()
+    points.forEach((point, index) => {
+      if (index === 0) context.moveTo(point.x, point.y)
+      else context.lineTo(point.x, point.y)
+    })
+    context.strokeStyle = style.ink
+    context.lineWidth = 3
+    context.lineJoin = 'round'
+    context.stroke()
+  }
+
+  // Every wall already drawn, labelled.
+  for (let i = 1; i < draft.length; i++) {
+    const a = draft[i - 1]
+    const b = draft[i]
+    if (!a || !b) continue
+    labelSpan(context, toScreen(a), toScreen(b), formatLength(Math.hypot(b.x - a.x, b.y - a.y), style.units), style)
+  }
+
+  const last = draft[draft.length - 1]
+  if (last && hover) {
+    const from = toScreen(last)
+    const to = toScreen(hover)
+    context.save()
+    context.setLineDash([6, 4])
+    context.strokeStyle = style.accent
+    context.lineWidth = 2
+    drawSegment(context, from, to)
+    context.restore()
+    labelSpan(context, from, to, formatLength(Math.hypot(hover.x - last.x, hover.y - last.y), style.units), style)
+  }
+
+  points.forEach((point, index) => {
+    const first = index === 0 && draft.length >= 3
+    context.beginPath()
+    context.arc(point.x, point.y, first ? 8 : 5, 0, Math.PI * 2)
+    context.fillStyle = first ? style.accent : style.surface
+    context.fill()
+    context.lineWidth = 2
+    context.strokeStyle = first ? style.accent : style.ink
+    context.stroke()
+  })
+}
+
+function labelSpan(
+  context: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  text: string,
+  style: { muted: string; surface: string },
+): void {
+  if (Math.hypot(to.x - from.x, to.y - from.y) < 30) return
+  context.save()
+  context.font = '500 12px system-ui, sans-serif'
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  const at = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 12 }
+  const boxWidth = context.measureText(text).width + 10
+  context.fillStyle = withAlpha(style.surface, 0.9)
+  context.fillRect(at.x - boxWidth / 2, at.y - 8, boxWidth, 16)
+  context.fillStyle = style.muted
+  context.fillText(text, at.x, at.y)
+  context.restore()
 }
 
 function drawSegment(context: CanvasRenderingContext2D, from: { x: number; y: number }, to: { x: number; y: number }): void {

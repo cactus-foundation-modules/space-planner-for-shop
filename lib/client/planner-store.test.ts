@@ -67,6 +67,32 @@ describe('adding and moving', () => {
     expect(state.items.find((item) => item.id === 'b')!.x).toBe(before + 300)
   })
 
+  it('lets an item snapped against a wall be dragged away from it', () => {
+    // The bug this pins: snapping runs on every pointer event, so a few pixels
+    // away from the wall were undone by the very next snap and the item could
+    // never accumulate the distance needed to escape. It was welded on.
+    let state = withDesk()
+    // Push it against the top wall and let the snap take it.
+    state = plannerReducer(state, { type: 'move-items', ids: ['a'], dx: 0, dy: -1400, snap: true })
+    const stuck = state.items[0]!
+    expect(stuck.y).toBeLessThan(500)
+
+    // Now walk it back into the room in realistic drag-sized steps.
+    for (let step = 0; step < 12; step++) {
+      state = plannerReducer(state, { type: 'move-items', ids: ['a'], dx: 0, dy: 40, snap: true })
+    }
+    expect(state.items[0]!.y).toBeGreaterThan(stuck.y + 400)
+  })
+
+  it('still snaps an item to the wall it is being dragged towards', () => {
+    let state = withDesk()
+    for (let step = 0; step < 10; step++) {
+      state = plannerReducer(state, { type: 'move-items', ids: ['a'], dx: 0, dy: -120, snap: true })
+    }
+    // Flush: the centre sits half the item's depth off the wall.
+    expect(state.items[0]!.y).toBeCloseTo(desk.depthMm / 2, 0)
+  })
+
   it('refuses to nest one accessory under another', () => {
     let state = withDesk()
     state = plannerReducer(state, { type: 'add-item', id: 'b', product: pedestal, x: 2000, y: 1500 })

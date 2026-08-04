@@ -1,5 +1,5 @@
 import { signAssetUrl } from '@/lib/media/asset-token'
-import { getModelsForProducts } from '@/modules/product-3d-views-for-shop/lib/db/models'
+import { getModelsForProducts, getVariationChildrenForProducts } from '@/modules/product-3d-views-for-shop/lib/db/models'
 import { getModelMetaForModels, getModelMetaForProducts } from '@/modules/space-planner-for-shop/lib/db/model-meta'
 import { plainUrl } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
@@ -30,7 +30,44 @@ export async function resolveModelsForProducts(productIds: string[]): Promise<Ma
   const ids = [...new Set(productIds)].filter(Boolean)
   if (ids.length === 0) return out
 
-  const models = await getModelsForProducts(ids)
+  // A listing's model usually hangs off its variations rather than off the
+  // listing itself - which is why the browse panel counts a listing as modelled
+  // when any of its children is. Asking only about the listing put a "3D" badge
+  // on a card and then drew a plain box in the room, which is the sort of small
+  // lie that costs a shopper their trust in the whole tool. So: the listing's own
+  // model where there is one, otherwise the first of its children's.
+  //
+  // Two set-wide queries for the children, never one per product - the batched
+  // primitives exist precisely because a plan can reference a couple of hundred
+  // products.
+  const own = await getModelsForProducts(ids)
+  const answered = new Set(own.map((model) => model.productId))
+  const unanswered = ids.filter((id) => !answered.has(id))
+
+  const childModels: typeof own = []
+  const childToParent = new Map<string, string>()
+  if (unanswered.length > 0) {
+    const children = await getVariationChildrenForProducts(unanswered)
+    const childIds: string[] = []
+    for (const [parentId, list] of children) {
+      for (const childId of list) {
+        // First parent wins: a child belongs to one listing, and if the data ever
+        // says otherwise the planner must not silently pick a different one on
+        // every request.
+        if (!childToParent.has(childId)) childToParent.set(childId, parentId)
+        childIds.push(childId)
+      }
+    }
+    if (childIds.length > 0) childModels.push(...(await getModelsForProducts(childIds)))
+  }
+
+  // Children's models are re-keyed onto the listing the shopper actually placed,
+  // so everything downstream - instancing, the byte budget, the cache - keys on
+  // the product in the plan.
+  const models = [
+    ...own,
+    ...childModels.map((model) => ({ ...model, productId: childToParent.get(model.productId) ?? model.productId })),
+  ]
   if (models.length === 0) return out
 
   const [fileMeta, productMeta] = await Promise.all([

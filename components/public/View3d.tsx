@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Group, PerspectiveCamera, Scene, WebGLRenderer } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { buildItems, buildRoom, createRenderer, createScene, disposeGroup, eyeLevel, frameRoom } from '@/modules/space-planner-for-shop/lib/three/planner-scene'
+import { buildItems, buildRoom, createRenderer, createScene, disposeGroup, eyeLevel, frameRoom, updateWallVisibility } from '@/modules/space-planner-for-shop/lib/three/planner-scene'
 import type { SceneDescription } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { PrepareOptions } from '@/modules/space-planner-for-shop/lib/three/planner-model'
 
@@ -99,6 +99,8 @@ export function View3d(props: View3dProps) {
     const draw = () => {
       if (!running) return
       controls.update()
+      const room = stateRef.current?.room
+      if (room) updateWallVisibility(room, camera)
       renderer.render(scene, camera)
       requestAnimationFrame(draw)
     }

@@ -113,31 +113,6 @@ export function plannerCss(): string {
 .spl-side > .spl-tabs { flex: 0 0 auto; }
 .spl-side-scroll { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; }
 
-@media (max-width: 1024px) {
-  .spl-body {
-    grid-template-columns: minmax(0, 1fr);
-    /* The room gets the top of the screen and the panel the rest. Both scroll
-       themselves, so neither can push the other off. */
-    grid-template-rows: minmax(11rem, 42fr) minmax(0, 58fr);
-  }
-}
-@media (max-width: 640px) {
-  .spl-root {
-    --spl-gap: var(--space-2, 0.5rem);
-    --spl-control-h: 2.5rem;
-    min-height: 32rem;
-  }
-  .spl-bar { gap: 0.5rem; }
-  .spl-bar-heading { flex: 1 1 100%; }
-  .spl-bar-spacer { display: none; }
-  /* The view switcher is the thing people reach for most, so it gets a full
-     row of its own with three equal targets rather than a place in the queue. */
-  .spl-bar > .spl-tabs { flex: 1 1 100%; }
-  .spl-bar > .spl-tabs .spl-tab { flex: 1 1 0; text-align: center; }
-  .spl-bar-actions { flex: 1 1 100%; }
-  .spl-bar-actions .spl-btn { flex: 1 1 auto; justify-content: center; }
-}
-
 .spl-tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .spl-tab {
   appearance: none;
@@ -181,6 +156,11 @@ export function plannerCss(): string {
   cursor: pointer;
   white-space: nowrap;
 }
+/* The overflow toggle only exists on a phone; on a wide toolbar every action
+   fits and a disclosure would be one more thing to press for nothing. Declared
+   after .spl-btn on purpose - both are one class deep, so the later rule is the
+   one that wins, and the other way round the toggle showed up on every desktop. */
+.spl-bar-actions .spl-more-toggle { display: none; }
 .spl-btn:hover:not(:disabled) { border-color: var(--color-primary); }
 .spl-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .spl-btn-primary {
@@ -352,6 +332,24 @@ export function plannerCss(): string {
   flex-direction: column;
   gap: 0.3rem;
 }
+/* The strip that appears across the top of the plan while the room itself is
+   being drawn or reshaped: what the pointer does now, and the way out. */
+.spl-stage-bar {
+  position: absolute;
+  left: var(--spl-gap);
+  top: var(--spl-gap);
+  right: calc(var(--spl-gap) * 2 + 2.6rem);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  padding: 0.4rem 0.6rem;
+  box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1));
+}
+.spl-stage-bar .spl-note { flex: 1 1 10rem; min-width: 0; }
 .spl-stage-tools .spl-btn { background: var(--color-surface); box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1)); }
 
 /* The wall-length editor. A dialog rather than window.prompt: prompt is styled
@@ -384,6 +382,55 @@ export function plannerCss(): string {
   gap: 0.4rem;
 }
 
+/* ---- Narrow screens ----------------------------------------------------
+   Last, deliberately. A media query adds no specificity, so a phone rule
+   written above an equally specific desktop rule quietly loses to it - which is
+   how the overflow toggle ended up hidden on the one screen it exists for. */
+@media (max-width: 1024px) {
+  .spl-body {
+    grid-template-columns: minmax(0, 1fr);
+    /* The room gets the top of the screen and the panel the rest. Both scroll
+       themselves, so neither can push the other off. */
+    grid-template-rows: minmax(11rem, 42fr) minmax(0, 58fr);
+  }
+  /* While the room itself is being drawn or reshaped, the browse panel is
+     nothing but a smaller canvas. On a phone that matters: half a screen is not
+     enough to tap out the corners of an office. */
+  .spl-body-editing { grid-template-rows: minmax(0, 1fr); }
+  .spl-body-editing > .spl-side { display: none; }
+}
+@media (max-width: 640px) {
+  .spl-root {
+    --spl-gap: var(--space-2, 0.5rem);
+    --spl-control-h: 2.5rem;
+    min-height: 32rem;
+  }
+  .spl-bar { gap: 0.5rem; padding: 0.6rem; }
+  /* Title and figures on one line: on a phone the toolbar is competing with the
+     room for the screen, and three stacked rows of chrome before you see your
+     own office is the wrong trade. */
+  .spl-bar-heading {
+    flex: 1 1 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .spl-bar-heading .spl-title { font-size: var(--text-base, 1rem); }
+  .spl-bar-spacer { display: none; }
+  /* The view switcher is the thing people reach for most, so it gets a full
+     row of its own with three equal targets rather than a place in the queue. */
+  .spl-bar > .spl-tabs { flex: 1 1 100%; }
+  .spl-bar > .spl-tabs .spl-tab { flex: 1 1 0; text-align: center; }
+  .spl-bar-actions { flex: 1 1 100%; }
+  .spl-bar-actions .spl-btn { flex: 1 1 auto; justify-content: center; }
+  .spl-bar-actions .spl-more-toggle { display: inline-flex; flex: 0 0 auto; }
+  /* Room, Undo, Redo and Print are one tap away rather than on screen: they are
+     the ones a shopper reaches for occasionally, and the basket and Save are the
+     ones the whole tool is pointed at. */
+  .spl-bar-actions:not(.is-open) .spl-secondary { display: none; }
+}
+
 /* ---- Print --------------------------------------------------------------
    A printed plan is a document somebody hands to whoever signs the cheque, so
    it carries the room, the item list and the disclaimer - not a screenshot of
@@ -393,7 +440,14 @@ export function plannerCss(): string {
   .spl-bar, .spl-side, .spl-coach, .spl-stage-tools, .spl-alert, .spl-dialog-backdrop { display: none !important; }
   .spl-root { height: auto !important; min-height: 0 !important; display: block !important; }
   .spl-body { display: block !important; }
-  .spl-stage { border: 1px solid #999; height: 12cm; page-break-inside: avoid; }
+  .spl-stage { border: 1px solid #999; height: auto; page-break-inside: avoid; }
+  /* Two things have to give for the plan to reach paper. The canvas carries an
+     inline pixel size from the fit, wider than a sheet of A4, so on paper the
+     room was cut off down the right-hand side. And its wrapper is absolutely
+     positioned to fill the stage, which on a stage of automatic height collapses
+     to nothing at all - the plan simply did not print. */
+  .spl-plan-wrap { position: static !important; }
+  .spl-stage canvas { width: 100% !important; height: auto !important; }
   .spl-print-only { display: block !important; }
   .spl-print-head { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem; }
   .spl-print-head h2 { margin: 0; font-size: 1.1rem; }

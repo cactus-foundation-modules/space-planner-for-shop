@@ -86,12 +86,26 @@ Named rather than quietly missing:
 - **Delivery dates on the item list.** Wired to a `shop.delivery-estimates`
   extension point that `advanced-shipping-for-shop` does not publish yet. Absent,
   the column simply does not appear.
-- **Freehand polygon drawing.** Rooms start from a preset or typed dimensions, and
-  every wall length is then editable by clicking it and typing. L-shapes and bays
-  are supported by the geometry, the schema and the renderer; the drawing tool for
-  them is the next piece of UI.
 - **Whole-room GLB export**, room-level share links, owner-authored proposals, and
   everything else in §17 of the plan.
+
+## Rooms of any shape
+
+The flat plan is three tools on one canvas, switched by `mode` in `Plan2d.tsx`:
+
+- **furnish** - arrange the furniture. The default.
+- **shape** - drag the room's own corners, double-tap a wall to split it, remove a
+  corner you do not want. Reached from **Room -> Change the shape**.
+- **draw** - put a new outline down corner by corner, with walls snapping square
+  and their length written on them as they go. Reached from the first-run screen
+  or **Room -> Draw a new one**.
+
+Both editing modes go through one reducer action, `set-shape`, whose `settle` flag
+is the whole design: mid-gesture the vertices are taken exactly as given, and on
+release they are wound, re-originned, the furniture is translated by the same
+amount so it stays where it was in the room, and anything now outside the walls is
+moved to the tray rather than left in the garden. An outline that folds through
+itself is refused on release and the previous one is put back.
 
 ## Render worker contract
 
