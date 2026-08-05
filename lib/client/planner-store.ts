@@ -53,6 +53,14 @@ export type ProductSize = {
   underTopWidthMm: number | null
 }
 
+/**
+ * A product as the planner holds it: its size off the ladder, plus the words and
+ * the money the panels print. Lives here rather than in the component because
+ * two components hand one of these to a third - the browse panel resolves a
+ * variation into one, and the planner places it.
+ */
+export type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
+
 export type PlannerAction =
   | { type: 'set-geometry'; geometry: RoomGeometry }
   | { type: 'set-wall-length'; wallIndex: number; lengthMm: number }

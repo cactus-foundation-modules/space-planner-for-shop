@@ -37,6 +37,19 @@ export type CatalogueCard = {
    * grid of twelve cards and hopeless for a panel paging a catalogue.
    */
   hasModel: boolean
+  /**
+   * Whether this listing is really a family, and so has to be chosen from before
+   * it can be placed.
+   *
+   * A listing's own size row is the family's, not any one member's: the Oslo Oval
+   * Boardroom Table listing states a depth and a height and no width at all, so
+   * the ladder fills the width from the category default and the room gets a
+   * 2.4 m table in an 800 mm footprint. The member carries the real numbers, and
+   * the panel now asks which member before it places anything.
+   *
+   * Free to answer - the children were already fetched for `hasModel`.
+   */
+  hasVariations: boolean
   inStock: boolean
   stockLabel: string
   madeToOrder: boolean
@@ -123,6 +136,7 @@ export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' 
       priceFormatted,
       image: images[product.id] ?? null,
       hasModel: modelled.has(product.id) || kids.some((childId) => modelledChildren.has(childId)),
+      hasVariations: kids.length > 0,
       inStock: stock.inStock,
       stockLabel: stock.label,
       madeToOrder: isMadeToOrder(specValues.get(product.id) ?? []),

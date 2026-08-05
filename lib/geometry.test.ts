@@ -310,6 +310,38 @@ describe('what counts as a clash', () => {
     const wide = item({ id: 'wide', productId: 'wide', x: 2000, y: 1500, widthMm: 1500, depthMm: 600, heightMm: 700 })
     expect(tucksUnder(wide, desk, sizes)).toBe(false)
   })
+
+  it('tucks a chair that is deeper than the desk it goes under', () => {
+    // The commonest arrangement in this catalogue and the one that used to come
+    // up red: chairs are 640-690 deep, half these desks are 600.
+    const shallow = item({ id: 'shallow-desk', productId: 'shallow', x: 2000, y: 1500, widthMm: 1400, depthMm: 600, heightMm: 730 })
+    const deepChair = item({ id: 'deep-chair', productId: 'deep-chair', x: 2000, y: 1500, widthMm: 675, depthMm: 690, heightMm: 1110 })
+    expect(tucksUnder(deepChair, shallow)).toBe(true)
+    expect(itemsFight(deepChair, shallow)).toBe(false)
+  })
+
+  it('tucks a pedestal under a desk', () => {
+    const pedestal = item({ id: 'ped', productId: 'ped', x: 2000, y: 1500, widthMm: 420, depthMm: 600, heightMm: 600 })
+    expect(itemsFight(pedestal, desk)).toBe(false)
+  })
+
+  it('keeps a chair red against a credenza of desk height, which is solid to the floor', () => {
+    // Same height and width as a desk, half the depth. Nothing goes under it.
+    const credenza = item({ id: 'credenza', productId: 'credenza', x: 2000, y: 1500, widthMm: 1600, depthMm: 450, heightMm: 730 })
+    expect(itemsFight(chair, credenza)).toBe(true)
+  })
+
+  it('keeps two desks red even when one is narrower than the other', () => {
+    // The narrow one fits the clear width beneath the wide one, and before the
+    // worktop-versus-worktop rule that was enough to silence the warning.
+    const narrow = item({ id: 'narrow-desk', productId: 'narrow', x: 2050, y: 1500, widthMm: 1400, depthMm: 800, heightMm: 730 })
+    expect(itemsFight(narrow, desk)).toBe(true)
+  })
+
+  it('keeps a storage tower red against the desk it is standing in', () => {
+    const tower = item({ id: 'tower', productId: 'tower', x: 2000, y: 1500, widthMm: 800, depthMm: 450, heightMm: 1800 })
+    expect(itemsFight(tower, desk)).toBe(true)
+  })
 })
 
 describe('doors and windows', () => {

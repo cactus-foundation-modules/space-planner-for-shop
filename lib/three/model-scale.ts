@@ -24,6 +24,11 @@
 // Below those thresholds per-axis scaling stays, because it is genuinely right:
 // this catalogue's suppliers widen a desk by sliding its ends apart, and one
 // model legitimately serves several widths.
+//
+// ALL OF THAT IS THE FALLBACK. Where the shop has told the 3D views module how
+// big this product really is - its overall height, or its overall width, per
+// variation - that one number settles the whole question and none of the rules
+// above run. See realSizeScale below.
 
 /** Outside this, an axis ratio is a data fault rather than a size difference. */
 export const MIN_TRUSTED_RATIO = 0.4
@@ -48,6 +53,44 @@ export type ModelScale = {
   uniform: boolean
 }
 
+/**
+ * What the shop has said this product really measures, along the one axis the 3D
+ * views module's material setup pins its scale by - `realCm` along `scaleAxis`,
+ * converted to metres here because the scene works in metres.
+ *
+ * This is a per-variation figure typed (or ticked) by the owner against the file
+ * that draws it, and it already decides how big a weave tiles on that model and
+ * how big the thing arrives in AR. It is a better statement about the product
+ * than the spec sheet is, because it was written to describe the MODEL.
+ */
+export type RealSize = { metres: number; axis: 'height' | 'width' }
+
+// Sanity bounds on that figure, in metres. Same intent as the plausibility bounds
+// in lib/dimensions, restated here rather than imported because this file is a
+// browser leaf and dimensions.ts is the parser the server side uses. A "size" of
+// forty metres is a units mistake, and acting on it would put a building in the
+// room.
+const MIN_REAL_M = 0.02
+const MAX_REAL_M = 20
+
+/**
+ * The uniform scale that makes the mesh the size the shop says it is.
+ *
+ * One real dimension against the same dimension measured off the mesh is the
+ * whole sum - every other axis follows, because a model drawn at its own
+ * proportions is the only version of it that is not a lie about the product's
+ * shape. Null when there is no usable figure, which sends the caller back to
+ * reconciling with the plan.
+ */
+export function realSizeScale(measured: Measured, real: RealSize | null): number | null {
+  if (!real) return null
+  if (!(real.metres >= MIN_REAL_M) || real.metres > MAX_REAL_M) return null
+  const extentMm = real.axis === 'width' ? measured.widthMm : measured.heightMm
+  if (!(extentMm > 0)) return null
+  const factor = (real.metres * 1000) / extentMm
+  return Number.isFinite(factor) && factor > 0 ? factor : null
+}
+
 function median(values: number[]): number {
   if (values.length === 0) return 1
   const sorted = [...values].sort((a, b) => a - b)
@@ -62,7 +105,14 @@ function median(values: number[]): number {
  * the unit the scene description works in and converting at one end only is how
  * this stays readable.
  */
-export function modelScaleFor(measured: Measured, planned: Planned, approximate: boolean): ModelScale {
+export function modelScaleFor(measured: Measured, planned: Planned, approximate: boolean, real: RealSize | null = null): ModelScale {
+  // The recorded real size outranks the whole reconciliation below it. Nothing
+  // here is a judgement call once the owner has stated the product's overall
+  // height (or width) against the file that draws it: scale to that, uniformly,
+  // and leave the model's proportions exactly as its maker left them.
+  const fromReal = realSizeScale(measured, real)
+  if (fromReal !== null) return { x: fromReal, y: fromReal, z: fromReal, uniform: true }
+
   const axes: Array<['x' | 'y' | 'z', number, number]> = [
     ['x', planned.width * 1000, measured.widthMm],
     ['y', planned.height * 1000, measured.heightMm],

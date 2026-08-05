@@ -105,6 +105,8 @@ export function RenderFrame(props: RenderFrameProps) {
           noDecimation: source.noDecimation,
           fabricKey: source.fabricKey,
           slots: source.slots,
+          realMetres: source.realMetres,
+          realAxis: source.realAxis,
         })
       }
 

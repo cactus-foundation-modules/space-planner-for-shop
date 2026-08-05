@@ -38,6 +38,18 @@ export type PlannerModel = ResolvedModel & {
   mountOverride: MountType | null
   /** The paints for this exact variation. Empty for a product with no fabric config. */
   slots: FabricSlot[]
+  /**
+   * The product's real overall size along `realAxis`, in metres - p3d's `realCm`
+   * for this variation, which is the owner's own statement of how big the thing
+   * is and the number its fabric already tiles to. Null where the shop has not
+   * set one, or where the size source did not resolve.
+   *
+   * Carried because it is the best size the planner can draw a model at: the
+   * spec sheet describes the product, this describes the FILE, and it is the file
+   * that has to end up the right size in a room.
+   */
+  realMetres: number | null
+  realAxis: 'height' | 'width'
 }
 
 /**
@@ -302,6 +314,10 @@ export async function resolveModelsForProducts(
       fabricKey: fabricKeyFor(slots),
       mountOverride: product?.mountType ?? null,
       slots,
+      // Centimetres on the way in, metres out: the scene works in metres and
+      // converting at one end only is how this stays readable.
+      realMetres: bundle?.realCm ? bundle.realCm / 100 : null,
+      realAxis: bundle?.scaleAxis ?? 'height',
     })
   }
 
@@ -322,6 +338,8 @@ export type ClientModel = {
   noDecimation: boolean
   fabricKey: string
   slots: FabricSlot[]
+  realMetres: number | null
+  realAxis: 'height' | 'width'
 }
 
 export function toClientModels(models: Map<string, PlannerModel>): ClientModel[] {
@@ -334,5 +352,7 @@ export function toClientModels(models: Map<string, PlannerModel>): ClientModel[]
     noDecimation: model.noDecimation,
     fabricKey: model.fabricKey,
     slots: model.slots,
+    realMetres: model.realMetres,
+    realAxis: model.realAxis,
   }))
 }

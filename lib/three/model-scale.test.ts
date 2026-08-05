@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { modelScaleFor } from '@/modules/space-planner-for-shop/lib/three/model-scale'
+import { modelScaleFor, realSizeScale } from '@/modules/space-planner-for-shop/lib/three/model-scale'
 
 // The chair in the screenshot that started this: a Galaxy operator chair, drawn
 // squashed flat and stretched wide in a customer-facing planner.
@@ -53,5 +53,80 @@ describe('modelScaleFor', () => {
   it('ignores an axis the plan has no figure for', () => {
     const scale = modelScaleFor({ widthMm: 1400, depthMm: 800, heightMm: 730 }, { width: 1.4, depth: 0, height: 0.73 }, false)
     expect(scale.z).toBeCloseTo(1)
+  })
+
+  it('scales uniformly to the recorded real height and ignores the plan entirely', () => {
+    // The chair whose spec sheet says 111 cm and whose mesh is 115 cm. The plan's
+    // width and depth are not consulted at all: one real dimension is the answer.
+    const scale = modelScaleFor(
+      { widthMm: 675, depthMm: 640, heightMm: 1150 },
+      { width: 0.8, depth: 0.6, height: 0.75 },
+      false,
+      { metres: 1.11, axis: 'height' },
+    )
+    expect(scale.uniform).toBe(true)
+    expect(scale.y).toBeCloseTo(1110 / 1150)
+    expect(scale.x).toBe(scale.y)
+    expect(scale.z).toBe(scale.y)
+  })
+
+  it('measures along the width when that is the axis the shop scales by', () => {
+    const scale = modelScaleFor(
+      { widthMm: 1400, depthMm: 800, heightMm: 730 },
+      { width: 1.6, depth: 0.8, height: 0.73 },
+      false,
+      { metres: 1.4, axis: 'width' },
+    )
+    expect(scale.uniform).toBe(true)
+    expect(scale.x).toBeCloseTo(1)
+  })
+
+  it('overrides an approximate size rather than deferring to it', () => {
+    const scale = modelScaleFor(
+      { widthMm: 675, depthMm: 640, heightMm: 1150 },
+      { width: 0.8, depth: 0.6, height: 0.75 },
+      true,
+      { metres: 1.11, axis: 'height' },
+    )
+    expect(scale.y).toBeCloseTo(1110 / 1150)
+  })
+
+  it('falls back to the plan when the recorded size is a units mistake', () => {
+    // "1110" read as metres. Forty metres of chair is worse than no chair.
+    const scale = modelScaleFor(
+      { widthMm: 675, depthMm: 640, heightMm: 1110 },
+      { width: 0.675, depth: 0.64, height: 1.11 },
+      false,
+      { metres: 1110, axis: 'height' },
+    )
+    expect(scale.y).toBeCloseTo(1)
+  })
+
+  it('falls back to the plan when the mesh has no extent along that axis', () => {
+    const scale = modelScaleFor(
+      { widthMm: 0, depthMm: 640, heightMm: 1110 },
+      { width: 0.675, depth: 0.64, height: 1.11 },
+      false,
+      { metres: 1.4, axis: 'width' },
+    )
+    expect(scale.y).toBeCloseTo(1)
+  })
+})
+
+describe('realSizeScale', () => {
+  const MESH = { widthMm: 1400, depthMm: 800, heightMm: 730 }
+
+  it('is null with nothing recorded', () => {
+    expect(realSizeScale(MESH, null)).toBeNull()
+  })
+
+  it('is null for a size no piece of furniture has', () => {
+    expect(realSizeScale(MESH, { metres: 0.001, axis: 'height' })).toBeNull()
+    expect(realSizeScale(MESH, { metres: 40, axis: 'height' })).toBeNull()
+  })
+
+  it('is the ratio of the real size to the measured one', () => {
+    expect(realSizeScale(MESH, { metres: 1.6, axis: 'width' })).toBeCloseTo(1600 / 1400)
+    expect(realSizeScale(MESH, { metres: 0.73, axis: 'height' })).toBeCloseTo(1)
   })
 })

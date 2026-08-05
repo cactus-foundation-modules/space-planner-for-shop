@@ -443,6 +443,17 @@ export type SceneModelSource = {
   /** Which paints this product wears, and the key they are cached under. See planner-model. */
   fabricKey?: string
   slots?: FabricSlot[]
+  /**
+   * The product's real overall size along `realAxis`, in metres, as recorded in
+   * the 3D views material setup. Present, it settles the model's scale on its
+   * own - see model-scale.ts. Null for a product nobody has measured that way,
+   * which falls back to reconciling the mesh with the plan.
+   *
+   * Per VARIATION rather than per file: the same chair shell in two seat heights
+   * is one model and two of these.
+   */
+  realMetres?: number | null
+  realAxis?: 'height' | 'width'
 }
 
 /** Marks a subtree that is a clone of a cached prepared model - see disposeGroup. */
@@ -522,7 +533,16 @@ export async function buildItems(
       // multiply by one wherever the two agree, and a judgement call wherever
       // they do not. The rules for that call, and why a straight per-axis
       // division was the wrong one, are in model-scale.ts.
-      const scale = modelScaleFor(ready, node.size, node.approximate)
+      //
+      // The real size is read PER PRODUCT rather than off the prepared model's
+      // source, because `bySource` is keyed by file plus paints: two seat heights
+      // of one chair in one fabric share an entry there and would otherwise share
+      // a height, which is the exact thing this is here to stop.
+      const placedSource = models.get(node.productId)
+      const real = placedSource?.realMetres
+        ? { metres: placedSource.realMetres, axis: placedSource.realAxis ?? 'height' }
+        : null
+      const scale = modelScaleFor(ready, node.size, node.approximate, real)
       holder.scale.set(scale.x, scale.y, scale.z)
       holder.userData[SHARED_MODEL] = true
       object = holder

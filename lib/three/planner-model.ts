@@ -168,8 +168,18 @@ async function build(url: string, format: P3dFormat, options: PrepareOptions): P
   // Box3.setFromObject walks the graph and multiplies each geometry by its
   // node's world matrix, which is the whole point: node scales vary wildly
   // across this catalogue and a mesh-local bounding box would be nonsense.
+  //
+  // PRECISE - the second argument - and it has to be. The default takes the eight
+  // CORNERS of each mesh's own box and transforms those, which is exact only while
+  // every node's rotation is a multiple of 90 degrees; a part mounted at an angle
+  // measures up to 30% larger than the geometry inside it, and three supplier desks
+  // in this catalogue are out by 28%. That was survivable while this number was only
+  // ever compared with the plan's - both sides inflate together. It is not survivable
+  // now the recorded real size is DIVIDED by it: an inflated divisor draws the
+  // product short by exactly the excess, which is the same defect p3d fixed in its
+  // AR sizing. Paid once per file, before decimation, and cached with the model.
   object.updateWorldMatrix(true, true)
-  const box = new Box3().setFromObject(object)
+  const box = new Box3().setFromObject(object, true)
   const size = box.getSize(new Vector3())
   const centre = box.getCenter(new Vector3())
 

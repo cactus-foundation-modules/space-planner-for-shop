@@ -116,6 +116,12 @@ export default async function RenderPage({
     noDecimation: model.noDecimation,
     fabricKey: model.fabricKey,
     slots: model.slots,
+    // The still picture has to be the same room the shopper was looking at, so
+    // the recorded real size travels to the render worker exactly as it does to
+    // the browser. Left off, a chair in a saved render would be a different size
+    // from the same chair in the planner it came out of.
+    realMetres: model.realMetres,
+    realAxis: model.realAxis,
   }))
 
   // Null on an old job, or on one whose stored pose will not parse. Both fall

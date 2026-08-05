@@ -230,6 +230,47 @@ export function plannerCss(): string {
   border: 1px solid var(--color-border);
   color: var(--spl-muted);
 }
+/* Choosing which member of a family goes in the room. The panel turns into this
+   rather than opening a dialog over itself - on a phone the panel is the whole
+   screen, and a modal on top of it is one more thing to dismiss. */
+.spl-pick-head { display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: 0.6rem; align-items: center; }
+.spl-pick-head img { width: 3rem; height: 3rem; object-fit: contain; border-radius: var(--radius-sm, 6px); }
+.spl-pick-head > span { display: grid; gap: 0.15rem; min-width: 0; }
+.spl-pick-noimage { width: 3rem; height: 3rem; border-radius: var(--radius-sm, 6px); background: var(--color-surface); }
+.spl-pick-label { font-size: var(--text-sm, 0.875rem); font-weight: 500; }
+.spl-pick-values { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.spl-pick-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm, 0.875rem);
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  /* Comfortably tappable without turning a twelve-colour range into a wall. */
+  min-height: 2rem;
+}
+.spl-pick-value:hover { border-color: var(--color-primary); }
+.spl-pick-value:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.spl-pick-value.is-picked { border-color: var(--color-primary); box-shadow: inset 0 0 0 1px var(--color-primary); }
+/* Not with the rest of the choices - dimmed, never disabled, because it is
+   usually available with a different pick and a control you cannot press is a
+   dead end you cannot get out of. */
+.spl-pick-value.is-out { opacity: 0.45; }
+.spl-pick-swatch { width: 1.1rem; height: 1.1rem; border-radius: 999px; border: 1px solid var(--color-border); object-fit: cover; flex: none; }
+.spl-pick-summary {
+  display: grid;
+  gap: 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  padding: 0.6rem;
+  background: var(--color-surface);
+}
+
 .spl-badge-3d { border-color: var(--color-primary); color: var(--color-primary); }
 .spl-badge-warn { border-color: var(--color-warning, #a16207); color: var(--color-warning, #a16207); }
 

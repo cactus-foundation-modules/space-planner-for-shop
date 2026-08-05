@@ -19,7 +19,7 @@ import {
   toPlanItems,
   undo,
 } from '@/modules/space-planner-for-shop/lib/client/planner-store'
-import type { History, PlannerState, ProductSize } from '@/modules/space-planner-for-shop/lib/client/planner-store'
+import type { History, PlannerState, ProductInfo } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/planner-model'
@@ -52,8 +52,6 @@ const View3d = dynamic(() => import('@/modules/space-planner-for-shop/components
   ssr: false,
   loading: () => <div className="spl-coach">Loading the 3D view…</div>,
 })
-
-type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -96,6 +94,9 @@ type PlannerModel = {
   /** '' where the product has no fabric configured. See lib/three/planner-model. */
   fabricKey: string
   slots: FabricSlot[]
+  /** The size the shop recorded for this variation in 3D views. See model-scale. */
+  realMetres: number | null
+  realAxis: 'height' | 'width'
 }
 
 /**
@@ -451,10 +452,38 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   // ---- actions ----------------------------------------------------------
 
+  /**
+   * Put a specific product in the room.
+   *
+   * Takes the product rather than the card because a card is a family and a
+   * family is not placeable: the browse panel resolves a listing to the exact
+   * variation the shopper picked, at its own size, and hands one of these over.
+   */
+  const placeProduct = useCallback(
+    (info: ProductInfo) => {
+      commit()
+      setProducts((current) => ({ ...current, [info.productId]: info }))
+      const spot = findFreeSpot(state.items, state.geometry, info)
+      dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
+      // What was handed over carries enough to draw the thing at once, which is
+      // why it is used above - but it may have no model and no under-desk
+      // measurements. Asking for those here rather than leaving it to the
+      // missing-products effect, because that effect looks for products it has
+      // never heard of and the line above has just introduced this one. Without
+      // it, placing from the browse panel drew a labelled box for a product
+      // whose card said "3D".
+      void fetchProducts([info.productId]).catch(() => {
+        // The optimistic version stands. A model that never arrives is a
+        // placeholder, which is the main path for most of the catalogue anyway.
+      })
+    },
+    [commit, nextId, state.geometry, state.items, fetchProducts],
+  )
+
+  /** A card with nothing to choose from: one product, straight in. */
   const place = useCallback(
     (card: CatalogueCard) => {
-      commit()
-      const info: ProductInfo = {
+      placeProduct({
         productId: card.id,
         name: card.name,
         image: card.image,
@@ -467,22 +496,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
         mount: 'floor',
         underTopHeightMm: null,
         underTopWidthMm: null,
-      }
-      setProducts((current) => ({ ...current, [card.id]: info }))
-      const spot = findFreeSpot(state.items, state.geometry, info)
-      dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
-      // The card carries enough to draw the thing at once, which is why it is
-      // used above - but it has no model and no under-desk measurements. Asking
-      // for those here rather than leaving it to the missing-products effect,
-      // because that effect looks for products it has never heard of and the
-      // line above has just introduced this one. Without it, placing from the
-      // browse panel drew a labelled box for a product whose card said "3D".
-      void fetchProducts([card.id]).catch(() => {
-        // The optimistic version stands. A model that never arrives is a
-        // placeholder, which is the main path for most of the catalogue anyway.
       })
     },
-    [commit, nextId, state.geometry, state.items, fetchProducts],
+    [placeProduct],
   )
 
   const applyStep = useCallback(
@@ -1213,7 +1229,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 </div>
               )}
 
-              {tab === 'catalogue' && <CataloguePanel onPlace={place} />}
+              {tab === 'catalogue' && <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} />}
 
               {tab === 'selected' && (
                 <SelectedPanel

@@ -451,8 +451,21 @@ const WORKTOP_MIN_MM = 600
 const WORKTOP_MAX_MM = 1100
 /** And this wide, at least. Narrower than this and nothing is going under it. */
 const WORKTOP_MIN_WIDTH_MM = 800
+/**
+ * And this deep. A desk in this catalogue is 600 to 800 deep and a boardroom
+ * table more; a cupboard, a credenza or a bookcase of the same height and width
+ * is 400 to 500, and is solid to the floor. Depth is the only thing in the row
+ * that tells those two apart when nobody has published a clearance.
+ */
+const WORKTOP_MIN_DEPTH_MM = 550
 /** Allowance for the thickness of the top itself when nobody has published one. */
 const WORKTOP_THICKNESS_MM = 40
+/**
+ * Taller than this and it is not tucked under anything, it is standing in the
+ * way. The tallest seating in this catalogue is a 1320 mm bench-desk cable
+ * spine; a storage tower starts around 1800.
+ */
+const MAX_TUCKED_HEIGHT_MM = 1500
 
 /**
  * Whether this item is the sort of thing other things go underneath.
@@ -467,6 +480,7 @@ export function spaceUnderneathMm(item: PlanItem, underTop: UnderTopSizes = {}):
   if (published && published > 0) return published
   if (item.heightMm < WORKTOP_MIN_MM || item.heightMm > WORKTOP_MAX_MM) return null
   if (item.widthMm < WORKTOP_MIN_WIDTH_MM) return null
+  if (item.depthMm < WORKTOP_MIN_DEPTH_MM) return null
   return item.heightMm - WORKTOP_THICKNESS_MM
 }
 
@@ -478,17 +492,31 @@ export function spaceUnderneathMm(item: PlanItem, underTop: UnderTopSizes = {}):
  * backrest stands well above the worktop - so the height-band test calls it a
  * collision and paints both of them red, which is exactly the arrangement the
  * shopper was aiming for. Two desks in the same square metre have to stay red,
- * though, so what separates them is whether the thing would actually GO under:
- * narrow enough for the published clearance width, and no deeper than the top
- * it is going beneath.
+ * though, so what separates them is whether the thing would actually GO under.
+ *
+ * NOT by comparing depths, which is what this used to do and what made the
+ * warning fire on the commonest arrangement in the catalogue: office chairs are
+ * 640 to 690 deep and half these desks are 600, so every chair pushed under a
+ * 60 cm desk came up red. A chair sticking out past the front edge of a desk is
+ * what tucking one under a desk LOOKS like. What actually rules the pair out is
+ * the parent having no space beneath it at all (handled by spaceUnderneathMm,
+ * which now wants desk depth as well as desk height and width - a credenza is
+ * the same height and width as a desk and solid to the floor), the child being
+ * a worktop in its own right (two desks, a desk and a sideboard), the child
+ * being too tall to be going under anything, and the published clearance width
+ * where the catalogue states one.
  */
 export function tucksUnder(child: PlanItem, parent: PlanItem, underTop: UnderTopSizes = {}): boolean {
   const clearance = spaceUnderneathMm(parent, underTop)
   if (clearance === null) return false
   // Standing on the floor of the space underneath, not hung across the top of it.
   if (child.z >= clearance) return false
+  // Two things that are both the sort of thing others go under are not tucked,
+  // they are in each other's way - which is the whole point of the warning.
+  if (spaceUnderneathMm(child, underTop) !== null) return false
+  if (child.heightMm > MAX_TUCKED_HEIGHT_MM) return false
   const clearWidth = underTop[parent.productId]?.widthMm ?? parent.widthMm - 100
-  return child.widthMm <= clearWidth && child.depthMm <= parent.depthMm
+  return child.widthMm <= clearWidth
 }
 
 /**
