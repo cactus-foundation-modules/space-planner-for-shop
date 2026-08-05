@@ -385,6 +385,48 @@ export function plannerCss(): string {
 }
 .spl-dialog h2 { margin: 0; font-size: var(--text-base, 1rem); font-weight: 600; }
 
+/* The photograph, and the ones before it.
+   Wider than the other dialogs on purpose: the whole point of asking for a
+   picture of your office is to look at it, and a picture of an office shown two
+   inches across is a swatch. Capped to the stage it sits in and scrolled inside
+   itself, so a tall dialog on a short phone stage stays reachable rather than
+   running off the bottom of it. */
+.spl-dialog-wide { width: min(44rem, 100%); max-height: 100%; overflow: auto; }
+.spl-photo {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+/* Somewhere for the eye to land while there is nothing to show yet, sized so the
+   dialog does not jump a screen's worth when the first picture arrives. */
+.spl-photo-empty {
+  display: grid;
+  place-items: center;
+  min-height: 8rem;
+  padding: var(--spl-gap);
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-bg);
+}
+.spl-photo-strip { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.spl-photo-thumb {
+  padding: 0;
+  line-height: 0;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+}
+.spl-photo-thumb img { display: block; width: 4.5rem; height: 3rem; object-fit: cover; }
+.spl-photo-thumb[aria-pressed="true"] { border-color: var(--color-primary); }
+.spl-photo-thumb:hover { border-color: var(--color-primary); }
+.spl-photo-thumb:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
 .spl-launch {
   display: inline-flex;
   align-items: center;

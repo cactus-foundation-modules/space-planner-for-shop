@@ -116,6 +116,14 @@ export type SpacePlannerProps = {
   guidance: { walkwayClearanceMm: number; disclaimer: string; enabled: boolean }
   /** Whatever this shop prints in front of a number. Never assumed to be a pound. */
   currencySymbol: string
+  /**
+   * Whether a photoreal picture can actually be asked for.
+   *
+   * Switched on AND wired up, worked out on the server, because those are two
+   * different things and a button that answers "the picture service is not set
+   * up on this site yet" is worse than no button at all.
+   */
+  rendersAvailable: boolean
   /** A room and layout the member already saved, opened from My spaces. */
   openPlan?: OpenPlan | null
   /** Staged straight from the basket when the shopper arrived from the cart. */
@@ -158,6 +166,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [startAgain, setStartAgain] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
+  const [photos, setPhotos] = useState(false)
   /**
    * What the flat plan's pointer means. Editing the room is a mode rather than a
    * second screen, so the shopper never loses sight of what they have already
@@ -842,6 +851,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
           <button type="button" className="spl-btn spl-secondary" onClick={() => setExporting(true)}>
             Export PDF
           </button>
+          {props.rendersAvailable && (
+            <button type="button" className="spl-btn spl-secondary" onClick={() => setPhotos(true)}>
+              Make a photo
+            </button>
+          )}
           <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
             Add to basket
           </button>
@@ -936,6 +950,16 @@ export function SpacePlanner(props: SpacePlannerProps) {
               signedIn={props.signedIn}
               onCancel={() => setExporting(false)}
               onExport={(options) => void exportPdf(options)}
+            />
+          )}
+
+          {photos && (
+            <PhotoDialog
+              signedIn={props.signedIn}
+              planId={savedPlanId}
+              planLabel={`${roomName} - ${planName}`}
+              savePlan={() => savePlan({ quiet: true })}
+              onClose={() => setPhotos(false)}
             />
           )}
 
@@ -1152,6 +1176,218 @@ function ExportDialog(props: {
             onClick={() => props.onExport({ includePlanView, include3dView, includeQuote })}
           >
             {props.busy ? 'Making it…' : 'Make the PDF'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** One picture, as the member's own render endpoint describes it. */
+type PhotoJob = {
+  id: string
+  status: 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED'
+  url: string
+  error: string
+  createdAt: string
+  /** The layout has been changed since this was taken. */
+  stale: boolean
+  /** When the layout it shows was saved. Null on jobs from before that was recorded. */
+  depicts: string | null
+}
+
+async function fetchPhotos(planId: string): Promise<PhotoJob[]> {
+  const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/render`)
+  if (!response.ok) throw new Error('could not list the pictures')
+  const data = (await response.json()) as { jobs: PhotoJob[] }
+  return data.jobs
+}
+
+const PHOTO_POLL_MS = 4_000
+/** How long a picture may take before the dialog admits it is taking a while. */
+const PHOTO_SLOW_MS = 4 * 60_000
+
+/**
+ * A photograph of the room.
+ *
+ * Asked for and then waited for, rather than made here: the room is built again
+ * properly on a machine of its own - full-size models, real shadows, no budget
+ * for a phone to worry about - and that takes minutes rather than the moment a
+ * button press is allowed to take. So this posts, polls, and is perfectly happy
+ * to be closed in between. The picture carries on without anybody watching it.
+ *
+ * Every ask saves the plan on the way, not just the first: the picture is built
+ * server-side from the SAVED layout, so a desk moved after this dialog opened
+ * would otherwise be photographed where it used to be.
+ */
+function PhotoDialog(props: {
+  signedIn: boolean
+  planId: string | null
+  planLabel: string
+  savePlan: () => Promise<string | null>
+  onClose: () => void
+}) {
+  const [planId, setPlanId] = useState<string | null>(props.planId)
+  const [jobs, setJobs] = useState<PhotoJob[]>([])
+  const [chosen, setChosen] = useState<string | null>(null)
+  const [loading, setLoading] = useState(Boolean(props.planId))
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+  /**
+   * Whether the one being drawn has been a while.
+   *
+   * Set from the poll below rather than from a timer of its own, and worked out
+   * from the job's own start: the poll is already the clock, and a separate
+   * timer would only have to be reset every time the list came back anyway.
+   */
+  const [slow, setSlow] = useState(false)
+  const [tick, setTick] = useState(0)
+
+  const live = jobs.find((job) => job.status === 'QUEUED' || job.status === 'RUNNING') ?? null
+  const liveId = live?.id ?? ''
+  const done = jobs.filter((job) => job.status === 'DONE' && job.url)
+  const showing = done.find((job) => job.id === chosen) ?? done[0] ?? null
+  const newest = jobs[0] ?? null
+  const failure = newest && newest.status === 'FAILED' ? newest.error : ''
+
+  // What is already there, on open. A plan that has never been saved has no
+  // pictures by definition, so it is not saved merely for opening this.
+  const openedWith = props.planId
+  useEffect(() => {
+    if (!openedWith) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const list = await fetchPhotos(openedWith)
+        if (!cancelled) setJobs(list)
+      } catch {
+        if (!cancelled) setProblem('We could not fetch your pictures just now.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [openedWith])
+
+  // Polling, and only while something is actually being drawn. `tick` is what
+  // re-arms it: a poll that failed on the network is not a failed picture, and
+  // keying off the job list alone would stop asking the moment one request did.
+  useEffect(() => {
+    if (!planId || !liveId) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const list = await fetchPhotos(planId)
+          if (cancelled) return
+          setJobs(list)
+          const going = list.find((job) => job.status === 'QUEUED' || job.status === 'RUNNING')
+          setSlow(going ? Date.now() - new Date(going.createdAt).getTime() > PHOTO_SLOW_MS : false)
+        } catch {
+          // Left to the next go round rather than shown: one dropped poll is not
+          // news, and the picture is unaffected either way.
+        } finally {
+          if (!cancelled) setTick((count) => count + 1)
+        }
+      })()
+    }, PHOTO_POLL_MS)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [planId, liveId, tick])
+
+  const make = async () => {
+    setBusy(true)
+    setProblem('')
+    try {
+      // Signed out, this is the point at which they are sent to sign in - the
+      // picture is made from a saved plan, and there is nothing to save into.
+      const id = await props.savePlan()
+      if (!id) return
+      setPlanId(id)
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/render`, { method: 'POST' })
+      const data = (await response.json().catch(() => null)) as { error?: string } | null
+      if (!response.ok) throw new Error(data?.error ?? 'We could not start that picture just now.')
+      setChosen(null)
+      setSlow(false)
+      setJobs(await fetchPhotos(id))
+      setLoading(false)
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : 'We could not start that picture just now.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
+      <div className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="A photograph of your room">
+        <h2>A photograph of your room</h2>
+        <p className="spl-note">
+          We build the room again properly and take a picture of it, which takes a few minutes. You do not have to sit and
+          watch - close this and it will be waiting for you.
+        </p>
+
+        {loading ? (
+          <div className="spl-photo-empty"><span className="spl-note">Looking for your pictures…</span></div>
+        ) : showing ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element -- the picture arrives as a plain media url from the render worker, and next/image would want a loader and a known size for a one-off nobody scrolls past */}
+            <img className="spl-photo" src={showing.url} alt={`Your room, ${props.planLabel}`} />
+            {showing.stale && (
+              <p className="spl-note">
+                This is the room as it was{showing.depicts ? ` on ${new Date(showing.depicts).toLocaleDateString()}` : ''}.
+                You have moved things since, so make another one to catch up.
+              </p>
+            )}
+          </>
+        ) : (
+          <div className="spl-photo-empty">
+            <span className="spl-note">{live ? 'Your picture is being taken.' : 'No pictures of this layout yet.'}</span>
+          </div>
+        )}
+
+        {live && (
+          <p className="spl-note" role="status">
+            {slow
+              ? 'This one is taking longer than usual. Close this and come back to it - the picture carries on without you.'
+              : 'Taking the picture…'}
+          </p>
+        )}
+
+        {done.length > 1 && (
+          <div className="spl-photo-strip">
+            {done.map((job) => (
+              <button
+                key={job.id}
+                type="button"
+                className="spl-photo-thumb"
+                aria-pressed={showing?.id === job.id}
+                aria-label={`Picture from ${new Date(job.createdAt).toLocaleDateString()}`}
+                onClick={() => setChosen(job.id)}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element -- the same picture again at thumbnail size, from the same loader-less url */}
+                <img src={job.url} alt="" loading="lazy" />
+              </button>
+            ))}
+          </div>
+        )}
+
+        {failure && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{failure}</span></p>}
+        {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
+
+        {!props.signedIn && <p className="spl-note">You will be asked to sign in first - the picture is made from your saved plan.</p>}
+
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onClose} disabled={busy}>Close</button>
+          {showing && (
+            <a className="spl-btn spl-launch" href={showing.url} target="_blank" rel="noreferrer">Open full size</a>
+          )}
+          <button
+            type="button"
+            className="spl-btn spl-btn-primary"
+            onClick={() => void make()}
+            disabled={busy || Boolean(live)}
+          >
+            {busy ? 'Asking…' : live ? 'One on the way' : done.length > 0 ? 'Make another' : 'Make a photo'}
           </button>
         </div>
       </div>

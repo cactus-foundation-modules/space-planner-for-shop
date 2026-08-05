@@ -76,6 +76,14 @@ one need a customer account like everybody else.
 - **Take it away**: add the lot to the basket, ask for a quote, email it to
   themselves, or export a PDF - the room's measurements and the priced item list
   always, the flat plan, the 3D view and a quote page by choice.
+- **Ask for a photograph of it**, where the owner has switched pictures on and the
+  picture service is wired up. **Make a photo** in the toolbar opens the pictures
+  already taken of that layout and a button to ask for another; the dialog posts,
+  polls, and is perfectly happy to be closed while the machine works. The button
+  is absent unless `rendersEnabled` **and** `renderWorkerConfigured()` are both
+  true, worked out on the server - a button that answers "not set up on this site
+  yet" is worse than no button. Every ask saves the plan on the way, because the
+  picture is built server-side from the saved layout.
 
 ## How sizes are worked out
 

@@ -10,7 +10,7 @@ import { ShopClosedNotice } from '@/modules/shop/components/public/ShopClosedNot
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import type { OpenPlan } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
-import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 
 export const metadata = { title: 'Plan your space' }
 
@@ -74,6 +74,11 @@ export default async function SpacePlannerPage({
   // neither lookup has a form that does not take a member id.
   const openPlan = await loadOpenPlan(params, member?.id ?? null)
 
+  // Switched on and wired up are two different things, and the button is only
+  // honest when both are true. Worked out here rather than in the browser so
+  // nobody is offered a picture the site cannot take.
+  const rendersAvailable = config.rendersEnabled && (await renderWorkerConfigured())
+
   return (
     <div style={{ padding: 'var(--space-3)' }}>
       <SpacePlanner
@@ -93,6 +98,7 @@ export default async function SpacePlannerPage({
           enabled: config.clearanceWarningsEnabled,
         }}
         currencySymbol={shopConfig.currencySymbol}
+        rendersAvailable={rendersAvailable}
         openPlan={openPlan}
         stageCart={params.from === 'cart'}
         stageProductId={typeof params.product === 'string' ? params.product : staged?.id ?? null}
