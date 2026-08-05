@@ -38,7 +38,10 @@ export function plannerCss(): string {
   gap: var(--spl-gap);
   /* dvh, not vh: on a phone the browser's own chrome slides in and out, and vh
      measures the tallest it ever gets - which is how a toolbar ends up under the
-     address bar. */
+     address bar. The vh line first is the fallback: a browser that has never
+     heard of dvh drops the declaration it cannot read, not the whole rule - and
+     without it the workspace has no height at all on that browser. */
+  height: calc(100vh - var(--spl-chrome) - (var(--spl-gap) * 2));
   height: calc(100dvh - var(--spl-chrome) - (var(--spl-gap) * 2));
   min-height: 34rem;
   color: var(--color-text);
@@ -66,6 +69,11 @@ export function plannerCss(): string {
 .spl-bar-heading { display: grid; gap: 0.1rem; min-width: 0; }
 .spl-bar-spacer { flex: 1 1 auto; }
 .spl-bar-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+/* Thin rules between the toolbar's families of buttons - undo lives with redo,
+   the exports live together, and the two the whole tool points at sit last. A
+   flat row of eight identical buttons reads as none at all. Hidden on a phone,
+   where the row wraps and half of it folds behind More anyway. */
+.spl-bar-sep { width: 1px; align-self: stretch; background: var(--color-border); flex: 0 0 auto; margin: 0.15rem 0; }
 .spl-title {
   font-size: var(--text-lg, 1.1rem);
   font-weight: 600;
@@ -388,7 +396,7 @@ export function plannerCss(): string {
   position: absolute;
   left: var(--spl-gap);
   top: var(--spl-gap);
-  right: calc(var(--spl-gap) * 2 + 2.6rem);
+  right: calc(var(--spl-gap) * 2 + 3rem);
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -620,7 +628,14 @@ export function plannerCss(): string {
    Last, deliberately. A media query adds no specificity, so a phone rule
    written above an equally specific desktop rule quietly loses to it - which is
    how the overflow toggle ended up hidden on the one screen it exists for. */
-@media (max-width: 1024px) {
+/* A middling window - a landscape tablet, a half-width desktop window - keeps
+   the two columns and gives the room the difference. Stacking at 1024px used to
+   throw away exactly the screens with width to spare: an iPad on its side got
+   the same one-column pile as a phone. */
+@media (max-width: 1200px) {
+  .spl-body { grid-template-columns: minmax(0, 1fr) 19rem; }
+}
+@media (max-width: 900px) {
   .spl-body {
     grid-template-columns: minmax(0, 1fr);
     /* The room gets the top of the screen and the panel the rest. Both scroll
@@ -632,6 +647,13 @@ export function plannerCss(): string {
      enough to tap out the corners of an office. */
   .spl-body-editing { grid-template-rows: minmax(0, 1fr); }
   .spl-body-editing > .spl-side { display: none; }
+  /* Dialogs step out of the stage and take the whole screen. Below this width
+     the stage is the top half of a stacked layout, and a photograph shown
+     inside half of half a phone screen is a postage stamp with a scrollbar.
+     z-index 200 because the site's sticky header sits at 100 and a backdrop a
+     header floats over is not a backdrop. */
+  .spl-dialog-backdrop { position: fixed; z-index: 200; }
+  .spl-dialog { max-height: calc(100vh - (var(--spl-gap) * 2)); max-height: calc(100dvh - (var(--spl-gap) * 2)); overflow: auto; }
 }
 @media (max-width: 640px) {
   .spl-root {
@@ -663,6 +685,38 @@ export function plannerCss(): string {
      the ones a shopper reaches for occasionally, and the basket and Save are the
      ones the whole tool is pointed at. */
   .spl-bar-actions:not(.is-open) .spl-secondary { display: none; }
+  /* The dividers order a wide row; in a wrapped stack of full-width buttons
+     they are stray pen marks. */
+  .spl-bar-sep { display: none; }
+  /* One row that slides sideways, not a pile: every chip the strip wraps onto
+     is a row taken off the room underneath it. */
+  .spl-views { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
+  .spl-views > * { flex: 0 0 auto; }
+  .spl-views .spl-note { flex: 0 1 auto; min-width: 16rem; white-space: normal; }
+  /* Two big targets side by side, or stacked when three will not fit - not a
+     cluster of small ones in the corner of a small screen. */
+  .spl-dialog .spl-buttons .spl-btn { flex: 1 1 auto; justify-content: center; text-align: center; }
+}
+
+/* ---- Touch ---------------------------------------------------------------
+   Keyed to the pointer, not the width: an iPad in a stand is as wide as a
+   laptop and every bit as much a touchscreen. After the width queries on
+   purpose - the phone block above also sets --spl-control-h, and on a phone
+   (coarse AND narrow) the bigger of the two must win. */
+@media (pointer: coarse) {
+  .spl-root { --spl-control-h: 2.75rem; }
+  /* 1rem, because iOS Safari zooms the whole page into any input it considers
+     too small to read, and never zooms back out. The planner's inputs are the
+     wall lengths and the search box; a tool that lurches to 130% the moment
+     somebody types a measurement reads as broken. */
+  .spl-input, .spl-select, .spl-view-name { font-size: 1rem; }
+  .spl-pick-value { min-height: 2.5rem; padding: 0.35rem 0.7rem; }
+  .spl-tray-item { min-height: 2.25rem; padding: 0.35rem 0.6rem; }
+  .spl-tray { max-height: 7rem; }
+  .spl-eye-preset { padding: 0.35rem 0.5rem; }
+  .spl-view-go, .spl-view-more { padding: 0.5rem 0.6rem; }
+  .spl-photo-thumb img { width: 5.5rem; height: 3.7rem; }
+  .spl-card { padding: 0.55rem; }
 }
 
 /* ---- Print --------------------------------------------------------------

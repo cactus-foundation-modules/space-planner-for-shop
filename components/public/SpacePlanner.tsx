@@ -859,6 +859,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
         setWallEdit(null)
         setRoomEdit(false)
         setStartAgain(false)
+        // The photo dialog says in its own wording that closing it abandons
+        // nothing, so Escape may always close it. The export dialog is only
+        // held open while a PDF is actually being made - closing it then would
+        // leave the download to arrive into a page with no sign it was coming.
+        if (!exportBusy) setExporting(false)
+        setPhotos(false)
+        setMoreOpen(false)
         return
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
@@ -891,7 +898,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [state, history, commit, applyStep])
+  }, [state, history, commit, applyStep, exportBusy])
 
   // ---- render -----------------------------------------------------------
 
@@ -1004,12 +1011,14 @@ export function SpacePlanner(props: SpacePlannerProps) {
           <button type="button" className="spl-btn spl-secondary" onClick={() => setStartAgain(true)}>
             Start again
           </button>
+          <span className="spl-bar-sep spl-secondary" aria-hidden="true" />
           <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(undo(history, state))} disabled={history.past.length === 0}>
             Undo
           </button>
           <button type="button" className="spl-btn spl-secondary" onClick={() => applyStep(redo(history, state))} disabled={history.future.length === 0}>
             Redo
           </button>
+          <span className="spl-bar-sep spl-secondary" aria-hidden="true" />
           <button type="button" className="spl-btn spl-secondary" onClick={() => setExporting(true)}>
             Export PDF
           </button>
@@ -1029,6 +1038,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
               Make a photo
             </button>
           )}
+          <span className="spl-bar-sep spl-secondary" aria-hidden="true" />
           <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
             Add to basket
           </button>
@@ -1364,6 +1374,7 @@ function ExportDialog(props: {
             type="button"
             className="spl-btn spl-btn-primary"
             disabled={props.busy}
+            autoFocus
             onClick={() => props.onExport({ includePlanView, include3dView, includeQuote })}
           >
             {props.busy ? 'Making it…' : 'Make the PDF'}
