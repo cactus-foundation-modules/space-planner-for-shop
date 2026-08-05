@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { MOUNT_TYPES, PLAN_SCHEMA_VERSION, ROOM_SCHEMA_VERSION } from '@/modules/space-planner-for-shop/lib/types'
-import type { PlanItems, RoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
+import type { PlanItems, RoomGeometry, SavedCamera } from '@/modules/space-planner-for-shop/lib/types'
 
 // Every write goes through here before it reaches a table.
 //
@@ -86,6 +86,42 @@ export const ProductSnapshotEntrySchema = z.object({
 
 export const ProductSnapshotSchema = z.record(z.string().max(64), ProductSnapshotEntrySchema)
 
+/**
+ * A camera pose, in world metres.
+ *
+ * The bounds are generous on purpose - a camera outside the room is a legitimate
+ * thing to save, because looking in through a missing wall is how you photograph
+ * a small room - but they are bounds all the same: an infinity or a NaN reaching
+ * three.js does not throw, it silently produces a black frame, and a black frame
+ * is a render the customer paid a Fly machine for.
+ */
+const metres = z.number().finite().min(-1000).max(1000)
+const MetreVectorSchema = z.object({ x: metres, y: metres, z: metres })
+
+export const SavedCameraSchema = z.object({
+  position: MetreVectorSchema,
+  target: MetreVectorSchema,
+  // 50 to match createCamera's perspective lens, so a record written before this
+  // field existed restores to the camera the planner actually uses rather than to
+  // a subtly different one nobody chose.
+  fov: z.number().finite().min(10).max(120).default(50),
+  projection: z.enum(['perspective', 'orthographic']).default('perspective'),
+  zoom: z.number().finite().min(0.01).max(100).default(1),
+})
+
+export const MAX_VIEWS_PER_ROOM = 12
+
+export const ViewWriteSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  camera: SavedCameraSchema,
+})
+
+export const ViewPatchSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  camera: SavedCameraSchema.optional(),
+  position: z.number().int().min(0).max(MAX_VIEWS_PER_ROOM).optional(),
+})
+
 export const RoomWriteSchema = z.object({
   name: z.string().trim().min(1).max(120),
   notes: z.string().max(2000).default(''),
@@ -131,4 +167,17 @@ export function readPlanItems(raw: unknown): PlanItems {
 export function readProductSnapshot(raw: unknown): z.infer<typeof ProductSnapshotSchema> {
   const parsed = ProductSnapshotSchema.safeParse(raw)
   return parsed.success ? parsed.data : {}
+}
+
+/**
+ * A stored camera read back out.
+ *
+ * Null rather than a fallback pose, because there is no safe default here: a
+ * made-up camera would be presented to the member as the view they saved, and
+ * they would rightly conclude the feature loses their work. A view that will not
+ * parse is a view the UI declines to offer.
+ */
+export function readSavedCamera(raw: unknown): SavedCamera | null {
+  const parsed = SavedCameraSchema.safeParse(raw)
+  return parsed.success ? (parsed.data as SavedCamera) : null
 }

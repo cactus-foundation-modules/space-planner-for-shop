@@ -26,7 +26,15 @@ import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/plan
 import { polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
-import type { OpeningKind, PlanItem, ProductSnapshot, RoomGeometry, Vertex } from '@/modules/space-planner-for-shop/lib/types'
+import type {
+  OpeningKind,
+  PlanItem,
+  ProductSnapshot,
+  RoomGeometry,
+  SavedCamera,
+  SplRoomView,
+  Vertex,
+} from '@/modules/space-planner-for-shop/lib/types'
 import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalogue'
 
 // The planner.
@@ -155,6 +163,16 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [message, setMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null)
   const [savedPlanId, setSavedPlanId] = useState<string | null>(props.openPlan?.planId ?? null)
   const [savedRoomId, setSavedRoomId] = useState<string | null>(props.openPlan?.roomId ?? null)
+  /**
+   * The same room id, readable the instant savePlan returns.
+   *
+   * A caller that saves on its way to doing something else - saving a viewpoint,
+   * asking for a picture - needs the room id in the very next statement, and
+   * setSavedRoomId has not landed by then. Two copies of one value is a smell,
+   * so this one is written in exactly one place and never read anywhere the
+   * state would do.
+   */
+  const roomIdRef = useRef<string | null>(props.openPlan?.roomId ?? null)
   // The names travel with the plan. Saving over somebody's "Ground floor, east
   // wing" and calling it "My space" would be a small theft.
   const [roomName] = useState(props.openPlan?.roomName ?? 'My space')
@@ -167,6 +185,23 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const [photos, setPhotos] = useState(false)
+  /**
+   * Viewpoints saved against this ROOM, not this layout.
+   *
+   * Room-scoped because a camera pose is expressed in room coordinates: it means
+   * nothing anywhere else, and exactly the same thing for every layout inside the
+   * one room. So "from the doorway" photographs Option A and Option B from the
+   * identical spot, which is the comparison somebody laying out an office is
+   * actually trying to make.
+   */
+  const [views, setViews] = useState<SplRoomView[]>([])
+  const [viewsBusy, setViewsBusy] = useState(false)
+  /** A viewpoint to put the camera back on. The nonce re-arms it - see View3d. */
+  const [restore, setRestore] = useState<{ camera: SavedCamera; nonce: number } | null>(null)
+  /** Reads where the 3D camera is standing. Handed up by View3d, null before it mounts. */
+  const cameraProbe = useRef<(() => SavedCamera | null) | null>(null)
+  /** Where they were standing when they pressed "Make a photo". See that button. */
+  const [photoCamera, setPhotoCamera] = useState<SavedCamera | null>(null)
   /**
    * What the flat plan's pointer means. Editing the room is a mode rather than a
    * second screen, so the shopper never loses sight of what they have already
@@ -490,6 +525,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         if (!roomResponse.ok || !roomData.room) throw new Error(roomData.error ?? 'Could not save the room')
         roomId = roomData.room.id
         setSavedRoomId(roomId)
+        roomIdRef.current = roomId
       } else {
         await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
           method: 'PUT',
@@ -516,6 +552,116 @@ export function SpacePlanner(props: SpacePlannerProps) {
       return null
     }
   }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
+
+  // ---- saved viewpoints ---------------------------------------------------
+
+  // What is already saved against this room. Only ever for a room that exists:
+  // a scratch room in localStorage has no id to hang a viewpoint off, and the
+  // save button is the sign-in prompt exactly as it is everywhere else here.
+  useEffect(() => {
+    if (!savedRoomId || !props.signedIn) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(`/api/m/space-planner-for-shop/member/rooms/${savedRoomId}/views`)
+        if (!response.ok) return
+        const data = (await response.json()) as { views?: SplRoomView[] }
+        if (!cancelled) setViews(data.views ?? [])
+      } catch {
+        // Not news. The planner works without saved views and says so by simply
+        // not offering any.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [savedRoomId, props.signedIn])
+
+  /**
+   * Keep where you are standing.
+   *
+   * Saves the plan first, and not merely to be tidy: the viewpoint belongs to a
+   * room, so an unsaved scratch room has nothing to attach it to. For a signed
+   * out visitor that first step is the sign-in prompt, which is the same bargain
+   * the rest of the planner makes.
+   */
+  const saveCurrentView = useCallback(async () => {
+    const camera = cameraProbe.current?.()
+    if (!camera) return
+    setViewsBusy(true)
+    try {
+      const planId = await savePlan({ quiet: true })
+      if (!planId) return
+      const roomId = roomIdRef.current
+      if (!roomId) throw new Error('Could not work out which space this is.')
+
+      const response = await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/views`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `View ${views.length + 1}`, camera }),
+      })
+      const data = (await response.json()) as { view?: SplRoomView; error?: string }
+      if (!response.ok || !data.view) throw new Error(data.error ?? 'We could not keep that view.')
+      setViews((current) => [...current, data.view as SplRoomView])
+      setMessage({ tone: 'info', text: 'View kept. Rename it in the list, or use it for a photograph.' })
+    } catch (error) {
+      setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not keep that view.' })
+    } finally {
+      setViewsBusy(false)
+    }
+  }, [savePlan, views.length])
+
+  const renameView = useCallback(async (viewId: string, name: string) => {
+    const roomId = roomIdRef.current
+    if (!roomId) return
+    // Shown immediately and corrected if the server disagrees. Renaming a view is
+    // not the sort of thing anybody should watch a spinner for.
+    setViews((current) => current.map((view) => (view.id === viewId ? { ...view, name } : view)))
+    try {
+      await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/views/${viewId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+    } catch {
+      // Left as typed. The next load reads the server's answer.
+    }
+  }, [])
+
+  /** Re-point a saved view at where the camera is standing now. */
+  const updateViewCamera = useCallback(async (viewId: string) => {
+    const camera = cameraProbe.current?.()
+    const roomId = roomIdRef.current
+    if (!camera || !roomId) return
+    setViews((current) => current.map((view) => (view.id === viewId ? { ...view, camera } : view)))
+    try {
+      await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/views/${viewId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera }),
+      })
+      setMessage({ tone: 'info', text: 'That view now points where you are looking.' })
+    } catch {
+      setMessage({ tone: 'error', text: 'We could not move that view just now.' })
+    }
+  }, [])
+
+  const deleteView = useCallback(async (viewId: string) => {
+    const roomId = roomIdRef.current
+    if (!roomId) return
+    setViews((current) => current.filter((view) => view.id !== viewId))
+    try {
+      await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/views/${viewId}`, { method: 'DELETE' })
+    } catch {
+      // Gone from the list either way; the next load is the arbiter.
+    }
+  }, [])
+
+  /** Stand where a saved view stands. Switches to the 3D tab, since that is the
+   * only place a camera pose means anything. */
+  const goToView = useCallback((view: SplRoomView) => {
+    setStage('orbit')
+    setPerspective(view.camera.projection === 'perspective')
+    setRestore({ camera: view.camera, nonce: Date.now() })
+  }, [])
 
   // ---- the room's own outline -------------------------------------------
 
@@ -852,7 +998,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
             Export PDF
           </button>
           {props.rendersAvailable && (
-            <button type="button" className="spl-btn spl-secondary" onClick={() => setPhotos(true)}>
+            <button
+              type="button"
+              className="spl-btn spl-secondary"
+              onClick={() => {
+                // Read where they are standing NOW, at the moment they ask.
+                // The 3D view unmounts when the flat plan is showing, so a probe
+                // called later from inside the dialog would find nothing and
+                // silently fall back to the canned angle.
+                setPhotoCamera(cameraProbe.current?.() ?? null)
+                setPhotos(true)
+              }}
+            >
               Make a photo
             </button>
           )}
@@ -873,6 +1030,19 @@ export function SpacePlanner(props: SpacePlannerProps) {
             ×
           </button>
         </p>
+      )}
+
+      {stage === 'orbit' && planMode === 'furnish' && (
+        <ViewsStrip
+          views={views}
+          busy={viewsBusy}
+          signedIn={props.signedIn}
+          onKeep={() => void saveCurrentView()}
+          onGo={goToView}
+          onRename={(id, name) => void renameView(id, name)}
+          onRepoint={(id) => void updateViewCamera(id)}
+          onDelete={(id) => void deleteView(id)}
+        />
       )}
 
       {/* On paper the heading comes before the plan and the item list after it,
@@ -926,7 +1096,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
               options={prepareOptions}
               view="orbit"
               perspective={perspective}
+              units={state.geometry.units}
+              restore={restore}
               registerCapture={(capture) => { captureView.current = capture }}
+              registerCameraProbe={(probe) => { cameraProbe.current = probe }}
               onBusyChange={(busy) => { viewBusy.current = busy }}
             />
           )}
@@ -959,6 +1132,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
               planId={savedPlanId}
               planLabel={`${roomName} - ${planName}`}
               savePlan={() => savePlan({ quiet: true })}
+              views={views}
+              currentCamera={photoCamera}
               onClose={() => setPhotos(false)}
             />
           )}
@@ -1225,6 +1400,10 @@ function PhotoDialog(props: {
   planId: string | null
   planLabel: string
   savePlan: () => Promise<string | null>
+  /** Saved viewpoints for this room, any of which can be photographed. */
+  views: SplRoomView[]
+  /** Where they were standing when they opened this. Null if the flat plan was showing. */
+  currentCamera: SavedCamera | null
   onClose: () => void
 }) {
   const [planId, setPlanId] = useState<string | null>(props.planId)
@@ -1242,6 +1421,17 @@ function PhotoDialog(props: {
    */
   const [slow, setSlow] = useState(false)
   const [tick, setTick] = useState(0)
+  /**
+   * Which angle to photograph from: 'here', 'wall', or a saved view's id.
+   *
+   * Defaults to where they are standing when there is such a place, because the
+   * complaint that produced this picker was a photograph coming back from
+   * somewhere the shopper had never pointed the camera. 'wall' is the old canned
+   * standpoint, kept as a choice rather than deleted - it is genuinely the better
+   * answer in a small room, where standing where you were standing means standing
+   * inside a desk.
+   */
+  const [from, setFrom] = useState<string>(props.currentCamera ? 'here' : 'wall')
 
   const live = jobs.find((job) => job.status === 'QUEUED' || job.status === 'RUNNING') ?? null
   const liveId = live?.id ?? ''
@@ -1303,7 +1493,15 @@ function PhotoDialog(props: {
       const id = await props.savePlan()
       if (!id) return
       setPlanId(id)
-      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/render`, { method: 'POST' })
+      // No camera means the canned standpoint, which is exactly what the route
+      // does with an empty body - so 'wall' sends nothing rather than sending a
+      // second way of saying the same thing.
+      const camera = from === 'here' ? props.currentCamera : (props.views.find((view) => view.id === from)?.camera ?? null)
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(camera ? { camera } : {}),
+      })
       const data = (await response.json().catch(() => null)) as { error?: string } | null
       if (!response.ok) throw new Error(data?.error ?? 'We could not start that picture just now.')
       setChosen(null)
@@ -1371,6 +1569,17 @@ function PhotoDialog(props: {
           </div>
         )}
 
+        <label className="spl-photo-from">
+          <span>Taken from</span>
+          <select className="spl-select" value={from} onChange={(event) => setFrom(event.target.value)} disabled={busy}>
+            {props.currentCamera && <option value="here">Where I am looking now</option>}
+            <option value="wall">Standing at the wall, looking down the room</option>
+            {props.views.map((view) => (
+              <option key={view.id} value={view.id}>{view.name}</option>
+            ))}
+          </select>
+        </label>
+
         {failure && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{failure}</span></p>}
         {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
 
@@ -1391,6 +1600,94 @@ function PhotoDialog(props: {
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The saved viewpoints, along the top of the 3D view.
+ *
+ * A strip rather than a dialog, because choosing an angle is a thing you do
+ * repeatedly while looking at the room - flick to the doorway, flick to the
+ * window, decide - and a dialog between each flick turns comparing three views
+ * into nine interruptions. It is the same argument the openings toolbar makes.
+ *
+ * Renaming is in place on the chip. There is no separate rename dialog because
+ * there is nothing else to say about a view: it has a name and a camera, and the
+ * camera is changed by standing somewhere else and pressing the button.
+ */
+function ViewsStrip(props: {
+  views: SplRoomView[]
+  busy: boolean
+  signedIn: boolean
+  onKeep: () => void
+  onGo: (view: SplRoomView) => void
+  onRename: (id: string, name: string) => void
+  onRepoint: (id: string) => void
+  onDelete: (id: string) => void
+}) {
+  const [editing, setEditing] = useState<string | null>(null)
+  const [menu, setMenu] = useState<string | null>(null)
+
+  return (
+    <div className="spl-views">
+      <span className="spl-views-label">Views</span>
+
+      {props.views.length === 0 && (
+        <span className="spl-note">
+          {props.signedIn
+            ? 'Find an angle you like and keep it - you can photograph any layout in this space from the same spot.'
+            : 'Sign in to keep the angles you like and photograph every layout from the same spot.'}
+        </span>
+      )}
+
+      {props.views.map((view) => (
+        <span key={view.id} className="spl-view-chip">
+          {editing === view.id ? (
+            <input
+              className="spl-view-name"
+              defaultValue={view.name}
+              autoFocus
+              aria-label="View name"
+              onBlur={(event) => {
+                const name = event.target.value.trim()
+                if (name && name !== view.name) props.onRename(view.id, name)
+                setEditing(null)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur()
+                if (event.key === 'Escape') setEditing(null)
+              }}
+            />
+          ) : (
+            <button type="button" className="spl-view-go" onClick={() => props.onGo(view)}>
+              {view.name}
+            </button>
+          )}
+          <button
+            type="button"
+            className="spl-view-more"
+            aria-label={`More for ${view.name}`}
+            aria-expanded={menu === view.id}
+            onClick={() => setMenu((open) => (open === view.id ? null : view.id))}
+          >
+            ⋯
+          </button>
+          {menu === view.id && (
+            <span className="spl-view-menu">
+              <button type="button" onClick={() => { setEditing(view.id); setMenu(null) }}>Rename</button>
+              <button type="button" onClick={() => { props.onRepoint(view.id); setMenu(null) }}>Move here</button>
+              <button type="button" className="spl-view-danger" onClick={() => { props.onDelete(view.id); setMenu(null) }}>
+                Delete
+              </button>
+            </span>
+          )}
+        </span>
+      ))}
+
+      <button type="button" className="spl-btn spl-btn-sm" onClick={props.onKeep} disabled={props.busy}>
+        {props.busy ? 'Keeping…' : 'Keep this view'}
+      </button>
     </div>
   )
 }

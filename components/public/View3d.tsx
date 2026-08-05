@@ -1,12 +1,34 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Group, Scene, WebGLRenderer } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { applyCameraAspect, buildItems, buildRoom, createCamera, createRenderer, createScene, disposeGroup, eyeLevel, frameRoom, updateWallVisibility } from '@/modules/space-planner-for-shop/lib/three/planner-scene'
+import {
+  applyCamera,
+  applyCameraAspect,
+  buildItems,
+  buildRoom,
+  clampEyeHeight,
+  createCamera,
+  createRenderer,
+  createScene,
+  disposeGroup,
+  eyeLevel,
+  frameRoom,
+  readCamera,
+  setEyeHeight,
+  updateWallVisibility,
+} from '@/modules/space-planner-for-shop/lib/three/planner-scene'
 import type { PlannerCamera, SceneModelSource } from '@/modules/space-planner-for-shop/lib/three/planner-scene'
 import type { SceneDescription } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { PrepareOptions } from '@/modules/space-planner-for-shop/lib/three/planner-model'
+import {
+  EYE_HEIGHT_MIN_M,
+  EYE_HEIGHT_SEATED_M,
+  EYE_HEIGHT_STANDING_M,
+} from '@/modules/space-planner-for-shop/lib/types'
+import type { SavedCamera } from '@/modules/space-planner-for-shop/lib/types'
+import { formatLength } from '@/modules/space-planner-for-shop/lib/units'
 
 // The 3D view.
 //
@@ -39,7 +61,26 @@ export type View3dProps = {
   registerCapture?: (capture: (() => string | null) | null) => void
   /** Whether the room is still being put together, for anything waiting on it. */
   onBusyChange?: (busy: boolean) => void
+  /**
+   * Hands the parent a way to read where the camera is standing, so a viewpoint
+   * can be saved or photographed. Null on unmount, like registerCapture.
+   */
+  registerCameraProbe?: (probe: (() => SavedCamera | null) | null) => void
+  /**
+   * A viewpoint to jump to. The nonce is what makes "take me back to that view"
+   * work twice: the camera has usually been dragged away in between, so the pose
+   * is unchanged and re-applying it has to be triggered by something other than
+   * the pose itself.
+   */
+  restore?: { camera: SavedCamera; nonce: number } | null
+  /** Which units to label the eye-height control in. */
+  units: 'metric' | 'imperial'
 }
+
+/** How far one notch of Alt+scroll moves the eye, in metres. */
+const WHEEL_METRES = 0.0016
+/** How far one press of Page Up or Page Down moves it. */
+const KEY_STEP_M = 0.1
 
 type SceneState = {
   scene: Scene
@@ -57,7 +98,7 @@ type SceneState = {
  * set of controls: OrbitControls binds to the camera it was constructed with and
  * there is no supported way to hand it another one.
  */
-function makeControls(camera: PlannerCamera, canvas: HTMLCanvasElement, onStart?: () => void): OrbitControls {
+function makeControls(camera: PlannerCamera, canvas: HTMLCanvasElement, onStart?: () => void, onEnd?: () => void): OrbitControls {
   const controls = new OrbitControls(camera, canvas)
   controls.enableDamping = true
   controls.dampingFactor = 0.08
@@ -69,6 +110,7 @@ function makeControls(camera: PlannerCamera, canvas: HTMLCanvasElement, onStart?
   controls.minDistance = 0.6
   controls.maxDistance = 120
   if (onStart) controls.addEventListener('start', onStart)
+  if (onEnd) controls.addEventListener('end', onEnd)
   return controls
 }
 
@@ -80,6 +122,7 @@ export function View3d(props: View3dProps) {
   /** The mount effect's resize, so a camera swap can reuse it rather than repeat it. */
   const resizeRef = useRef<(() => void) | null>(null)
   const controlStartRef = useRef<(() => void) | null>(null)
+  const controlEndRef = useRef<(() => void) | null>(null)
   // The mount effect never re-runs, so anything it reads about the scene has to
   // come through a ref or it frames a room that has since been redrawn.
   const descriptionRef = useRef(props.description)
@@ -92,6 +135,16 @@ export function View3d(props: View3dProps) {
   const [hinted, setHinted] = useState(false)
   /** Bumped when the GPU hands the context back, to make the scene build again. */
   const [restores, setRestores] = useState(0)
+  /**
+   * Where the eye is, in metres, for the slider to show.
+   *
+   * Mirrored into React rather than read off the camera at paint time, because
+   * the camera moves sixty times a second and the label does not need to. It is
+   * pushed back the other way whenever a drag finishes, since orbiting up and
+   * down is itself a change of height and a slider that ignored that would be
+   * lying within about two seconds of the shopper touching anything.
+   */
+  const [eyeHeightM, setEyeHeightM] = useState(EYE_HEIGHT_STANDING_M)
 
   const notifyBusy = props.onBusyChange
   useEffect(() => {
@@ -124,10 +177,19 @@ export function View3d(props: View3dProps) {
       movedRef.current = true
       setHinted(true)
     }
+    // Orbiting up and down IS a change of eye height, so the slider is told about
+    // it. On 'end' rather than 'change': the latter fires on every damped frame,
+    // and a React state write per frame is how a smooth drag becomes a stuttering
+    // one on the phones this tool is mostly used on.
+    const onControlEnd = () => {
+      const current = stateRef.current
+      if (current) setEyeHeightM(current.camera.position.y)
+    }
     const { scene, camera } = createScene()
-    const controls = makeControls(camera, canvas, onControlStart)
+    const controls = makeControls(camera, canvas, onControlStart, onControlEnd)
     stateRef.current = { scene, camera, renderer, controls }
     controlStartRef.current = onControlStart
+    controlEndRef.current = onControlEnd
 
     let running = true
     // Everything below reads the camera and controls out of the ref rather than
@@ -248,7 +310,7 @@ export function View3d(props: View3dProps) {
     state.controls.dispose()
     const camera = createCamera(wanted)
     state.camera = camera
-    state.controls = makeControls(camera, canvas, controlStartRef.current ?? undefined)
+    state.controls = makeControls(camera, canvas, controlStartRef.current ?? undefined, controlEndRef.current ?? undefined)
     // A switch of projection is a new view of the room, so it gets framed as
     // one: whatever the shopper had driven the old camera to does not translate.
     movedRef.current = false
@@ -259,6 +321,45 @@ export function View3d(props: View3dProps) {
     // below, which exists for exactly this reason.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.perspective])
+
+  /**
+   * Move the eye, from wherever the instruction came from.
+   *
+   * Bound once and never rebound. All three ways in - the slider, the wheel and
+   * the keyboard - fire far faster than React commits, and each needs the height
+   * the LAST one produced rather than the one that was on screen when the handler
+   * was created. Reading the rig and the room out of refs is what makes that
+   * true; there is deliberately nothing from the render in here.
+   */
+  const nudgeHeight = useCallback((metres: number) => {
+    const state = stateRef.current
+    if (!state) return
+    movedRef.current = true
+    setHinted(true)
+    const settled = setEyeHeight(state.camera, state.controls.target, metres, descriptionRef.current)
+    state.controls.update()
+    setEyeHeightM(settled)
+  }, [])
+
+  // Alt (or Option) and the wheel, for anybody who would rather not go near the
+  // slider. Bound to the WRAPPER in the capture phase on purpose: OrbitControls
+  // owns the wheel on the canvas and treats it as zoom, so this has to see the
+  // event first and stop it getting there. A listener added to the canvas
+  // alongside theirs would be a coin toss decided by registration order.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const onWheel = (event: WheelEvent) => {
+      if (!event.altKey) return
+      event.preventDefault()
+      event.stopPropagation()
+      const state = stateRef.current
+      if (!state) return
+      nudgeHeight(state.camera.position.y - event.deltaY * WHEEL_METRES)
+    }
+    wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
+  }, [nudgeHeight])
 
   // A way to photograph the view, for the PDF export. Handed up rather than
   // exposed as a ref, so the parent never touches the WebGL context itself.
@@ -287,6 +388,20 @@ export function View3d(props: View3dProps) {
     return () => register(null)
   }, [props.registerCapture])
 
+  // Where the camera is standing, for saving a viewpoint or photographing one.
+  // Null before the scene exists, which the parent shows as a disabled button
+  // rather than saving a pose that describes nothing.
+  useEffect(() => {
+    const register = props.registerCameraProbe
+    if (!register) return
+    register(() => {
+      const state = stateRef.current
+      if (!state) return null
+      return readCamera(state.camera, state.controls.target)
+    })
+    return () => register(null)
+  }, [props.registerCameraProbe])
+
   // Camera. Switching view is always obeyed; a change of room re-frames because
   // the old viewpoint no longer describes anywhere. Moving the furniture does
   // neither, which is the whole point of keying this on the room signature.
@@ -297,10 +412,35 @@ export function View3d(props: View3dProps) {
     state.controls.target.copy(target)
     state.controls.update()
     movedRef.current = false
+    setEyeHeightM(state.camera.position.y)
     // props.description is read for its geometry only, and re-running on every
     // item change is exactly what this effect exists to avoid.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.view, roomSignature])
+
+  // A saved viewpoint, put back.
+  //
+  // Declared AFTER the projection effect deliberately. Restoring a view that was
+  // saved flat while the live camera is a perspective one means the parent flips
+  // its perspective toggle in the same click, and that effect replaces the camera
+  // and re-frames the room. Both run in the one commit, in source order, so this
+  // one lands on the new camera and has the last word - which is the whole job.
+  const restoreNonce = props.restore?.nonce ?? -1
+  useEffect(() => {
+    const state = stateRef.current
+    const saved = props.restore?.camera
+    if (!state || !saved || restoreNonce < 0) return
+    const target = applyCamera(state.camera, saved)
+    state.controls.target.copy(target)
+    state.controls.update()
+    movedRef.current = true
+    setHinted(true)
+    setEyeHeightM(state.camera.position.y)
+    // Keyed on the nonce alone: the pose is stable across repeat visits to the
+    // same view, so depending on it would restore the first time and do nothing
+    // ever after.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [restoreNonce])
 
   if (unsupported) {
     return (
@@ -313,9 +453,64 @@ export function View3d(props: View3dProps) {
     )
   }
 
+  const ceilingM = Math.max(EYE_HEIGHT_MIN_M + 0.2, props.description.ceilingM - 0.15)
+  const shownHeight = clampEyeHeight(eyeHeightM, props.description)
+
   return (
-    <div ref={wrapRef} style={{ position: 'absolute', inset: 0 }}>
+    <div
+      ref={wrapRef}
+      style={{ position: 'absolute', inset: 0 }}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        // Page Up and Page Down, because the arrow keys are already orbit and
+        // nobody expects a page key to do anything else inside a 3D view.
+        if (event.key !== 'PageUp' && event.key !== 'PageDown') return
+        event.preventDefault()
+        const state = stateRef.current
+        if (!state) return
+        nudgeHeight(state.camera.position.y + (event.key === 'PageUp' ? KEY_STEP_M : -KEY_STEP_M))
+      }}
+    >
       <canvas ref={canvasRef} aria-label="Three-dimensional view of the room. The item list beside it describes everything in here." />
+
+      {/* Eye height.
+          Visible, and a slider, rather than a modifier key alone. A key nobody
+          is told about is a feature nobody has, this tool is used on phones
+          where there is no keyboard to hold anything down on, and a person
+          changing their eye height wants to know what height they have got to -
+          which a wheel gesture cannot tell them and a labelled control can. The
+          key and the wheel are still there for anyone who finds them. */}
+      {!unsupported && (
+        <div className="spl-eye">
+          <label className="spl-eye-label" htmlFor="spl-eye-height">Eye height</label>
+          <input
+            id="spl-eye-height"
+            className="spl-eye-range"
+            type="range"
+            min={EYE_HEIGHT_MIN_M}
+            max={ceilingM}
+            step={0.05}
+            value={shownHeight}
+            list="spl-eye-notches"
+            aria-valuetext={formatLength(Math.round(shownHeight * 1000), props.units)}
+            onChange={(event) => nudgeHeight(Number(event.target.value))}
+          />
+          <datalist id="spl-eye-notches">
+            <option value={EYE_HEIGHT_SEATED_M} label="Sitting" />
+            <option value={EYE_HEIGHT_STANDING_M} label="Standing" />
+          </datalist>
+          <span className="spl-eye-value">{formatLength(Math.round(shownHeight * 1000), props.units)}</span>
+          <div className="spl-eye-presets">
+            <button type="button" className="spl-eye-preset" onClick={() => nudgeHeight(EYE_HEIGHT_SEATED_M)}>
+              Sitting
+            </button>
+            <button type="button" className="spl-eye-preset" onClick={() => nudgeHeight(EYE_HEIGHT_STANDING_M)}>
+              Standing
+            </button>
+          </div>
+        </div>
+      )}
+
       {busy && (
         <div className="spl-coach" role="status">
           Putting the room together…
@@ -327,7 +522,10 @@ export function View3d(props: View3dProps) {
         </div>
       )}
       {!busy && degraded === 0 && !hinted && (
-        <div className="spl-coach">Drag to look around, pinch or scroll to zoom, two fingers or right-drag to slide.</div>
+        <div className="spl-coach">
+          Drag to look around, pinch or scroll to zoom, two fingers or right-drag to slide. Hold Alt and scroll to change
+          your height.
+        </div>
       )}
     </div>
   )

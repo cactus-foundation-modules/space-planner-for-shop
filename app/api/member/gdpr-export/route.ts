@@ -3,6 +3,7 @@ import { verifyInternalExportBearer } from '@/lib/members/export'
 import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { listPlansForMember, listPlanVersions } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { listRendersForPlan } from '@/modules/space-planner-for-shop/lib/db/jobs'
+import { listViewsForRoom } from '@/modules/space-planner-for-shop/lib/db/room-views'
 
 // This module's contribution to a member's GDPR export.
 //
@@ -22,6 +23,17 @@ export async function GET(request: NextRequest) {
 
   const [rooms, plans] = await Promise.all([listRoomsForMember(memberId), listPlansForMember(memberId, 500)])
 
+  // Viewpoints hang off the room rather than the plan, so they are gathered per
+  // room rather than folded into planDetail below. They are small, they are the
+  // member's own choices about how they want their space looked at, and leaving
+  // them out would make this export quietly incomplete.
+  const roomDetail = await Promise.all(
+    rooms.map(async (entry) => ({
+      ...entry.room,
+      views: await listViewsForRoom(entry.room.id),
+    })),
+  )
+
   const planDetail = await Promise.all(
     plans.map(async (plan) => ({
       plan,
@@ -35,7 +47,7 @@ export async function GET(request: NextRequest) {
   )
 
   return NextResponse.json({
-    rooms: rooms.map((entry) => entry.room),
+    rooms: roomDetail,
     plans: planDetail,
   })
 }

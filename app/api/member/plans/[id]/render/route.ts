@@ -14,6 +14,7 @@ import {
 import { getSplConfigCached, renderEnvConfigured, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { buildRenderJobPayload, RenderStorageError, type RenderJobPayload } from '@/modules/space-planner-for-shop/lib/render-dispatch'
+import { payloadTooLarge, readSavedCamera } from '@/modules/space-planner-for-shop/lib/validation'
 import { createRenderMachine, destroyRenderMachine } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
 import { SplFlyError } from '@/modules/space-planner-for-shop/lib/fly/api'
 
@@ -57,7 +58,7 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
   })
 }
 
-export async function POST(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const gate = await requireMember()
   if (gate.error) return gate.error
   const { id } = await context.params
@@ -86,10 +87,17 @@ export async function POST(_request: NextRequest, context: { params: Promise<{ i
     return NextResponse.json({ error: 'You have asked for a few pictures just now. Give those a moment and try again.' }, { status: 429 })
   }
 
+  // Where they were standing. Optional, and a body that will not parse is
+  // treated as "they did not say" rather than as an error: the fallback is the
+  // canned standpoint every picture used to be taken from, so the worst case is
+  // the behaviour this route had before it learned about cameras.
+  const raw = await request.text()
+  const camera = payloadTooLarge(raw) ? null : readSavedCamera((safeJson(raw) as { camera?: unknown } | null)?.camera)
+
   const job = await createRenderJob({
     planId: id,
     memberId: gate.member.id,
-    params: { view: 'eye-level' },
+    params: camera ? { view: 'saved-camera', camera } : { view: 'eye-level' },
     planUpdatedAt: plan.updatedAt,
   })
 
@@ -131,6 +139,14 @@ export async function POST(_request: NextRequest, context: { params: Promise<{ i
   await recordEvent('plan.rendered', { planId: id })
 
   return NextResponse.json({ job: { id: job.id, status: 'RUNNING' } })
+}
+
+function safeJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
 }
 
 /** Kept on the job's params blob, which is what that column is for. */

@@ -361,6 +361,148 @@ export function plannerCss(): string {
 .spl-stage-bar .spl-note { flex: 1 1 10rem; min-width: 0; }
 .spl-stage-tools .spl-btn { background: var(--color-surface); box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1)); }
 
+/* Eye height, down the left of the 3D view.
+   Visible rather than a modifier key alone: a key nobody is told about is a
+   feature nobody has, and on a phone there is no key to hold at all. Vertical
+   because the thing it moves is vertical - a horizontal slider for height reads
+   backwards no matter how it is labelled. */
+.spl-eye {
+  position: absolute;
+  left: var(--spl-gap);
+  top: var(--spl-gap);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  padding: 0.5rem 0.4rem;
+  box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1));
+}
+.spl-eye-label {
+  font-size: var(--text-xs, 0.75rem);
+  color: var(--color-text-muted, var(--color-text));
+  writing-mode: horizontal-tb;
+}
+/* writing-mode is the accessible way to stand a range control up: the browser
+   keeps it a real slider with real arrow-key behaviour, where a rotate transform
+   leaves the hit area lying on its side and the keys pointing the wrong way. */
+.spl-eye-range {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 1.4rem;
+  height: 9rem;
+  accent-color: var(--color-primary, var(--color-text));
+}
+.spl-eye-value {
+  font-size: var(--text-xs, 0.75rem);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+.spl-eye-presets { display: flex; flex-direction: column; gap: 0.2rem; }
+.spl-eye-preset {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-radius: var(--spl-radius);
+  padding: 0.15rem 0.4rem;
+  font-size: var(--text-xs, 0.75rem);
+  cursor: pointer;
+}
+.spl-eye-preset:hover { background: var(--color-surface-hover, var(--color-surface)); }
+.spl-eye-preset:focus-visible { outline: 2px solid var(--color-primary, var(--color-text)); outline-offset: 1px; }
+/* The room is short on height on a phone, and a control stood next to the
+   coaching note is a control covering half the room. The presets carry the
+   feature there; the slider is for the desk. */
+@media (max-width: 40rem) {
+  .spl-eye-range { height: 5rem; }
+  .spl-eye-label { display: none; }
+}
+
+/* Saved viewpoints, across the top of the 3D view. A strip rather than a dialog:
+   choosing an angle is something you do repeatedly while looking at the room. */
+.spl-views {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.4rem var(--spl-gap);
+  border-bottom: 1px solid var(--color-border);
+}
+.spl-views-label {
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 600;
+  color: var(--color-text);
+}
+.spl-view-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  background: var(--color-surface);
+}
+.spl-view-go, .spl-view-more {
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--text-sm, 0.875rem);
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+}
+.spl-view-more { padding-inline: 0.35rem; border-left: 1px solid var(--color-border); }
+.spl-view-go:hover, .spl-view-more:hover { background: var(--color-surface-hover, var(--color-surface)); }
+.spl-view-go:focus-visible, .spl-view-more:focus-visible {
+  outline: 2px solid var(--color-primary, var(--color-text));
+  outline-offset: -2px;
+}
+.spl-view-name {
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--text-sm, 0.875rem);
+  padding: 0.25rem 0.5rem;
+  width: 8rem;
+  min-width: 0;
+}
+.spl-view-menu {
+  position: absolute;
+  top: calc(100% + 0.2rem);
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 8rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--spl-radius);
+  box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,0.12));
+  overflow: hidden;
+}
+.spl-view-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  font-size: var(--text-sm, 0.875rem);
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
+.spl-view-menu button:hover { background: var(--color-surface-hover, var(--color-surface)); }
+.spl-view-danger { color: var(--color-danger, var(--color-text)); }
+.spl-btn-sm { min-height: 2rem; padding: 0.2rem 0.6rem; font-size: var(--text-sm, 0.875rem); }
+
+/* Which angle a photograph is taken from. */
+.spl-photo-from {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: var(--text-sm, 0.875rem);
+}
+.spl-photo-from .spl-select { flex: 1 1 14rem; min-width: 0; }
+
 /* The wall-length editor. A dialog rather than window.prompt: prompt is styled
    by the browser, blocked outright in some of them, and looks like the page has
    been hijacked. */
@@ -488,7 +630,8 @@ export function plannerCss(): string {
    an application with its toolbar in it. */
 .spl-print-only { display: none; }
 @media print {
-  .spl-bar, .spl-side, .spl-coach, .spl-stage-tools, .spl-alert, .spl-dialog-backdrop { display: none !important; }
+  .spl-bar, .spl-side, .spl-coach, .spl-stage-tools, .spl-alert, .spl-dialog-backdrop,
+  .spl-eye, .spl-views { display: none !important; }
   .spl-root { height: auto !important; min-height: 0 !important; display: block !important; }
   .spl-body { display: block !important; }
   .spl-stage { border: 1px solid #999; height: auto; page-break-inside: avoid; }

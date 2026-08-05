@@ -124,6 +124,37 @@ export type PlanItems = {
   items: PlanItem[]
 }
 
+/**
+ * Where somebody was standing, in world metres.
+ *
+ * The one place in this module that is not millimetres, and deliberately so:
+ * this describes the three.js scene rather than the plan, it is written by the
+ * viewer and read back by the viewer, and converting it twice a trip to match a
+ * table it never joins would buy nothing but a rounding error.
+ *
+ * `target` is what the camera is pointed at, not a direction. Storing the look-at
+ * point rather than a rotation is what lets a saved view be handed straight to
+ * OrbitControls, which thinks in targets and would otherwise have to have one
+ * invented for it - at some arbitrary distance that then decides how far a scroll
+ * zooms.
+ */
+export type SavedCamera = {
+  position: { x: number; y: number; z: number }
+  target: { x: number; y: number; z: number }
+  /** Vertical field of view in degrees. Ignored for an orthographic view. */
+  fov: number
+  projection: 'perspective' | 'orthographic'
+  /** Orthographic zoom. Ignored for a perspective view. */
+  zoom: number
+}
+
+/** Eye heights that mean something to a person, in metres. */
+export const EYE_HEIGHT_SEATED_M = 1.2
+export const EYE_HEIGHT_STANDING_M = 1.6
+export const EYE_HEIGHT_MIN_M = 0.3
+/** Clearance kept below the ceiling, so the eye is never inside the slab. */
+export const EYE_HEIGHT_CEILING_GAP_M = 0.15
+
 // ---------------------------------------------------------------------------
 // Rows as the rest of the module sees them
 // ---------------------------------------------------------------------------
@@ -154,6 +185,16 @@ export type SplPlan = {
   schemaVersion: number
   thumbnailMediaId: string | null
   quoteId: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export type SplRoomView = {
+  id: string
+  roomId: string
+  name: string
+  position: number
+  camera: SavedCamera
   createdAt: Date
   updatedAt: Date
 }

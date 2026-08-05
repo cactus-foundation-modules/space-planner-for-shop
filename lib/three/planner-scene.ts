@@ -15,6 +15,7 @@ import {
   OrthographicCamera,
   PerspectiveCamera,
   Path,
+  PMREMGenerator,
   Scene,
   Shape,
   ShapeGeometry,
@@ -25,8 +26,15 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { instanceKey } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { SceneDescription, SceneNode } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
+import {
+  EYE_HEIGHT_CEILING_GAP_M,
+  EYE_HEIGHT_MIN_M,
+  EYE_HEIGHT_STANDING_M,
+} from '@/modules/space-planner-for-shop/lib/types'
+import type { SavedCamera } from '@/modules/space-planner-for-shop/lib/types'
 import { paintedModel, prepareModel } from '@/modules/space-planner-for-shop/lib/three/planner-model'
 import type { FabricSlot, PrepareOptions } from '@/modules/space-planner-for-shop/lib/three/planner-model'
 import { modelScaleFor } from '@/modules/space-planner-for-shop/lib/three/model-scale'
@@ -135,15 +143,26 @@ export function createScene(): { scene: Scene; camera: PerspectiveCamera } {
   // Toned down from where this started. With ACES tone mapping on top, an
   // ambient of 1.4 plus a key of 2.2 washed the floor and the walls to the same
   // near-white and the room lost its corners.
+  //
+  // Named, because dressForRender has to find the ambient to dial it back and
+  // the key to hang a shadow camera off. Finding them by index into scene.children
+  // works right up until somebody adds a fourth light.
   const ambient = new AmbientLight(0xffffff, 0.85)
+  ambient.name = LIGHT_AMBIENT
   const key = new DirectionalLight(0xffffff, 1.5)
+  key.name = LIGHT_KEY
   key.position.set(4, 8, 6)
   const fill = new DirectionalLight(0xffffff, 0.45)
+  fill.name = LIGHT_FILL
   fill.position.set(-6, 4, -4)
   scene.add(ambient, key, fill)
 
   return { scene, camera }
 }
+
+export const LIGHT_AMBIENT = 'plannerAmbient'
+export const LIGHT_KEY = 'plannerKey'
+export const LIGHT_FILL = 'plannerFill'
 
 /** Floor and walls. Rebuilt whole when the room changes - it is cheap and it is correct. */
 export function buildRoom(description: SceneDescription): Group {
@@ -605,6 +624,183 @@ export function eyeLevel(camera: PlannerCamera, description: SceneDescription): 
   camera.position.copy(position)
   camera.lookAt(target)
   return target
+}
+
+// ---------------------------------------------------------------------------
+// Viewpoints somebody chose
+// ---------------------------------------------------------------------------
+
+/**
+ * The camera as it stands, in the shape that gets stored.
+ *
+ * `target` comes in from the caller rather than being derived, because a camera
+ * knows which way it is pointing and not how far away the thing it is pointing at
+ * is. OrbitControls owns that number, and reconstructing it from the camera alone
+ * means picking an arbitrary distance - which then quietly decides how far one
+ * notch of the scroll wheel zooms when the view is restored.
+ */
+export function readCamera(camera: PlannerCamera, target: Vector3): SavedCamera {
+  const perspective = (camera as PerspectiveCamera).isPerspectiveCamera ? (camera as PerspectiveCamera) : null
+  return {
+    position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+    target: { x: target.x, y: target.y, z: target.z },
+    fov: perspective ? perspective.fov : 50,
+    projection: perspective ? 'perspective' : 'orthographic',
+    zoom: camera.zoom,
+  }
+}
+
+/**
+ * Put the camera back where it was. Returns the target, for the controls.
+ *
+ * The projection is NOT switched here even when the saved view disagrees with the
+ * live one - swapping projection means replacing the camera and its controls, and
+ * that is the caller's business. What this does instead is honour the saved
+ * framing on whichever camera it is handed, so restoring a perspective view onto
+ * an orthographic camera gives the same standpoint drawn flat rather than
+ * nothing at all.
+ */
+export function applyCamera(camera: PlannerCamera, saved: SavedCamera): Vector3 {
+  const target = new Vector3(saved.target.x, saved.target.y, saved.target.z)
+  camera.position.set(saved.position.x, saved.position.y, saved.position.z)
+  if ((camera as PerspectiveCamera).isPerspectiveCamera) {
+    const perspective = camera as PerspectiveCamera
+    perspective.fov = saved.fov
+  } else {
+    camera.zoom = saved.zoom
+  }
+  camera.lookAt(target)
+  camera.updateProjectionMatrix()
+  return target
+}
+
+/** Somewhere between the floor and just under the ceiling. */
+export function clampEyeHeight(metres: number, description: SceneDescription): number {
+  const ceiling = Math.max(EYE_HEIGHT_MIN_M + 0.2, description.ceilingM - EYE_HEIGHT_CEILING_GAP_M)
+  if (!Number.isFinite(metres)) return Math.min(EYE_HEIGHT_STANDING_M, ceiling)
+  return Math.min(Math.max(metres, EYE_HEIGHT_MIN_M), ceiling)
+}
+
+/**
+ * Raise or lower the eye without changing where it is looking.
+ *
+ * The target moves with the camera, by the same amount, on purpose. Moving the
+ * camera alone would tip the view down as you rose - which is a pitch control,
+ * not a height control, and it is already on the left mouse button. Moving both
+ * keeps the horizon where it is and simply makes you taller, which is what
+ * somebody dragging a slider labelled "eye height" is asking for.
+ */
+export function setEyeHeight(camera: PlannerCamera, target: Vector3, metres: number, description: SceneDescription): number {
+  const wanted = clampEyeHeight(metres, description)
+  const delta = wanted - camera.position.y
+  camera.position.y += delta
+  target.y += delta
+  camera.lookAt(target)
+  return wanted
+}
+
+// ---------------------------------------------------------------------------
+// The render-only dressing
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything a still photograph gets that the live view does not.
+ *
+ * Split out here, and called ONLY from the render page, because the two views
+ * want opposite things. The shopper's view is a thing being dragged around at
+ * sixty frames a second on whatever phone they own; the photograph is one frame
+ * on a machine with nothing else to do. Sharing a lighting rig between them meant
+ * the photograph was the preview at a larger size, which is exactly the complaint
+ * that produced this function.
+ *
+ * Three changes, in order of how much they matter:
+ *
+ *   1. **Image-based lighting.** three's own procedural room, pre-filtered into an
+ *      environment map. Standard materials with nothing to reflect read as matte
+ *      plastic no matter how many directional lights you point at them; this is
+ *      the single biggest difference between "3D preview" and "photograph".
+ *   2. **A shadow the key light actually casts.** The renderer's shadow map was
+ *      already switched on and had been doing nothing at all, because no light
+ *      was casting and no mesh was receiving. The light also has to be MOVED:
+ *      its fixed position sat inside any room bigger than about eight metres, so
+ *      even once it cast, it cast from the middle of the floor.
+ *   3. **Ambient dialled back.** The environment now does the job the ambient was
+ *      standing in for, and leaving both up washes the corners out - which is the
+ *      exact failure the ambient was toned down for in the first place.
+ *
+ * Returns a dispose for the PMREM render target, which is a GPU allocation and
+ * not garbage collected with the scene.
+ */
+export function dressForRender(opts: {
+  renderer: WebGLRenderer
+  scene: Scene
+  description: SceneDescription
+  /** Every group whose meshes should take part in shadowing. */
+  groups: Object3D[]
+}): () => void {
+  const { renderer, scene, description, groups } = opts
+
+  const pmrem = new PMREMGenerator(renderer)
+  const environment = pmrem.fromScene(new RoomEnvironment(), 0.04)
+  scene.environment = environment.texture
+  scene.environmentIntensity = 0.85
+
+  const ambient = scene.getObjectByName(LIGHT_AMBIENT)
+  if (ambient && 'intensity' in ambient) (ambient as AmbientLight).intensity = 0.22
+  const fill = scene.getObjectByName(LIGHT_FILL)
+  if (fill && 'intensity' in fill) (fill as DirectionalLight).intensity = 0.3
+
+  const key = scene.getObjectByName(LIGHT_KEY) as DirectionalLight | undefined
+  if (key) {
+    const bounds = roomBounds(description)
+    const radius = 0.5 * Math.hypot(bounds.width, bounds.depth) + bounds.height
+    const centre = new Vector3(description.centre.x, 0, description.centre.z)
+
+    // Keep the direction the room was lit from and push the lamp back outside
+    // it. A directional light's position is only ever a direction plus a place to
+    // hang the shadow camera - but that second part is why the fixed (4, 8, 6)
+    // could not stay: in a ten-metre room it is a lamp standing on the carpet.
+    const direction = new Vector3(4, 8, 6).normalize()
+    key.position.copy(centre).addScaledVector(direction, radius * 2.2)
+    key.target.position.copy(centre)
+    scene.add(key.target)
+
+    key.castShadow = true
+    key.shadow.mapSize.set(4096, 4096)
+    const extent = radius * 1.25
+    key.shadow.camera.left = -extent
+    key.shadow.camera.right = extent
+    key.shadow.camera.top = extent
+    key.shadow.camera.bottom = -extent
+    key.shadow.camera.near = 0.1
+    key.shadow.camera.far = radius * 5
+    // normalBias rather than bias: the room is mostly large flat planes lit at a
+    // shallow angle, which is precisely where a constant depth bias either leaves
+    // acne or detaches every shadow from the thing casting it.
+    key.shadow.normalBias = 0.02
+    key.shadow.bias = -0.0004
+    // Softens the edge without a second pass. Costs nothing on one frame.
+    key.shadow.radius = 3
+    key.shadow.camera.updateProjectionMatrix()
+  }
+
+  for (const group of groups) {
+    group.traverse((object) => {
+      const mesh = object as Mesh
+      if (!mesh.isMesh) return
+      // Labels are sprites and never cast; the floor receives but does not cast,
+      // because a flat plane casting onto itself is nothing but shadow acne.
+      const isFloor = mesh.name === 'floor'
+      mesh.castShadow = !isFloor
+      mesh.receiveShadow = true
+    })
+  }
+
+  return () => {
+    scene.environment = null
+    environment.dispose()
+    pmrem.dispose()
+  }
 }
 
 /**

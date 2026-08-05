@@ -72,12 +72,21 @@ one need a customer account like everybody else.
   edge to edge, and lined up on the other axis - so a bank of desks actually
   touches. Hold `alt` to escape any of it.
 - **Look at it flat or in 3D**, with perspective on for how it will look and off
-  for a drawing you can compare sizes on.
+  for a drawing you can compare sizes on. **Eye height** is a slider down the side
+  of the 3D view (Alt and the wheel, or Page Up / Page Down, for anyone who prefers
+  it), so you can sit down in the room or stand up in it.
+- **Keep the angles you like.** A saved view belongs to the SPACE rather than to
+  one layout, so every option you try in that room can be looked at - and
+  photographed - from the identical spot. Twelve per space.
 - **Take it away**: add the lot to the basket, ask for a quote, email it to
   themselves, or export a PDF - the room's measurements and the priced item list
   always, the flat plan, the 3D view and a quote page by choice.
 - **Ask for a photograph of it**, where the owner has switched pictures on and the
-  picture service is wired up. **Make a photo** in the toolbar opens the pictures
+  picture service is wired up. Taken from where you are looking, from a saved view,
+  or from the canned standpoint at the end of the room's longest wall - your
+  choice, in the dialog. The photograph is built with proper lighting, shadows and
+  ambient occlusion rather than being the preview at a larger size, which is what
+  it was until 0.1.8. **Make a photo** in the toolbar opens the pictures
   already taken of that layout and a button to ask for another; the dialog posts,
   polls, and is perfectly happy to be closed while the machine works. The button
   is absent unless `rendersEnabled` **and** `renderWorkerConfigured()` are both
@@ -273,6 +282,99 @@ at `/space-planner/render/[id]` - waits for that page to set
 pressed the button, and there is no second implementation to drift from it.
 Source: `cactus-foundation-modules/space-planner-render-worker`.
 
+### What makes the picture different from the preview
+
+For its first few versions it was not different, and that was the bug. The render
+page called `createScene()` and stopped, so a photograph was the live preview at a
+larger size - and the two things meant to separate them did nothing at all:
+`shadowMap.enabled` was set over a scene where no light cast and no mesh received,
+and a comment claimed procedural room lighting that was never wired up.
+
+`dressForRender()` in `lib/three/planner-scene.ts` is where the difference now
+lives. It is called from `RenderFrame` and **from nowhere else** - the shopper's
+view is a thing being dragged about on a phone and wants none of it:
+
+- **Image-based lighting.** three's own `RoomEnvironment`, pre-filtered through
+  `PMREMGenerator` into `scene.environment`. Standard materials with nothing to
+  reflect read as matte plastic however many lamps you point at them, so this is
+  the single biggest change. The ambient and fill are dialled back to match,
+  because the environment now does the job they were standing in for.
+- **A shadow the key light actually casts.** The lamp is repositioned relative to
+  the room first: its fixed `(4, 8, 6)` sits *inside* any room bigger than about
+  eight metres, so even once it cast it cast from the middle of the carpet. The
+  shadow camera is fitted to the room's own bounds.
+- **Ambient occlusion.** `GTAOPass` on an `EffectComposer`, dynamically imported
+  in `RenderFrame` so the 3D view never downloads it. `OutputPass` does the tone
+  mapping, because a composer's intermediate targets are linear and untoned.
+
+A composer that will not build is caught and ignored: the room is still
+photographed with the environment and the shadows, which is most of the
+difference, rather than failing over a machine already paid for.
+
+### Chrome, and why the page hides it
+
+Module public pages hang off the core public catch-all, so this one renders inside
+`app/(public)/layout.tsx` - with the site header, the footer, and (the worker's
+browser being brand new and having consented to nothing) the cookie bar. Every
+picture taken before 0.1.8 had all three sitting on top of the room.
+
+There is no full-screen opt-out to reach for, so the page blanks its own siblings
+with a server-rendered `body > *:not(main)` rule. Server-rendered rather than
+applied on mount, because the worker shoots as soon as the scene says it is ready
+and a header that vanishes one frame later is a header in the photograph.
+
+### Where the picture is taken from
+
+`spl_render_jobs.params.camera` carries a `SavedCamera` - position, target, fov,
+projection and zoom, in world metres. Absent (or unparseable, or an older job) and
+the render falls back to `eyeLevel()`, the canned standpoint at the end of the
+room's longest wall that every picture used to come from whether it suited the
+room or not.
+
+The shopper chooses in the photo dialog: where they are looking now, the canned
+standpoint, or any saved view.
+
+## Saved views
+
+`spl_room_views`, migration `003`. Attached to the **room**, not the plan, and
+that is the point of the table: a camera pose is expressed in room coordinates, so
+it means nothing anywhere else and exactly the same thing for every layout inside
+one room. "Option A from the doorway" and "Option B from the doorway" are two
+pictures from one saved view, which is the comparison somebody laying out an
+office is actually trying to make.
+
+Twelve per room. No ownership column - the room is the authority, and every
+handler proves it with `getRoomForMember` before touching anything, exactly as the
+plans routes do.
+
+| Route | What |
+|---|---|
+| `GET/POST /member/rooms/<id>/views` | List, save |
+| `PATCH/DELETE /member/rooms/<id>/views/<viewId>` | Rename, re-point at where you are standing now, delete |
+
+A stored camera that will not parse is dropped from the list rather than offered:
+a room reshaped under a saved view can leave a pose describing nowhere, and a
+button that produces a black picture is worse than a button that is not there.
+
+## Eye height
+
+A vertical slider down the left of the 3D view, with Sitting and Standing presets,
+labelled in the room's own units. **Alt (or Option) and the wheel** does the same
+thing for anybody who finds it, and Page Up / Page Down when the view has focus.
+
+The slider is the primary control on purpose: a modifier key nobody is told about
+is a feature nobody has, this tool is mostly used on phones where there is no key
+to hold down at all, and somebody changing their eye height wants to know what
+height they have reached - which a wheel gesture cannot tell them.
+
+The camera and the orbit target move together, so the horizon holds and you simply
+get taller. Moving the camera alone would tip the view down as you rose, which is
+a pitch control, and that is already on the left mouse button.
+
+The wheel listener is bound to the wrapper in the **capture** phase, because
+OrbitControls owns the wheel on the canvas and treats it as zoom. A listener added
+alongside theirs would be a coin toss decided by registration order.
+
 ## Environment
 
 | Variable | Required | What it does |
@@ -286,9 +388,9 @@ the worker token all live in `spl_render_worker`.
 
 ## Tables
 
-`spl_settings`, `spl_rooms`, `spl_plans`, `spl_plan_versions`, `spl_model_meta`,
-`spl_category_defaults`, `spl_dimension_cache`, `spl_backfill_jobs`,
-`spl_render_jobs`, `spl_render_worker`, `spl_events`.
+`spl_settings`, `spl_rooms`, `spl_room_views`, `spl_plans`, `spl_plan_versions`,
+`spl_model_meta`, `spl_category_defaults`, `spl_dimension_cache`,
+`spl_backfill_jobs`, `spl_render_jobs`, `spl_render_worker`, `spl_events`.
 
 Uninstalling with data removes all of them - and unlike an order or a review, the
 customer has no copy of a plan anywhere else, so `code_only` (core's default, and
