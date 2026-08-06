@@ -192,7 +192,7 @@ async function build(url: string, format: P3dFormat, options: PrepareOptions): P
   // turned the right thing to have done.
   object.position.set(-centre.x, -box.min.y, -centre.z)
 
-  if (!options.noDecimation) {
+  if (!options.noDecimation && countTriangles(object) > DECIMATION_FLOOR_TRIANGLES) {
     await decimate(object, options.decimationTarget)
   }
   downscaleTextures(object, options.textureMaxPx)
@@ -224,6 +224,20 @@ export function countTriangles(object: Object3D): number {
 }
 
 /**
+ * Under this many triangles, a model is left exactly as its author drew it.
+ *
+ * Decimation is a bargain, and below this the bargain is a bad one: the Oslo oval
+ * boardroom table is seventeen thousand triangles all told, so simplifying it
+ * bought about eight thousand back - nothing, against a fourteen-model budget -
+ * and cost the product its silhouette. A shopper does not care what a table costs
+ * the GPU. They care that the ends of it are round.
+ *
+ * Where the saving is real - the heavy mesh-back chairs - it is real by an order
+ * of magnitude, and those are all comfortably over this line.
+ */
+const DECIMATION_FLOOR_TRIANGLES = 30_000
+
+/**
  * Simplify with meshoptimizer, off the main thread where the browser allows it.
  *
  * Conservative on purpose: the planner camera rarely gets closer than about a
@@ -231,9 +245,9 @@ export function countTriangles(object: Object3D): number {
  * trays. The escape hatch for a model this ruins is the per-file `no_decimation`
  * flag in the admin, not a cleverer heuristic.
  *
- * This saves what the GPU holds, never what the network moved. Nothing shipped
- * in this catalogue is Draco or meshopt compressed, so bytes on the wire are the
- * binding constraint and the only lever on those is a one-off asset pass.
+ * This saves what the GPU holds, never what the network moved, so bytes on the
+ * wire are the binding constraint and the only lever on those is a one-off asset
+ * pass.
  */
 async function decimate(object: Object3D, target: number): Promise<void> {
   if (target >= 1) return
@@ -272,7 +286,26 @@ async function decimate(object: Object3D, target: number): Promise<void> {
     if (targetCount >= indices.length) return
 
     try {
-      const [simplified] = simplifier.simplify(indices, positions, 3, targetCount, 0.01)
+      // LOCK THE BORDER, and it is not a tuning preference.
+      //
+      // A glTF loader splits one mesh into one geometry per material, so a part
+      // whose surfaces are finished differently arrives here as several separate
+      // geometries that SHARE A RIM. The Oslo oval boardroom table is a slab and a
+      // 26 mm edge band; simplified independently, each end of that shared rim
+      // moved by a different amount and the two stopped meeting - the slab pulled
+      // 12 mm inside the band, the curve went to chords, and one end of the table
+      // had a hole through it. On the product page, which never decimates, the
+      // same file was flawless.
+      //
+      // The error term makes it worse rather than catching it: meshoptimizer reads
+      // it as a fraction of the MESH EXTENT, so 0.01 on a 2.4 m table permits about
+      // 24 mm of wander - most of the edge band's whole height. The feature is
+      // inside the tolerance, so no threshold here could have saved it.
+      //
+      // Locking open boundary vertices costs the slab its share of the saving (it
+      // is nearly all rim) and costs the band almost none of its own, which is the
+      // right way round: the band is where the triangles were.
+      const [simplified] = simplifier.simplify(indices, positions, 3, targetCount, 0.01, ['LockBorder'])
       geometry.setIndex(Array.from(simplified))
     } catch {
       // Leave this mesh alone. One awkward geometry must not take the model down.
