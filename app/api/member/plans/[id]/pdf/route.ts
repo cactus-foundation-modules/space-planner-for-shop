@@ -44,6 +44,9 @@ const Body = z.object({
   includeQuote: z.boolean().default(false),
   planImage: DataUrl.nullable().optional(),
   viewImage: DataUrl.nullable().optional(),
+  /** The saved views the shopper ticked, photographed in their browser like the
+   * two drawings above. Capped at the same twelve a room may hold. */
+  views: z.array(z.object({ name: z.string().trim().min(1).max(80), image: DataUrl })).max(12).default([]),
 })
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -75,8 +78,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   const [bom, site] = await Promise.all([
     buildBom(plan.items, plan.productSnapshot),
-    prisma.siteConfig.findUnique({ where: { id: 'singleton' }, select: { siteName: true } }),
+    prisma.siteConfig.findUnique({ where: { id: 'singleton' }, select: { siteName: true, logoMediaId: true } }),
   ])
+  const logoDataUrl = await logoAsDataUrl(site?.logoMediaId ?? null)
 
   // The quote page is the quote module's, in the sense that matters: its
   // heading, its intro, its terms, its validity note and its rule about whether
@@ -102,15 +106,17 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     geometry: room.geometry,
     bom,
     siteName: site?.siteName ?? '',
+    logoDataUrl,
     planImage: parsed.data.includePlanView ? parsed.data.planImage ?? null : null,
     viewImage: parsed.data.include3dView ? parsed.data.viewImage ?? null : null,
+    savedViews: parsed.data.views,
     quote,
     dateLabel: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
     planUrl: plan.shareToken ? siteUrl(`/space-planner/shared/${plan.shareToken}`) : null,
   })
 
   try {
-    const pdf = await renderPlanPdf(html)
+    const pdf = await renderPlanPdf(html, { logoDataUrl })
     await recordEvent('plan.exported', { planId: id })
     return new NextResponse(Buffer.from(pdf), {
       headers: {
@@ -140,4 +146,31 @@ async function quoteNumberFor(quoteId: string): Promise<string | null> {
     SELECT "quote_number" FROM "qfs_quotes" WHERE "id" = ${quoteId} LIMIT 1
   `
   return rows[0]?.quote_number ?? null
+}
+
+/**
+ * The site's logo, fetched once and inlined as a data URL.
+ *
+ * Inlined because both places it goes can use nothing else: the document is
+ * printed with setContent and no network to wait on, and chromium's per-page
+ * header template refuses to load any image that is not a data URL. A logo that
+ * cannot be fetched inside five seconds, is not an image, or is unreasonably
+ * large simply stays off the document - a PDF without a logo beats no PDF.
+ */
+async function logoAsDataUrl(logoMediaId: string | null): Promise<string | null> {
+  if (!logoMediaId) return null
+  try {
+    const media = await prisma.media.findUnique({ where: { id: logoMediaId }, select: { url: true } })
+    if (!media?.url) return null
+    const url = media.url.startsWith('http') ? media.url : siteUrl(media.url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return null
+    const type = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? ''
+    if (!type.startsWith('image/')) return null
+    const bytes = await response.arrayBuffer()
+    if (bytes.byteLength > 2_000_000) return null
+    return `data:${type};base64,${Buffer.from(bytes).toString('base64')}`
+  } catch {
+    return null
+  }
 }

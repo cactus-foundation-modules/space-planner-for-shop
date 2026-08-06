@@ -5,6 +5,7 @@ import {
   itemCorners,
   OPENING_DEFAULTS,
   fitOpeningToWall,
+  itemHitsObstruction,
   itemInsideRoom,
   itemsFight,
   nearestItemGapMm,
@@ -92,6 +93,15 @@ export type PlannerAction =
   | { type: 'add-opening'; id: string; kind: OpeningKind; wallIndex: number; offsetMm: number }
   | { type: 'set-opening'; id: string; patch: Partial<Omit<WallOpening, 'id'>> }
   | { type: 'delete-opening'; id: string }
+  /** A support column, chimney breast or stair box, dropped as a rectangle
+   * centred where the floor was tapped. Part of the ROOM, like a door: it
+   * belongs to the walls it stands among, not to any one layout. */
+  | { type: 'add-obstruction'; id: string; x: number; y: number; widthMm: number; depthMm: number; heightMm: number; label: string }
+  /** Resizing keeps the centre still; anything else would slide a column along
+   * the wall while its width was being typed. */
+  | { type: 'set-obstruction'; id: string; patch: { label?: string; heightMm?: number; widthMm?: number; depthMm?: number } }
+  | { type: 'move-obstruction'; id: string; dx: number; dy: number }
+  | { type: 'delete-obstruction'; id: string }
   | { type: 'select'; ids: string[] }
   | { type: 'load'; snapshot: PlannerSnapshot }
 
@@ -204,6 +214,18 @@ function snapNeighbours(items: PlanItem[], moving: Set<string>): PlanItem[] {
 function snapPlacement(moved: PlanItem, from: PlanItem, neighbours: PlanItem[], geometry: RoomGeometry): PlanItem {
   const walled = movingAwayFromWall(from, moved, geometry) ? moved : snapToWall(moved, geometry)
   return movingAwayFromItems(from, walled, neighbours) ? walled : snapToItems(walled, neighbours)
+}
+
+/** An axis-aligned rectangle about a centre, as an obstruction outline. */
+function rectVertices(x: number, y: number, widthMm: number, depthMm: number): Vertex[] {
+  const halfW = widthMm / 2
+  const halfD = depthMm / 2
+  return [
+    { x: Math.round(x - halfW), y: Math.round(y - halfD) },
+    { x: Math.round(x + halfW), y: Math.round(y - halfD) },
+    { x: Math.round(x + halfW), y: Math.round(y + halfD) },
+    { x: Math.round(x - halfW), y: Math.round(y + halfD) },
+  ]
 }
 
 function makeItem(id: string, product: ProductSize, x: number, y: number, staged: boolean): PlanItem {
@@ -447,6 +469,56 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       return bump({ ...state, geometry: { ...state.geometry, openings } })
     }
 
+    case 'add-obstruction': {
+      const obstruction = {
+        id: action.id,
+        label: action.label,
+        vertices: rectVertices(action.x, action.y, action.widthMm, action.depthMm),
+        heightMm: Math.round(action.heightMm),
+      }
+      return bump({ ...state, geometry: { ...state.geometry, obstructions: [...state.geometry.obstructions, obstruction] } })
+    }
+
+    case 'set-obstruction': {
+      const obstructions = state.geometry.obstructions.map((obstruction) => {
+        if (obstruction.id !== action.id) return obstruction
+        const next = { ...obstruction }
+        if (action.patch.label !== undefined) next.label = action.patch.label
+        if (action.patch.heightMm !== undefined) next.heightMm = Math.max(1, Math.round(action.patch.heightMm))
+        if (action.patch.widthMm !== undefined || action.patch.depthMm !== undefined) {
+          // Rebuilt as a rectangle about the old centre. The UI only ever makes
+          // rectangles, and resizing an imported polygon to a typed width has no
+          // other honest reading than "make it that wide where it stands".
+          const box = boundingBox(obstruction.vertices)
+          const widthMm = Math.max(10, Math.round(action.patch.widthMm ?? box.maxX - box.minX))
+          const depthMm = Math.max(10, Math.round(action.patch.depthMm ?? box.maxY - box.minY))
+          next.vertices = rectVertices((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, widthMm, depthMm)
+        }
+        return next
+      })
+      return bump({ ...state, geometry: { ...state.geometry, obstructions } })
+    }
+
+    case 'move-obstruction': {
+      const obstructions = state.geometry.obstructions.map((obstruction) =>
+        obstruction.id === action.id
+          ? {
+              ...obstruction,
+              vertices: obstruction.vertices.map((vertex) => ({
+                x: Math.round(vertex.x + action.dx),
+                y: Math.round(vertex.y + action.dy),
+              })),
+            }
+          : obstruction,
+      )
+      return bump({ ...state, geometry: { ...state.geometry, obstructions } })
+    }
+
+    case 'delete-obstruction': {
+      const obstructions = state.geometry.obstructions.filter((obstruction) => obstruction.id !== action.id)
+      return bump({ ...state, geometry: { ...state.geometry, obstructions } })
+    }
+
     case 'attach': {
       // One level only. Accessory-on-accessory stacking is deliberately out of
       // scope, and a cycle would be a hang rather than a feature.
@@ -479,7 +551,7 @@ export function toPlanItems(state: PlannerState): PlanItems {
  * `underTop` carries what the catalogue knows about the space beneath each
  * product, which is what tells a tucked-in chair from two desks in one spot.
  */
-export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}): Array<{ a: string; b: string }> {
+export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}, geometry?: RoomGeometry): Array<{ a: string; b: string }> {
   const out: Array<{ a: string; b: string }> = []
   const placed = items.filter((item) => !item.staged)
   for (let i = 0; i < placed.length; i++) {
@@ -488,6 +560,15 @@ export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}): Ar
       const b = placed[j]
       if (!a || !b) continue
       if (itemsFight(a, b, underTop)) out.push({ a: a.id, b: b.id })
+    }
+  }
+  // A desk through a support column gets the same warning as a desk through a
+  // desk. Warns, never blocks, like everything else here - but the server
+  // stages anything left crossing one when the room is saved, so the warning
+  // is also a heads-up about what saving will do.
+  if (geometry) {
+    for (const item of placed) {
+      if (itemHitsObstruction(item, geometry)) out.push({ a: item.id, b: 'obstruction' })
     }
   }
   return out
@@ -516,6 +597,8 @@ export function findFreeSpot(
   const free = (x: number, y: number): boolean => {
     const probe = { x, y, yaw: 0, widthMm: size.widthMm, depthMm: size.depthMm }
     if (!itemCorners(probe).every((corner) => pointInPolygon(corner, geometry.vertices))) return false
+    // A spot inside a support column is not a spot.
+    if (itemHitsObstruction({ ...probe, z: 0 }, geometry)) return false
     return !placed.some((item) => footprintsOverlap(probe, item, -20))
   }
 

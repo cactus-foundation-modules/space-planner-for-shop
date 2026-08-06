@@ -46,7 +46,7 @@ export class PlanPdfUnavailableError extends Error {}
  * it. Everything the page needs is in the string: no stylesheet to fetch, no
  * font to wait for, no request that could hang the print.
  */
-export async function renderPlanPdf(html: string): Promise<Uint8Array> {
+export async function renderPlanPdf(html: string, opts: { logoDataUrl?: string | null } = {}): Promise<Uint8Array> {
   const [{ default: puppeteer }, chromiumModule] = await Promise.all([
     import('puppeteer-core'),
     isServerless() ? import('@sparticuz/chromium') : Promise.resolve(null),
@@ -90,10 +90,20 @@ export async function renderPlanPdf(html: string): Promise<Uint8Array> {
     // twenty-five seconds of nothing.
     await page.setContent(html, { waitUntil: 'load', timeout: 20_000 })
     await page.emulateMediaType('print')
+    // The logo rides in the print margin's header box, which chromium repeats
+    // on EVERY page - the document below never has to know it is there and can
+    // never collide with it. A data URL is the only kind of image a header
+    // template will actually load, which is why the route inlines it.
+    const logo = opts.logoDataUrl && opts.logoDataUrl.startsWith('data:image/') ? opts.logoDataUrl : null
     return await page.pdf({
       format: 'a4',
       printBackground: true,
-      margin: { top: '14mm', bottom: '14mm', left: '12mm', right: '12mm' },
+      displayHeaderFooter: Boolean(logo),
+      headerTemplate: logo
+        ? `<div style="width:100%;margin:0 12mm;font-size:1px;"><img src="${logo}" style="height:8mm;max-width:50mm;object-fit:contain;object-position:left;"></div>`
+        : '<span></span>',
+      footerTemplate: '<span></span>',
+      margin: { top: logo ? '20mm' : '14mm', bottom: '14mm', left: '12mm', right: '12mm' },
       preferCSSPageSize: false,
     })
   } finally {

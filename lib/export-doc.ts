@@ -22,10 +22,15 @@ export type PlanExportInput = {
   geometry: RoomGeometry
   bom: Bom
   siteName: string
+  /** The site's logo as a data URL, inlined by the route so the print browser
+   * never waits on a network. Null when the site has none. */
+  logoDataUrl?: string | null
   /** The flat plan, as a data URL. Omitted when the shopper unticked it. */
   planImage?: string | null
   /** The 3D view, as a data URL. Omitted when the shopper unticked it. */
   viewImage?: string | null
+  /** The saved views the shopper ticked, each photographed from its own spot. */
+  savedViews?: Array<{ name: string; image: string }>
   /** The quote page, when it was asked for. Null leaves it out entirely. */
   quote?: QuotePageInput | null
   /** Today, formatted by the caller - nothing here reads the clock. */
@@ -94,6 +99,37 @@ const STYLES = `
   /* Rows never split across a page: half a desk at the foot of page one and its
      price at the top of page two is how a priced list stops being readable. */
   tr, .figure { break-inside: avoid; page-break-inside: avoid; }
+
+  /* The quote page, styled to read as the same document quote-for-shop prints
+     from the cart. Copied values, not imported code: a dependent module never
+     reaches into the module it depends on, and this page prints in ink whatever
+     theme the site wears - the same #111/#444/#ccc the quote document's own
+     print rules force. */
+  .q-head { display: flex; flex-wrap: wrap; gap: 8mm; justify-content: space-between; align-items: flex-start; padding-bottom: 4mm; border-bottom: 1px solid #ccc; margin-bottom: 4mm; }
+  .q-brand { display: flex; align-items: center; gap: 3mm; }
+  .q-logo { max-height: 13mm; max-width: 52mm; width: auto; height: auto; }
+  .q-site { font-weight: 600; font-size: 12pt; }
+  .q-meta { text-align: right; margin-left: auto; }
+  .q-meta h1 { font-size: 16pt; margin: 0 0 2mm; }
+  .q-facts { display: grid; grid-template-columns: auto auto; gap: 0.5mm 3mm; margin: 0; font-size: 10pt; justify-content: end; }
+  .q-facts dt { color: #55595e; }
+  .q-facts dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .q-lines { width: 100%; border-collapse: collapse; margin: 4mm 0 0; font-size: 10.5pt; }
+  .q-lines th { text-align: left; padding: 2mm 2mm 2mm 0; border-bottom: 1px solid #ccc; color: #55595e; font-weight: 600; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.02em; }
+  .q-lines td { padding: 2.2mm 2mm 2.2mm 0; border-bottom: 1px solid #e2e5e8; vertical-align: top; }
+  .q-lines th:last-child, .q-lines td:last-child { padding-right: 0; }
+  .q-name { display: block; font-weight: 500; }
+  .q-sku { display: block; font-size: 8.5pt; color: #55595e; }
+  .q-detail { list-style: none; margin: 1mm 0 0; padding: 0; display: grid; gap: 0.5mm; font-size: 8.5pt; color: #55595e; }
+  .q-totals { display: grid; grid-template-columns: 1fr auto; gap: 1mm 6mm; margin: 4mm 0 0 auto; max-width: 80mm; font-size: 10.5pt; }
+  .q-totals dt { color: #55595e; }
+  .q-totals dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .q-grand { font-weight: 700; font-size: 12pt; padding-top: 1.5mm; border-top: 1px solid #16181a; }
+  .q-poa { margin: 3mm 0 0; color: #55595e; }
+  .q-notes { margin: 6mm 0 0; display: grid; gap: 3mm; }
+  .q-validity { margin: 0; font-size: 9.5pt; color: #55595e; }
+  .q-terms h2 { font-size: 11pt; margin: 0 0 1.5mm; }
+  .q-terms p { margin: 0 0 2mm; font-size: 8.5pt; color: #55595e; }
 `
 
 function figure(src: string, caption: string): string {
@@ -139,14 +175,64 @@ function roomFacts(geometry: RoomGeometry, bom: Bom): string {
   </ul>`
 }
 
-function quotePage(input: QuotePageInput, bom: Bom): string {
+/**
+ * The quote page, on its own sheet, laid out the way quote-for-shop's own quote
+ * document prints from the cart: the shop's brand top-left, the heading and the
+ * quote's facts top-right, the lines with their codes and sizes, the total
+ * bottom-right, and the small print underneath. Somebody who has had a quote
+ * from this shop before should not be able to tell the two pages apart at
+ * arm's length.
+ */
+function quotePage(
+  input: QuotePageInput,
+  bom: Bom,
+  brand: { siteName: string; logoDataUrl: string | null; dateLabel: string },
+): string {
+  const money = !input.pricesHidden
+  const rows = bom.lines
+    .map(
+      (line) => `<tr>
+        <td>
+          <span class="q-name">${escapeHtml(line.name)}</span>
+          ${line.sku ? `<span class="q-sku">${escapeHtml(line.sku)}</span>` : ''}
+          ${line.sizeLabel ? `<ul class="q-detail"><li>${escapeHtml(line.sizeLabel)}${line.approximate ? ' (approx.)' : ''}</li></ul>` : ''}
+        </td>
+        <td class="num">${line.quantity}</td>
+        ${money ? `<td class="num">${escapeHtml(line.unitPriceFormatted)}</td><td class="num">${escapeHtml(line.lineTotalFormatted)}</td>` : ''}
+      </tr>`,
+    )
+    .join('')
+
   return `<section class="page-break">
-    <h1>${escapeHtml(input.heading)}</h1>
-    ${input.reference ? `<p class="muted">Reference ${escapeHtml(input.reference)}</p>` : ''}
+    <header class="q-head">
+      <div class="q-brand">
+        ${brand.logoDataUrl ? `<img class="q-logo" src="${brand.logoDataUrl}" alt="">` : ''}
+        ${brand.siteName ? `<span class="q-site">${escapeHtml(brand.siteName)}</span>` : ''}
+      </div>
+      <div class="q-meta">
+        <h1>${escapeHtml(input.heading)}</h1>
+        <dl class="q-facts">
+          ${input.reference ? `<dt>Quote</dt><dd>${escapeHtml(input.reference)}</dd>` : ''}
+          <dt>Date</dt><dd>${escapeHtml(brand.dateLabel)}</dd>
+        </dl>
+      </div>
+    </header>
     ${paragraphs(input.intro)}
-    ${bomTable(bom, input.pricesHidden, input.hiddenPriceLabel)}
-    ${input.validity ? `<p class="small muted" style="margin-top:4mm">${escapeHtml(input.validity)}</p>` : ''}
-    ${input.terms ? `<div class="small muted">${paragraphs(input.terms)}</div>` : ''}
+    <table class="q-lines">
+      <thead><tr><th>Item</th><th class="num">Qty</th>${money ? '<th class="num">Unit price</th><th class="num">Total</th>' : ''}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${
+      money
+        ? `<dl class="q-totals"><dt class="q-grand">Total ${escapeHtml(bom.taxSuffix)}</dt><dd class="q-grand">${escapeHtml(bom.totalFormatted)}</dd></dl>`
+        : // The quote document's own arrangement for a shop withholding prices:
+          // no money columns at all, and a sentence saying what happens next.
+          `<p class="q-poa">We will price this list and come back to you.</p>`
+    }
+    <section class="q-notes">
+      ${input.validity ? `<p class="q-validity">${escapeHtml(input.validity)}</p>` : ''}
+      ${input.terms ? `<div class="q-terms"><h2>Terms</h2>${paragraphs(input.terms)}</div>` : ''}
+    </section>
   </section>`
 }
 
@@ -164,6 +250,7 @@ export function buildPlanExportHtml(input: PlanExportInput): string {
   const drawings = [
     input.planImage ? figure(input.planImage, 'The floor plan, to scale.') : '',
     input.viewImage ? figure(input.viewImage, 'The room in three dimensions.') : '',
+    ...(input.savedViews ?? []).map((entry) => figure(entry.image, `From "${entry.name}".`)),
   ]
     .filter(Boolean)
     .join('')
@@ -194,7 +281,7 @@ export function buildPlanExportHtml(input: PlanExportInput): string {
     ${input.planUrl ? `<p class="small muted">Open it again at ${escapeHtml(input.planUrl)}</p>` : ''}
   </section>
 
-  ${input.quote ? quotePage(input.quote, bom) : ''}
+  ${input.quote ? quotePage(input.quote, bom, { siteName: input.siteName, logoDataUrl: input.logoDataUrl ?? null, dateLabel: input.dateLabel }) : ''}
 </body>
 </html>`
 }

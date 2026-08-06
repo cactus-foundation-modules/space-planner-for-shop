@@ -535,8 +535,12 @@ export function itemInsideRoom(item: PlanItem, geometry: RoomGeometry): boolean 
   return itemCorners(item).every((corner) => pointInPolygon(corner, geometry.vertices))
 }
 
-/** True when the item's footprint crosses an interior obstruction. */
-export function itemHitsObstruction(item: PlanItem, geometry: RoomGeometry): boolean {
+/** True when the item's footprint crosses an interior obstruction. Takes just
+ * the footprint fields, so a probe that is not yet an item can ask too. */
+export function itemHitsObstruction(
+  item: Pick<PlanItem, 'x' | 'y' | 'yaw' | 'widthMm' | 'depthMm' | 'z'>,
+  geometry: RoomGeometry,
+): boolean {
   const corners = itemCorners(item)
   return geometry.obstructions.some((obstruction) => {
     if (item.z >= obstruction.heightMm) return false

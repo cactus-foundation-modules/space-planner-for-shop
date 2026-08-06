@@ -23,7 +23,7 @@ import type { History, PlannerState, ProductInfo } from '@/modules/space-planner
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/planner-model'
-import { polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
+import { boundingBox, polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
 import type {
@@ -141,7 +141,7 @@ export type SpacePlannerProps = {
   stageProductId?: string | null
 }
 
-type Tab = 'catalogue' | 'selected' | 'items'
+type Tab = 'catalogue' | 'tray' | 'selected' | 'items'
 /**
  * The two surfaces, named for what you do on them rather than for how they are
  * drawn. "Stand in it" went with them: a camera parked at head height inside a
@@ -151,7 +151,7 @@ type Tab = 'catalogue' | 'selected' | 'items'
 type StageView = 'plan' | 'orbit'
 
 const VIEW_LABELS: Record<StageView, string> = { plan: 'Edit', orbit: 'Preview' }
-const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', selected: 'Selected', items: 'Item list' }
+const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', tray: 'Waiting', selected: 'Selected', items: 'Item list' }
 
 export function SpacePlanner(props: SpacePlannerProps) {
   const [state, dispatch] = useReducer(plannerReducer, undefined, () => emptyState(defaultRoomGeometry()))
@@ -182,6 +182,15 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [wallEdit, setWallEdit] = useState<{ index: number; lengthMm: number } | null>(null)
   const [roomEdit, setRoomEdit] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
+  /**
+   * Whether the side panel has taken most of a narrow screen.
+   *
+   * On a phone the workspace splits room-above, panel-below, and the panel's
+   * share is enough to pick from but not to browse in. The drag-handle bar
+   * toggles this; placing anything switches it back off, because the next thing
+   * a shopper wants to see after adding a desk is the desk.
+   */
+  const [panelMax, setPanelMax] = useState(false)
   const [startAgain, setStartAgain] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
@@ -213,6 +222,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
   /** Which door or window is being edited, and what the next tap on a wall makes. */
   const [openingSelection, setOpeningSelection] = useState<string | null>(null)
   const [openingKind, setOpeningKind] = useState<OpeningKind>('door')
+  /** Which column or other obstruction is being edited on the plan. */
+  const [obstructionSelection, setObstructionSelection] = useState<string | null>(null)
   /**
    * Whether the 3D view uses a perspective camera.
    *
@@ -348,7 +359,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
         if (!info) continue
         dispatch({ type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true })
       }
-      setMessage({ tone: 'info', text: 'Your basket is in the tray - tap anything in it to drop it into the room.' })
+      setTab('tray')
+      setMessage({ tone: 'info', text: 'Your basket is under "Waiting" - tap anything there to drop it into the room.' })
     })()
     // Deliberately once per mount: re-staging on every basket change would
     // duplicate what the shopper has already placed.
@@ -406,7 +418,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     return out
   }, [products])
 
-  const clashes = useMemo(() => findClashes(state.items, underTop), [state.items, underTop])
+  const clashes = useMemo(() => findClashes(state.items, underTop, state.geometry), [state.items, underTop, state.geometry])
   const labels = useMemo(() => {
     const out: Record<string, string> = {}
     for (const [id, info] of Object.entries(products)) out[id] = info.name
@@ -465,6 +477,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
       setProducts((current) => ({ ...current, [info.productId]: info }))
       const spot = findFreeSpot(state.items, state.geometry, info)
       dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
+      // A phone panel grown to browse in shrinks back the moment something is
+      // placed: the point of placing a thing is seeing it in the room.
+      setPanelMax(false)
       // What was handed over carries enough to draw the thing at once, which is
       // why it is used above - but it may have no model and no under-desk
       // measurements. Asking for those here rather than leaving it to the
@@ -500,6 +515,58 @@ export function SpacePlanner(props: SpacePlannerProps) {
     },
     [placeProduct],
   )
+
+  /** One thing out of the waiting list and into the room, at a free spot. */
+  const placeFromTray = useCallback(
+    (id: string) => {
+      const item = state.items.find((entry) => entry.id === id)
+      if (!item) return
+      commit()
+      const spot = findFreeSpot(state.items, state.geometry, item)
+      dispatch({ type: 'unstage-item', id, x: spot.x, y: spot.y })
+      setPanelMax(false)
+    },
+    [commit, state.geometry, state.items],
+  )
+
+  /**
+   * Everything waiting, into the room in one go.
+   *
+   * The spots are worked out against a running copy of the items rather than the
+   * state, because the state does not move between dispatches inside one click -
+   * asked one at a time, every item would be offered the same free spot and the
+   * lot would land in a pile.
+   */
+  const placeAllFromTray = useCallback(() => {
+    commit()
+    let working = state.items
+    for (const item of state.items) {
+      if (!item.staged) continue
+      const spot = findFreeSpot(working, state.geometry, item)
+      working = working.map((entry) => (entry.id === item.id ? { ...entry, staged: false, x: spot.x, y: spot.y } : entry))
+      dispatch({ type: 'unstage-item', id: item.id, x: spot.x, y: spot.y })
+    }
+    setPanelMax(false)
+  }, [commit, state.geometry, state.items])
+
+  /** Off the waiting list without going into the room - a change of mind. */
+  const removeFromTray = useCallback(
+    (id: string) => {
+      commit()
+      dispatch({ type: 'delete-items', ids: [id] })
+    },
+    [commit],
+  )
+
+  /**
+   * The tab actually shown. Derived rather than synced, because the waiting tab
+   * only exists while something is waiting: however the list empties - placed
+   * one by one, placed all at once, taken off, or a saved plan loaded over the
+   * top - the panel falls back to browsing without an effect chasing the state.
+   * And if reshaping the room puts something back on the list, the panel is
+   * already looking at it.
+   */
+  const activeTab: Tab = tab === 'tray' && tray.length === 0 ? 'catalogue' : tab
 
   const applyStep = useCallback(
     (step: { history: History; snapshot: { geometry: RoomGeometry; items: PlanItem[] } } | null) => {
@@ -778,10 +845,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
    * are the only ones it is allowed to print.
    */
   const exportPdf = useCallback(
-    async (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean }) => {
+    async (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean; viewIds: string[] }) => {
       setExportBusy(true)
       setMessage(null)
       const stageBefore = stage
+      const perspectiveBefore = perspective
       try {
         if (!props.signedIn) {
           setMessage({ tone: 'info', text: 'Make an account to save this as a PDF - it takes a moment.' })
@@ -789,13 +857,36 @@ export function SpacePlanner(props: SpacePlannerProps) {
           return
         }
 
-        // The 3D one first: it has models to fetch and a frame to draw, and
-        // waiting for it is the long part.
+        // The 3D ones first: they have models to fetch and frames to draw, and
+        // waiting for them is the long part.
         let viewImage: string | null = null
         if (options.include3dView) {
           setStage('orbit')
           viewImage = await waitForCapture(captureView, () => !viewBusy.current)
         }
+
+        // Each ticked saved view: stand the camera on it, give the frame a
+        // moment to settle, photograph it. Where the shopper was standing is
+        // read first and put back afterwards - an export should not end with
+        // the camera parked wherever the last picture happened to be taken.
+        const savedViews: Array<{ name: string; image: string }> = []
+        const wanted = options.viewIds
+          .map((viewId) => views.find((view) => view.id === viewId))
+          .filter((view): view is SplRoomView => Boolean(view))
+        if (wanted.length > 0) {
+          const cameraBefore = cameraProbe.current?.() ?? null
+          setStage('orbit')
+          for (const view of wanted) {
+            setPerspective(view.camera.projection === 'perspective')
+            setRestore({ camera: view.camera, nonce: Date.now() })
+            await delay(350)
+            const image = await waitForCapture(captureView, () => !viewBusy.current)
+            if (image) savedViews.push({ name: view.name, image })
+          }
+          setPerspective(perspectiveBefore)
+          if (cameraBefore) setRestore({ camera: cameraBefore, nonce: Date.now() + 1 })
+        }
+
         let planImage: string | null = null
         if (options.includePlanView) {
           setStage('plan')
@@ -809,7 +900,14 @@ export function SpacePlanner(props: SpacePlannerProps) {
         const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/pdf`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...options, planImage, viewImage }),
+          body: JSON.stringify({
+            includePlanView: options.includePlanView,
+            include3dView: options.include3dView,
+            includeQuote: options.includeQuote,
+            planImage,
+            viewImage,
+            views: savedViews,
+          }),
         })
         if (!response.ok) {
           const data = (await response.json().catch(() => null)) as { error?: string } | null
@@ -834,7 +932,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         setExportBusy(false)
       }
     },
-    [props.signedIn, props.signInHref, savePlan, stage, roomName, planName],
+    [props.signedIn, props.signInHref, savePlan, stage, perspective, views, roomName, planName],
   )
 
   const sendToCart = useCallback(() => {
@@ -982,6 +1080,25 @@ export function SpacePlanner(props: SpacePlannerProps) {
             }}
             onDone={() => { setOpeningSelection(null); setPlanMode('furnish') }}
           />
+        ) : planMode === 'obstructions' ? (
+          <ObstructionsBar
+            geometry={state.geometry}
+            selection={obstructionSelection}
+            onPatch={(patch) => {
+              if (!obstructionSelection) return
+              commit()
+              dispatch({ type: 'set-obstruction', id: obstructionSelection, patch })
+              setDirty(true)
+            }}
+            onRemove={() => {
+              if (!obstructionSelection) return
+              commit()
+              dispatch({ type: 'delete-obstruction', id: obstructionSelection })
+              setObstructionSelection(null)
+              setDirty(true)
+            }}
+            onDone={() => { setObstructionSelection(null); setPlanMode('furnish') }}
+          />
         ) : planMode !== 'furnish' ? (
           <div className="spl-bar-actions">
             <span className="spl-note">{planMode === 'draw' ? 'Drawing the room' : 'Changing the shape'}</span>
@@ -1080,7 +1197,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </span>
       </div>
 
-      <div className={planMode === 'furnish' ? 'spl-body' : 'spl-body spl-body-editing'}>
+      <div className={planMode !== 'furnish' ? 'spl-body spl-body-editing' : panelMax ? 'spl-body spl-body-panel-max' : 'spl-body'}>
         <div className="spl-stage">
           {stage === 'plan' ? (
             <Plan2d
@@ -1113,6 +1230,17 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 setDirty(true)
               }}
               onMoveOpening={(id, offsetMm) => dispatch({ type: 'set-opening', id, patch: { offsetMm } })}
+              obstructionSelection={obstructionSelection}
+              onSelectObstruction={setObstructionSelection}
+              onAddObstruction={(x, y) => {
+                const id = nextId()
+                // Full height by default, because the thing people draw is a
+                // structural column - and a column you can see over is a plinth.
+                dispatch({ type: 'add-obstruction', id, x, y, widthMm: 300, depthMm: 300, heightMm: state.geometry.ceilingMm, label: 'Column' })
+                setObstructionSelection(id)
+                setDirty(true)
+              }}
+              onMoveObstruction={(id, dx, dy) => dispatch({ type: 'move-obstruction', id, dx, dy })}
               registerCapture={(capture) => { capturePlan.current = capture }}
             />
           ) : (
@@ -1147,6 +1275,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
             <ExportDialog
               busy={exportBusy}
               signedIn={props.signedIn}
+              views={views}
               onCancel={() => setExporting(false)}
               onExport={(options) => void exportPdf(options)}
             />
@@ -1200,48 +1329,55 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 setOpeningSelection(null)
                 setPlanMode('openings')
               }}
+              onEditObstructions={() => {
+                setRoomEdit(false)
+                setStage('plan')
+                setObstructionSelection(null)
+                setPlanMode('obstructions')
+              }}
               onDraw={startDrawing}
             />
           )}
         </div>
 
         <aside className="spl-side">
+          {/* The pull-up bar, phone only. A sheet handle rather than a button
+              with a word on it, because that is the shape every phone user
+              already knows means "this panel slides". */}
+          <button
+            type="button"
+            className="spl-sheet-handle"
+            aria-expanded={panelMax}
+            aria-label={panelMax ? 'Shrink this panel and show the room' : 'Give this panel most of the screen'}
+            onClick={() => setPanelMax((open) => !open)}
+          >
+            <span aria-hidden />
+          </button>
           <div className="spl-tabs" role="tablist" aria-label="Panels">
-            {(['catalogue', 'selected', 'items'] as Tab[]).map((option) => (
-              <button key={option} type="button" role="tab" className="spl-tab" aria-selected={tab === option} onClick={() => setTab(option)}>
+            {(tray.length > 0 ? (['catalogue', 'tray', 'selected', 'items'] as Tab[]) : (['catalogue', 'selected', 'items'] as Tab[])).map((option) => (
+              <button key={option} type="button" role="tab" className="spl-tab" aria-selected={activeTab === option} onClick={() => setTab(option)}>
                 {TAB_LABELS[option]}
                 {option === 'selected' && state.selection.length > 0 ? ` (${state.selection.length})` : ''}
+                {option === 'tray' ? ` (${tray.length})` : ''}
               </button>
             ))}
           </div>
 
           <div className="spl-side-scroll">
             <div className="spl-stack">
-              {tray.length > 0 && (
-                <div className="spl-stack">
-                  <p className="spl-note">Waiting to go in - tap one to drop it into the room.</p>
-                  <div className="spl-tray">
-                    {tray.map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        className="spl-tray-item"
-                        onClick={() => {
-                          commit()
-                          const spot = findFreeSpot(state.items, state.geometry, item)
-                          dispatch({ type: 'unstage-item', id: item.id, x: spot.x, y: spot.y })
-                        }}
-                      >
-                        {labels[item.productId] ?? 'Item'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+              {activeTab === 'catalogue' && <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} />}
+
+              {activeTab === 'tray' && (
+                <TrayPanel
+                  items={tray}
+                  products={products}
+                  onPlace={placeFromTray}
+                  onPlaceAll={placeAllFromTray}
+                  onRemove={removeFromTray}
+                />
               )}
 
-              {tab === 'catalogue' && <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} />}
-
-              {tab === 'selected' && (
+              {activeTab === 'selected' && (
                 <SelectedPanel
                   state={state}
                   products={products}
@@ -1256,7 +1392,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 />
               )}
 
-              {tab === 'items' && <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />}
+              {activeTab === 'items' && <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />}
             </div>
           </div>
         </aside>
@@ -1337,13 +1473,20 @@ function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onC
 function ExportDialog(props: {
   busy: boolean
   signedIn: boolean
+  /** Saved viewpoints for this room - any of them can go in as its own picture. */
+  views: SplRoomView[]
   onCancel: () => void
-  onExport: (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean }) => void
+  onExport: (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean; viewIds: string[] }) => void
 }) {
   const ids = useId()
   const [includePlanView, setIncludePlanView] = useState(true)
   const [include3dView, setInclude3dView] = useState(false)
   const [includeQuote, setIncludeQuote] = useState(false)
+  const [viewIds, setViewIds] = useState<string[]>([])
+
+  const toggleView = (viewId: string, on: boolean) => {
+    setViewIds((current) => (on ? [...current, viewId] : current.filter((id) => id !== viewId)))
+  }
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !props.busy) props.onCancel() }}>
@@ -1359,6 +1502,24 @@ function ExportDialog(props: {
           <input id={`${ids}-3d`} type="checkbox" checked={include3dView} onChange={(event) => setInclude3dView(event.target.checked)} />
           <span>The 3D view - takes a few seconds longer</span>
         </label>
+
+        {props.views.length > 0 && (
+          <>
+            <p className="spl-note">Your saved views, each as its own picture:</p>
+            {props.views.map((view) => (
+              <label key={view.id} className="spl-check" htmlFor={`${ids}-view-${view.id}`}>
+                <input
+                  id={`${ids}-view-${view.id}`}
+                  type="checkbox"
+                  checked={viewIds.includes(view.id)}
+                  onChange={(event) => toggleView(view.id, event.target.checked)}
+                />
+                <span>{view.name}</span>
+              </label>
+            ))}
+          </>
+        )}
+
         <label className="spl-check" htmlFor={`${ids}-quote`}>
           <input id={`${ids}-quote`} type="checkbox" checked={includeQuote} onChange={(event) => setIncludeQuote(event.target.checked)} />
           <span>A quote page, on our usual quote wording and terms</span>
@@ -1375,7 +1536,7 @@ function ExportDialog(props: {
             className="spl-btn spl-btn-primary"
             disabled={props.busy}
             autoFocus
-            onClick={() => props.onExport({ includePlanView, include3dView, includeQuote })}
+            onClick={() => props.onExport({ includePlanView, include3dView, includeQuote, viewIds })}
           >
             {props.busy ? 'Making it…' : 'Make the PDF'}
           </button>
@@ -1784,6 +1945,54 @@ function OpeningsBar(props: {
 }
 
 /**
+ * The columns-and-pillars toolbar, the same shape as the doors one and for the
+ * same reason: putting a column in is tap, nudge, size, next - and a dialog
+ * between each step would turn three columns into nine interruptions.
+ *
+ * The size fields read the outline's bounding box, which for everything this
+ * bar creates IS the outline - the planner only draws rectangular columns, and
+ * anything fancier arrived in the data rather than through this bar.
+ */
+function ObstructionsBar(props: {
+  geometry: RoomGeometry
+  selection: string | null
+  onPatch: (patch: { label?: string; widthMm?: number; depthMm?: number; heightMm?: number }) => void
+  onRemove: () => void
+  onDone: () => void
+}) {
+  const selected = props.geometry.obstructions.find((obstruction) => obstruction.id === props.selection) ?? null
+  const units = props.geometry.units
+  const box = selected ? boundingBox(selected.vertices) : null
+
+  return (
+    <div className="spl-bar-actions">
+      {selected && box ? (
+        <>
+          <input
+            key={selected.id}
+            className="spl-input spl-input-sm"
+            aria-label="What to call it"
+            defaultValue={selected.label || 'Column'}
+            onBlur={(event) => {
+              const label = event.target.value.trim()
+              if (label && label !== selected.label) props.onPatch({ label })
+            }}
+            onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
+          />
+          <LengthField label="Wide" mm={Math.round(box.maxX - box.minX)} units={units} onChange={(mm) => props.onPatch({ widthMm: mm })} />
+          <LengthField label="Deep" mm={Math.round(box.maxY - box.minY)} units={units} onChange={(mm) => props.onPatch({ depthMm: mm })} />
+          <LengthField label="Tall" mm={selected.heightMm} units={units} onChange={(mm) => props.onPatch({ heightMm: mm })} />
+          <button type="button" className="spl-btn spl-btn-danger" onClick={props.onRemove}>Remove</button>
+        </>
+      ) : (
+        <span className="spl-note">Tap the floor where the column stands.</span>
+      )}
+      <button type="button" className="spl-btn spl-btn-primary" onClick={props.onDone}>Done</button>
+    </div>
+  )
+}
+
+/**
  * A length in whatever units the room is in, typed rather than spun.
  *
  * Held as text while it is being edited, so a half-typed "1" is not read as a
@@ -1837,7 +2046,7 @@ function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onCo
             ? 'You will go back to picking a shape for the room.'
             : clearItems
               ? `You will go back to picking a shape, and ${props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen will be taken out.`
-              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits in the tray for you to drop back in.`}
+              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits under "Waiting" for you to drop back in.`}
         </p>
         {props.itemCount > 0 && (
           <label className="spl-check" htmlFor={fieldId}>
@@ -1861,6 +2070,7 @@ function RoomDialog(props: {
   onCeiling: (mm: number) => void
   onEditShape: () => void
   onEditOpenings: () => void
+  onEditObstructions: () => void
   onDraw: () => void
 }) {
   const fieldId = useId()
@@ -1893,12 +2103,17 @@ function RoomDialog(props: {
           <button type="button" className="spl-btn" onClick={props.onEditOpenings}>
             Doors &amp; windows{props.geometry.openings.length > 0 ? ` (${props.geometry.openings.length})` : ''}
           </button>
+          <button type="button" className="spl-btn" onClick={props.onEditObstructions}>
+            Columns &amp; pillars{props.geometry.obstructions.length > 0 ? ` (${props.geometry.obstructions.length})` : ''}
+          </button>
           <button type="button" className="spl-btn" onClick={props.onDraw}>Draw a new one</button>
         </div>
         <p className="spl-note">
           Changing the shape lets you drag the corners about and add new ones, so an L-shape, a bay or a return is a
           couple of taps rather than a compromise. Doors and windows go on the walls themselves - worth putting in
           before you arrange anything, since a desk in front of a doorway is the whole reason for drawing the room.
+          Columns and pillars are the things standing in the middle of the floor: draw them in and the planner knows
+          nothing can stand where they do.
         </p>
         <div className="spl-field">
           <label htmlFor={fieldId}>Ceiling height</label>
@@ -2054,6 +2269,69 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
 // ---------------------------------------------------------------------------
 // Side panels
 // ---------------------------------------------------------------------------
+
+/**
+ * The waiting list: things chosen but not yet in the room.
+ *
+ * Everything staged from the basket lands here, and so does anything a reshaped
+ * room could no longer hold. It used to be a strip of bare text chips squeezed
+ * above whichever panel was open, capped at about three rows - which for a
+ * basket of a dozen things meant picking blind from a letterbox. A tab of full
+ * cards says what each thing is, what it costs, and what tapping it does.
+ */
+function TrayPanel(props: {
+  items: PlanItem[]
+  products: Record<string, ProductInfo>
+  onPlace: (id: string) => void
+  onPlaceAll: () => void
+  onRemove: (id: string) => void
+}) {
+  if (props.items.length === 0) return <p className="spl-note">Nothing waiting to go in.</p>
+
+  return (
+    <div className="spl-stack">
+      <p className="spl-note">Waiting to go in - tap one to drop it into the room at a free spot.</p>
+      {props.items.length > 1 && (
+        <button type="button" className="spl-btn" onClick={props.onPlaceAll}>
+          Put all {props.items.length} in the room
+        </button>
+      )}
+      <ul className="spl-list">
+        {props.items.map((item) => {
+          const info = props.products[item.productId]
+          const name = info?.name ?? 'Item'
+          return (
+            <li key={item.id} className="spl-wait-row">
+              <button type="button" className="spl-card" onClick={() => props.onPlace(item.id)}>
+                {info?.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- the same catalogue thumbnail the browse panel shows, already sized by the media layer
+                  <img src={info.image} alt="" loading="lazy" />
+                ) : (
+                  <span aria-hidden className="spl-card-noimage" />
+                )}
+                <span className="spl-card-body">
+                  <span className="spl-card-name">{name}</span>
+                  <span className="spl-card-meta">
+                    {info?.priceFormatted ? `${info.priceFormatted} · ` : ''}
+                    {Math.round(item.widthMm)} × {Math.round(item.depthMm)} mm
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="spl-btn spl-wait-remove"
+                aria-label={`Take ${name} off the waiting list`}
+                onClick={() => props.onRemove(item.id)}
+              >
+                ×
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
 
 /**
  * The properties panel.

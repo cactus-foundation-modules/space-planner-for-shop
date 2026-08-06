@@ -27,6 +27,9 @@ export function plannerCss(): string {
   --spl-gap: var(--space-3, 0.75rem);
   --spl-radius: var(--radius-md, 10px);
   --spl-control-h: 2.25rem;
+  /* Catalogue and waiting-list thumbnails. A variable because a fingertip
+     deserves a bigger picture than a pointer - see the coarse-pointer block. */
+  --spl-thumb: 3rem;
   /* Muted text, mixed from the theme's OWN text and background rather than taken
      from --color-text-muted, which on this theme sits at about 2.4:1 on white -
      fine for a decorative caption, nowhere near AA for the twelve-point print
@@ -120,6 +123,9 @@ export function plannerCss(): string {
    to escape. */
 .spl-side > .spl-tabs { flex: 0 0 auto; }
 .spl-side-scroll { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; }
+/* The pull-up handle only exists where the panel is a bottom sheet - see the
+   narrow-screen block. Everywhere else it would be a mystery decoration. */
+.spl-sheet-handle { display: none; }
 
 .spl-tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .spl-tab {
@@ -208,7 +214,7 @@ export function plannerCss(): string {
 .spl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .spl-card {
   display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr);
+  grid-template-columns: var(--spl-thumb) minmax(0, 1fr);
   gap: 0.6rem;
   align-items: center;
   border: 1px solid var(--color-border);
@@ -223,7 +229,8 @@ export function plannerCss(): string {
 }
 .spl-card:hover { border-color: var(--color-primary); }
 .spl-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
-.spl-card img { width: 3rem; height: 3rem; object-fit: contain; border-radius: 4px; background: var(--color-surface); }
+.spl-card img { width: var(--spl-thumb); height: var(--spl-thumb); object-fit: contain; border-radius: 4px; background: var(--color-surface); }
+.spl-card-noimage { width: var(--spl-thumb); height: var(--spl-thumb); border-radius: 4px; background: var(--color-surface); }
 .spl-card-body { display: grid; gap: 0.15rem; min-width: 0; }
 .spl-card-name { font-size: var(--text-sm, 0.875rem); line-height: 1.25; }
 .spl-card-meta { font-size: var(--text-xs, 0.75rem); color: var(--spl-muted); }
@@ -323,27 +330,26 @@ export function plannerCss(): string {
 .spl-bom td.spl-num, .spl-bom th.spl-num { text-align: right; white-space: nowrap; }
 .spl-bom tfoot td { font-weight: 600; border-bottom: none; }
 
-.spl-tray {
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-  padding: 0.4rem;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-sm, 6px);
-  max-height: 6rem;
-  overflow: auto;
+/* The waiting list: a full card that places, and a small button that removes.
+   Two separate buttons rather than one card with a corner control inside it,
+   because a button inside a button is not markup and a mis-tap on "remove"
+   while aiming for "place" is the most annoying mistake this panel could offer. */
+.spl-wait-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.4rem; align-items: center; }
+.spl-wait-remove { padding: 0 0.6rem; align-self: stretch; }
+
+/* The browse panel's search and filters, pinned to the top of the panel's own
+   scroll so page two is never a long scroll from the search box. The background
+   matters: without it the list shows through as the panel scrolls. */
+.spl-cat-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--color-surface);
+  display: grid;
+  gap: 0.5rem;
+  padding-bottom: 0.2rem;
 }
-.spl-tray-item {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm, 6px);
-  padding: 0.25rem 0.5rem;
-  font-size: var(--text-xs, 0.75rem);
-  background: var(--color-bg);
-  cursor: pointer;
-  color: var(--color-text);
-  font-family: inherit;
-}
-.spl-tray-item:hover { border-color: var(--color-primary); }
+.spl-cat-filters { display: grid; gap: 0.5rem; }
 
 .spl-first-run { display: grid; gap: var(--spl-gap); max-width: 46rem; margin: 0 auto; padding: clamp(1.5rem, 5vw, 3.5rem) 0; }
 .spl-first-run .spl-title { font-size: var(--text-2xl, 1.6rem); }
@@ -642,6 +648,45 @@ export function plannerCss(): string {
        themselves, so neither can push the other off. */
     grid-template-rows: minmax(11rem, 42fr) minmax(0, 58fr);
   }
+  /* Pulled up, the panel takes nearly everything: browsing two dozen catalogue
+     cards through a five-line letterbox was the single loudest complaint about
+     this tool on a phone. The room keeps a sliver so the sense of "under this
+     is your plan" survives, and placing anything drops the panel back down. */
+  .spl-body-panel-max { grid-template-rows: 4.5rem minmax(0, 1fr); }
+  /* The handle that does the pulling. A generous hit area around a small pill,
+     tucked into the panel's own padding so it costs almost no height. */
+  .spl-sheet-handle {
+    display: grid;
+    place-items: center;
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 0.15rem 0 0.4rem;
+    margin: calc(var(--spl-gap) * -0.6) calc(var(--spl-gap) * -1) calc(var(--spl-gap) * -0.6);
+    cursor: pointer;
+  }
+  .spl-sheet-handle span { width: 2.75rem; height: 0.3rem; border-radius: 999px; background: var(--color-border); }
+  .spl-sheet-handle:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+  /* One row of panel tabs that slides sideways, never a stack: with the waiting
+     tab present there are four, and every row they wrap onto comes straight out
+     of the product list underneath. */
+  .spl-side > .spl-tabs { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
+  .spl-side > .spl-tabs .spl-tab { flex: 0 0 auto; white-space: nowrap; }
+  /* Search and category share a row, and their labels go screen-reader-only:
+     the placeholder and the "All categories" option already say it, and two
+     lines of caption is a tall order on a screen the room also lives on. */
+  .spl-cat-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .spl-cat-filters .spl-field label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .spl-cat-filters .spl-field { position: relative; }
   /* While the room itself is being drawn or reshaped, the browse panel is
      nothing but a smaller canvas. On a phone that matters: half a screen is not
      enough to tap out the corners of an office. */
@@ -704,15 +749,15 @@ export function plannerCss(): string {
    purpose - the phone block above also sets --spl-control-h, and on a phone
    (coarse AND narrow) the bigger of the two must win. */
 @media (pointer: coarse) {
-  .spl-root { --spl-control-h: 2.75rem; }
+  /* Bigger controls and a bigger picture to aim at: a fingertip is not a pointer. */
+  .spl-root { --spl-control-h: 2.75rem; --spl-thumb: 3.6rem; }
   /* 1rem, because iOS Safari zooms the whole page into any input it considers
      too small to read, and never zooms back out. The planner's inputs are the
      wall lengths and the search box; a tool that lurches to 130% the moment
      somebody types a measurement reads as broken. */
   .spl-input, .spl-select, .spl-view-name { font-size: 1rem; }
   .spl-pick-value { min-height: 2.5rem; padding: 0.35rem 0.7rem; }
-  .spl-tray-item { min-height: 2.25rem; padding: 0.35rem 0.6rem; }
-  .spl-tray { max-height: 7rem; }
+  .spl-wait-remove { min-width: 2.75rem; justify-content: center; }
   .spl-eye-preset { padding: 0.35rem 0.5rem; }
   .spl-view-go, .spl-view-more { padding: 0.5rem 0.6rem; }
   .spl-photo-thumb img { width: 5.5rem; height: 3.7rem; }

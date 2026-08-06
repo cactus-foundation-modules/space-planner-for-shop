@@ -114,33 +114,43 @@ export function CataloguePanel(props: CataloguePanelProps) {
 
   return (
     <div className="spl-stack">
-      <div className="spl-field">
-        <label htmlFor="spl-search">Search the catalogue</label>
-        <input
-          id="spl-search"
-          className="spl-input"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Desks, chairs, pedestals…"
-        />
-      </div>
+      {/* Sticky within the panel's own scroll, so page two of the catalogue is
+          never a long scroll away from the search box that produced it. On a
+          phone the two fields share a row and the labels go visually quiet -
+          the placeholder and the "All categories" option say the same thing
+          without spending two lines of a screen that is mostly spoken for. */}
+      <div className="spl-cat-head">
+        <div className="spl-cat-filters">
+          <div className="spl-field">
+            <label htmlFor="spl-search">Search the catalogue</label>
+            <input
+              id="spl-search"
+              className="spl-input"
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Desks, chairs, pedestals…"
+            />
+          </div>
 
-      <div className="spl-field">
-        <label htmlFor="spl-category">Category</label>
-        <select id="spl-category" className="spl-select" value={category} onChange={(event) => setCategory(event.target.value)}>
-          <option value="">Everything</option>
-          {categories.map((entry) => (
-            <option key={entry.id} value={entry.slug}>
-              {entry.name}
-            </option>
-          ))}
-        </select>
-      </div>
+          <div className="spl-field">
+            <label htmlFor="spl-category">Category</label>
+            <select id="spl-category" className="spl-select" value={category} onChange={(event) => setCategory(event.target.value)}>
+              <option value="">All categories</option>
+              {categories.map((entry) => (
+                <option key={entry.id} value={entry.slug}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
-      <label style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', fontSize: 'var(--text-sm)' }}>
-        <input type="checkbox" checked={modelledOnly} onChange={(event) => setModelledOnly(event.target.checked)} />
-        Only things with a 3D model
-      </label>
+        <label className="spl-check">
+          <input type="checkbox" checked={modelledOnly} onChange={(event) => setModelledOnly(event.target.checked)} />
+          <span>Only things with a 3D model</span>
+        </label>
+      </div>
 
       {error && <p className="spl-alert spl-alert-error">{error}</p>}
       {loading && <p className="spl-note">Looking…</p>}
@@ -157,7 +167,7 @@ export function CataloguePanel(props: CataloguePanelProps) {
                 // eslint-disable-next-line @next/next/no-img-element -- catalogue thumbnails are already sized by the media layer and this list is virtual-scrolled by the browser, not by next/image
                 <img src={card.image} alt="" loading="lazy" />
               ) : (
-                <span aria-hidden style={{ width: '3rem', height: '3rem', borderRadius: 4, background: 'var(--color-surface)' }} />
+                <span aria-hidden className="spl-card-noimage" />
               )}
               <span className="spl-card-body">
                 <span className="spl-card-name">{card.name}</span>

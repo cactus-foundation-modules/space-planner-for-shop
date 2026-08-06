@@ -25,7 +25,23 @@ import type { OpeningKind, PlanItem, RoomGeometry, Vertex, WallOpening } from '@
 // chimney breasts and returns - so an outline of any number of walls is the
 // point of the tool rather than a refinement of it.
 
-export type PlanMode = 'furnish' | 'shape' | 'draw' | 'openings'
+export type PlanMode = 'furnish' | 'shape' | 'draw' | 'openings' | 'obstructions'
+
+/** The colours one drawing pass uses. See renderScene - the screen and the PDF
+ * capture draw the identical scene with different answers here. */
+type PlanPalette = { ink: string; muted: string; line: string; accent: string; surface: string; danger: string }
+
+/** Ink on paper, for the PDF: whatever theme the site wears, the capture draws
+ * in daylight. A dark-mode shopper exporting a plan used to be handed a black
+ * floor on white paper. */
+const EXPORT_PALETTE: PlanPalette = {
+  ink: '#16181a',
+  muted: 'rgba(22, 24, 26, 0.72)',
+  line: '#c9cdd2',
+  accent: '#2f6fed',
+  surface: '#ffffff',
+  danger: '#b3261e',
+}
 
 export type Plan2dProps = {
   geometry: RoomGeometry
@@ -66,6 +82,15 @@ export type Plan2dProps = {
   onSelectOpening?: (id: string | null) => void
   /** Sliding one along its own wall. Millimetres from that wall's start. */
   onMoveOpening?: (id: string, offsetMm: number) => void
+
+  // ---- columns and other obstructions -------------------------------------
+  /** Which obstruction is being edited, while the mode is 'obstructions'. */
+  obstructionSelection?: string | null
+  /** A tap on clear floor in obstructions mode: put one here, centred on the tap. */
+  onAddObstruction?: (x: number, y: number) => void
+  onSelectObstruction?: (id: string | null) => void
+  /** Dragging one about. Millimetre deltas, like the furniture. */
+  onMoveObstruction?: (id: string, dx: number, dy: number) => void
 
   /** Hands the parent a way to photograph the plan, for the PDF export. */
   registerCapture?: (capture: (() => string | null) | null) => void
@@ -137,6 +162,8 @@ export function Plan2d(props: Plan2dProps) {
   const rotateRef = useRef<{ id: string; startYaw: number; startAngleDeg: number; appliedDeg?: number } | null>(null)
   /** The door or window being slid along its wall. */
   const openingDragRef = useRef<{ id: string; wallIndex: number; grabOffsetMm: number } | null>(null)
+  /** The column being dragged across the floor. */
+  const obstructionDragRef = useRef<{ id: string; lastX: number; lastY: number; moved: boolean } | null>(null)
   /** The corner being edited in shape mode, and the outline being drawn in draw mode. */
   const [corner, setCorner] = useState<number | null>(null)
   const cornerDragRef = useRef<number | null>(null)
@@ -292,46 +319,16 @@ export function Plan2d(props: Plan2dProps) {
     return () => canvas.removeEventListener('wheel', onWheel)
   }, [zoomAt])
 
-  useEffect(() => {
-    const register = props.registerCapture
-    if (!register) return
-    // Plain 2D canvas, so what is on screen is what comes out - no re-render
-    // needed, and no context to lose.
-    register(() => {
-      const canvas = canvasRef.current
-      if (!canvas) return null
-      try {
-        return canvas.toDataURL('image/png')
-      } catch {
-        return null
-      }
-    })
-    return () => register(null)
-  }, [props.registerCapture])
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    const context = canvas?.getContext('2d')
-    if (!canvas || !context) return
-
-    const ratio = Math.min(window.devicePixelRatio || 1, 2)
-    const width = canvas.width / ratio
-    const height = canvas.height / ratio
-    context.setTransform(ratio, 0, 0, ratio, 0, 0)
-    context.clearRect(0, 0, width, height)
-
-    const style = getComputedStyle(canvas)
-    const ink = style.getPropertyValue('--color-text').trim() || '#111'
-    // Derived from the ink rather than read from --color-text-muted: the muted
-    // token is a decorative grey that measures about 2.4:1 on this theme's
-    // background, and dimension figures on a plan are the last text on the site
-    // that should be hard to read. Fading the real text colour keeps it
-    // theme-following and lands well inside AA in light and dark.
-    const muted = withAlpha(ink, 0.72)
-    const line = style.getPropertyValue('--color-border').trim() || '#ccc'
-    const accent = style.getPropertyValue('--color-primary').trim() || '#2f6fed'
-    const surface = style.getPropertyValue('--color-bg').trim() || '#fff'
-    const danger = style.getPropertyValue('--color-danger').trim() || '#b3261e'
+  /**
+   * Draw the whole plan with a given set of colours.
+   *
+   * Parameterised on the palette rather than reading the theme inside, because
+   * it has two callers who want different answers: the screen draws in the
+   * site's own colours, and the PDF capture draws the identical scene in
+   * EXPORT_PALETTE's ink-on-paper - see the capture effect below.
+   */
+  const renderScene = useCallback((context: CanvasRenderingContext2D, palette: PlanPalette) => {
+    const { ink, muted, line, accent, surface, danger } = palette
 
     // In draw mode the old room is gone from the canvas entirely. Leaving it
     // underneath while somebody draws a new one is the fastest way to have them
@@ -423,11 +420,11 @@ export function Plan2d(props: Plan2dProps) {
       context.restore()
     }
 
-    // Obstructions
-    context.setLineDash([6, 4])
-    context.lineWidth = 1.5
-    context.strokeStyle = muted
+    // Obstructions: columns, chimney breasts, stair boxes. Filled faintly so
+    // they read as floor nothing can stand on rather than as a decorative
+    // outline; solid and accented while the one in question is being edited.
     for (const obstruction of props.geometry.obstructions) {
+      const editing = props.mode === 'obstructions' && props.obstructionSelection === obstruction.id
       context.beginPath()
       obstruction.vertices.forEach((vertex, index) => {
         const point = toScreen(vertex)
@@ -435,9 +432,28 @@ export function Plan2d(props: Plan2dProps) {
         else context.lineTo(point.x, point.y)
       })
       context.closePath()
+      context.fillStyle = editing ? withAlpha(accent, 0.14) : withAlpha(line, 0.45)
+      context.fill()
+      context.setLineDash(editing ? [] : [6, 4])
+      context.lineWidth = editing ? 2 : 1.5
+      context.strokeStyle = editing ? accent : muted
       context.stroke()
+      context.setLineDash([])
+
+      const obox = boundingBox(obstruction.vertices)
+      const pxWidth = (obox.maxX - obox.minX) * view.scale
+      const pxHeight = (obox.maxY - obox.minY) * view.scale
+      if (Math.min(pxWidth, pxHeight) > 26) {
+        context.save()
+        context.fillStyle = editing ? accent : muted
+        context.font = '500 11px system-ui, sans-serif'
+        context.textAlign = 'center'
+        context.textBaseline = 'middle'
+        const centre = toScreen({ x: (obox.minX + obox.maxX) / 2, y: (obox.minY + obox.maxY) / 2 })
+        context.fillText(ellipsise(context, obstruction.label || 'Column', Math.max(pxWidth, pxHeight) - 8), centre.x, centre.y)
+        context.restore()
+      }
     }
-    context.setLineDash([])
 
     // Items
     const clashing = new Set(props.clashes.flatMap((clash) => [clash.a, clash.b]))
@@ -549,7 +565,72 @@ export function Plan2d(props: Plan2dProps) {
         context.stroke()
       })
     }
-  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, props.mode, props.openingSelection, sole, corner, draft, hover, view, toScreen])
+  }, [props.geometry, props.items, props.selection, props.labels, props.clashes, props.walkwayClearanceMm, props.mode, props.openingSelection, props.obstructionSelection, sole, corner, draft, hover, view, toScreen])
+
+  /** One painted frame: transform, wipe, optional paper background, scene. */
+  const paint = useCallback(
+    (canvas: HTMLCanvasElement, palette: PlanPalette, background: string | null) => {
+      const context = canvas.getContext('2d')
+      if (!context) return
+      const ratio = Math.min(window.devicePixelRatio || 1, 2)
+      const width = canvas.width / ratio
+      const height = canvas.height / ratio
+      context.setTransform(ratio, 0, 0, ratio, 0, 0)
+      context.clearRect(0, 0, width, height)
+      if (background) {
+        context.fillStyle = background
+        context.fillRect(0, 0, width, height)
+      }
+      renderScene(context, palette)
+    },
+    [renderScene],
+  )
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const style = getComputedStyle(canvas)
+    const ink = style.getPropertyValue('--color-text').trim() || '#111'
+    paint(
+      canvas,
+      {
+        ink,
+        // Derived from the ink rather than read from --color-text-muted: the
+        // muted token is a decorative grey that measures about 2.4:1 on this
+        // theme's background, and dimension figures on a plan are the last text
+        // on the site that should be hard to read. Fading the real text colour
+        // keeps it theme-following and lands well inside AA in light and dark.
+        muted: withAlpha(ink, 0.72),
+        line: style.getPropertyValue('--color-border').trim() || '#ccc',
+        accent: style.getPropertyValue('--color-primary').trim() || '#2f6fed',
+        surface: style.getPropertyValue('--color-bg').trim() || '#fff',
+        danger: style.getPropertyValue('--color-danger').trim() || '#b3261e',
+      },
+      null,
+    )
+  }, [paint])
+
+  useEffect(() => {
+    const register = props.registerCapture
+    if (!register) return
+    // The same scene painted onto an offscreen canvas in EXPORT_PALETTE, never a
+    // read-back of the screen: the screen wears the site's theme, and a plan
+    // captured off a dark theme printed as a black page.
+    register(() => {
+      const canvas = canvasRef.current
+      if (!canvas) return null
+      const off = document.createElement('canvas')
+      off.width = canvas.width
+      off.height = canvas.height
+      paint(off, EXPORT_PALETTE, '#ffffff')
+      try {
+        return off.toDataURL('image/png')
+      } catch {
+        return null
+      }
+    })
+    return () => register(null)
+  }, [props.registerCapture, paint])
 
   const hitTest = useCallback(
     (x: number, y: number): PlanItem | null => {
@@ -652,6 +733,28 @@ export function Plan2d(props: Plan2dProps) {
       return
     }
 
+    if (props.mode === 'obstructions') {
+      const point = toPlan(x, y)
+      // Topmost first, like the furniture: the one drawn last is the one grabbed.
+      const grabbed = [...props.geometry.obstructions].reverse().find((candidate) => pointInCorners(point, candidate.vertices))
+      if (grabbed) {
+        props.onSelectObstruction?.(grabbed.id)
+        obstructionDragRef.current = { id: grabbed.id, lastX: point.x, lastY: point.y, moved: false }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        props.onDragStart()
+        return
+      }
+      if (pointInPolygon(point, props.geometry.vertices)) {
+        props.onDragStart()
+        props.onAddObstruction?.(Math.round(point.x), Math.round(point.y))
+        return
+      }
+      props.onSelectObstruction?.(null)
+      dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
+      event.currentTarget.setPointerCapture(event.pointerId)
+      return
+    }
+
     if (props.mode === 'shape') {
       const index = props.geometry.vertices.findIndex((vertex) => {
         const at = toScreen(vertex)
@@ -729,6 +832,19 @@ export function Plan2d(props: Plan2dProps) {
       return
     }
 
+    const carrying = obstructionDragRef.current
+    if (carrying) {
+      const point = toPlan(x, y)
+      const dx = point.x - carrying.lastX
+      const dy = point.y - carrying.lastY
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
+      carrying.lastX = point.x
+      carrying.lastY = point.y
+      carrying.moved = true
+      props.onMoveObstruction?.(carrying.id, dx, dy)
+      return
+    }
+
     const turning = rotateRef.current
     if (turning) {
       const point = toPlan(x, y)
@@ -796,6 +912,14 @@ export function Plan2d(props: Plan2dProps) {
       openingDragRef.current = null
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
       props.onDragEnd()
+      return
+    }
+
+    if (obstructionDragRef.current) {
+      const carried = obstructionDragRef.current.moved
+      obstructionDragRef.current = null
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      if (carried) props.onDragEnd()
       return
     }
 
@@ -875,6 +999,12 @@ export function Plan2d(props: Plan2dProps) {
           <span className="spl-note">
             Tap a wall to put a {props.openingKind ?? 'door'} in it. Drag one along to move it.
           </span>
+        </div>
+      )}
+
+      {props.mode === 'obstructions' && (
+        <div className="spl-stage-bar">
+          <span className="spl-note">Tap the floor to add a column. Drag one to move it; its size is in the bar above.</span>
         </div>
       )}
 

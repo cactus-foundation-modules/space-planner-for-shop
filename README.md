@@ -65,12 +65,22 @@ one need a customer account like everybody else.
 
 ## What the shopper can do with it
 
-- **Draw or type the room**, of any number of walls, and put doors and windows in
-  the walls.
+- **Draw or type the room**, of any number of walls, put doors and windows in the
+  walls, and drop columns and pillars on the floor (**Room → Columns & pillars**:
+  tap to add one, drag it about, type its size). A column draws on the plan and
+  builds in 3D, new furniture is never auto-placed on top of one, and anything
+  overlapping one gets the same amber warning a clash does.
 - **Place things from the catalogue**, drag them about, and turn them by the handle
   on the selected one. Dragging snaps to the walls and to the other furniture -
   edge to edge, and lined up on the other axis - so a bank of desks actually
   touches. Hold `alt` to escape any of it.
+- **Bring the basket in.** Arriving from the basket stages everything in it under
+  the panel's **Waiting** tab - full cards with picture, price and size - to drop
+  into the room one at a time or all at once, or take off the list entirely.
+  Anything a reshaped room can no longer hold waits in the same place rather than
+  being thrown away. On a narrow screen the whole side panel pulls up by its
+  handle, bottom-sheet fashion, so browsing gets most of the screen - and placing
+  anything hands the screen back to the room.
 - **Look at it flat or in 3D**, with perspective on for how it will look and off
   for a drawing you can compare sizes on. **Eye height** is a slider down the side
   of the 3D view (Alt and the wheel, or Page Up / Page Down, for anyone who prefers
@@ -80,7 +90,11 @@ one need a customer account like everybody else.
   photographed - from the identical spot. Twelve per space.
 - **Take it away**: add the lot to the basket, ask for a quote, email it to
   themselves, or export a PDF - the room's measurements and the priced item list
-  always, the flat plan, the 3D view and a quote page by choice.
+  always; the flat plan, the 3D view, any of their SAVED views (each photographed
+  from its own spot) and a quote page by choice. The site's logo rides in the
+  print margin of every page, the flat plan is always captured in ink-on-paper
+  colours whatever theme the site wears, and the quote page is laid out to match
+  quote-for-shop's own quote document, on a sheet of its own.
 - **Ask for a photograph of it**, where the owner has switched pictures on and the
   picture service is wired up. Taken from where you are looking, from a saved view,
   or from the canned standpoint at the end of the room's longest wall - your
