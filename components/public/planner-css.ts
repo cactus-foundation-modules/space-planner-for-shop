@@ -494,6 +494,23 @@ export function plannerCss(): string {
   box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,0.12));
   pointer-events: none;
 }
+/* The how-to-drive note fades out rather than blinking away, and it comes with
+   two sets of words. A phone has no wheel, no right button and no Alt key, so
+   the long version is three lines of things you cannot do on a screen where the
+   room itself is only about two hundred pixels tall. */
+.spl-hint { animation: spl-hint-in 0.2s ease-out; }
+.spl-hint-touch { display: none; }
+@keyframes spl-hint-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spl-hint { animation: none; }
+}
+@media (pointer: coarse) {
+  .spl-hint-touch { display: inline; }
+  .spl-hint-pointer { display: none; }
+}
 .spl-stage-tools {
   position: absolute;
   right: var(--spl-gap);
@@ -826,6 +843,16 @@ export function plannerCss(): string {
   .spl-views { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
   .spl-views > * { flex: 0 0 auto; }
   .spl-views .spl-note { flex: 0 1 auto; min-width: 16rem; white-space: normal; }
+  /* The room is only about two hundred pixels tall on a phone, so a note laid
+     over it is held to a line or two: smaller type, less padding, and clear of
+     the left-hand corner where the eye-height control stands. */
+  .spl-coach {
+    font-size: var(--text-xs, 0.75rem);
+    padding: 0.35rem 0.5rem;
+    left: auto;
+    right: var(--spl-gap);
+    max-width: calc(100% - 5rem - (var(--spl-gap) * 2));
+  }
   /* Two big targets side by side, or stacked when three will not fit - not a
      cluster of small ones in the corner of a small screen. */
   .spl-dialog .spl-buttons .spl-btn { flex: 1 1 auto; justify-content: center; text-align: center; }

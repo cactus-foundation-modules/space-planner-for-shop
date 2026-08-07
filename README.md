@@ -53,7 +53,10 @@ one need a customer account like everybody else.
 
 - **`/space-planner`** - the planner itself. Renders inside the site header and
   footer like every module public page, full-bleed within `<main>`.
-- **`/space-planner/spaces`** - a member's saved rooms and the layouts inside them.
+- **`/space-planner/spaces`** - a member's saved rooms and the layouts inside them,
+  each with a two-tap delete (`SpaceDeleteButton`, the only client island on an
+  otherwise server-rendered page). Deleting a room cascades to its layouts in the
+  database, so the confirmation counts them first.
 - **`/space-planner/shared/<token>`** - a read-only shared plan. Robots-disallowed.
 - **Two Puck blocks** - a static teaser (the planner itself never loads on a page
   that merely carries the block) and a "See it in your room" button for product
@@ -68,7 +71,8 @@ one need a customer account like everybody else.
 - **Draw or type the room**, of any number of walls, put doors and windows in the
   walls, and drop columns and pillars on the floor (**Room → Columns & pillars**:
   tap to add one, drag it about, type its size). A column draws on the plan and
-  builds in 3D, new furniture is never auto-placed on top of one, and anything
+  stands in 3D as an extruded solid, slightly transparent so furniture behind it
+  stays readable. New furniture is never auto-placed on top of one, and anything
   overlapping one gets the same amber warning a clash does.
 - **Place things from the catalogue**, drag them about, and turn them by the handle
   on the selected one. Dragging snaps to the walls and to the other furniture -

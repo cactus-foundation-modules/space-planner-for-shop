@@ -87,6 +87,8 @@ export type View3dProps = {
 const WHEEL_METRES = 0.0016
 /** How far one press of Page Up or Page Down moves it. */
 const KEY_STEP_M = 0.1
+/** How long the how-to-drive note stays up before it gets out of the way. */
+const HINT_LIFE_MS = 7000
 
 type SceneState = {
   scene: Scene
@@ -161,6 +163,19 @@ export function View3d(props: View3dProps) {
   useEffect(() => {
     notifyBusy?.(busy)
   }, [busy, notifyBusy])
+
+  // The note takes itself away after a few seconds.
+  //
+  // Until now the only thing that cleared it was touching the view, which is
+  // fine on a desktop where it sits in one corner, and no use at all on a phone
+  // where it lies across the room: somebody who has not yet worked out that they
+  // can drag was reading the instructions on top of the very thing they were
+  // being told to drag.
+  useEffect(() => {
+    if (busy || hinted) return
+    const timer = setTimeout(() => setHinted(true), HINT_LIFE_MS)
+    return () => clearTimeout(timer)
+  }, [busy, hinted])
 
   // The room, as against what is standing in it. Reframing the camera every time
   // somebody nudges a chair would throw their viewpoint away on every keystroke,
@@ -533,10 +548,19 @@ export function View3d(props: View3dProps) {
           {degraded === 1 ? 'One item is' : `${degraded} items are`} showing as a plain block - its picture would not load. The size is still right.
         </div>
       )}
+      {/* Two versions of the same note, picked by CSS rather than by measuring
+          the browser, so it is the same on the server as it is here.
+          The long one is a desktop note: it names the wheel, the right-drag and
+          the Alt key, none of which a phone has. On a phone the stage is about
+          190px tall, and three lines of instructions across the bottom of it is
+          most of the room the note is describing. */}
       {!busy && degraded === 0 && !hinted && (
-        <div className="spl-coach">
-          Drag to look around, pinch or scroll to zoom, two fingers or right-drag to slide. Hold Alt and scroll to change
-          your height.
+        <div className="spl-coach spl-hint">
+          <span className="spl-hint-touch">Drag to look, pinch to zoom, two fingers to slide.</span>
+          <span className="spl-hint-pointer">
+            Drag to look around, pinch or scroll to zoom, two fingers or right-drag to slide. Hold Alt and scroll to
+            change your height.
+          </span>
         </div>
       )}
     </div>

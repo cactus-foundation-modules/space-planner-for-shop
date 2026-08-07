@@ -8,13 +8,13 @@ import {
   Color,
   DirectionalLight,
   DoubleSide,
+  ExtrudeGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
   Object3D,
   OrthographicCamera,
   PerspectiveCamera,
-  Path,
   PMREMGenerator,
   Scene,
   Shape,
@@ -65,6 +65,9 @@ export type SceneHandles = {
 const PLACEHOLDER_COLOUR = 0x9aa4ae
 const FLOOR_COLOUR = 0xbfb5a4
 const WALL_COLOUR = 0xeceae5
+/** How solid a column looks. Low enough to see the furniture behind it, high
+ *  enough that nobody mistakes it for a lighting artefact. */
+const OBSTRUCTION_OPACITY = 0.72
 
 export function createRenderer(canvas: HTMLCanvasElement): WebGLRenderer | null {
   try {
@@ -176,19 +179,9 @@ export function buildRoom(description: SceneDescription): Group {
   })
   shape.closePath()
 
-  // Interior obstructions are holes in the floor shape. Triangulation with holes
-  // comes from three's own earcut, so arbitrary polygons - L-shapes, bays,
-  // chimney breasts - need no extra dependency.
-  for (const obstruction of description.obstructions) {
-    const hole = new Path()
-    obstruction.outline.forEach((point, index) => {
-      if (index === 0) hole.moveTo(point.x, point.z)
-      else hole.lineTo(point.x, point.z)
-    })
-    hole.closePath()
-    shape.holes.push(hole)
-  }
-
+  // The floor runs unbroken under the columns. It used to be punched through
+  // wherever one stood, which was invisible while they were solid and is a hole
+  // showing the sky now that they are not.
   const floorGeometry = new ShapeGeometry(shape)
   floorGeometry.rotateX(Math.PI / 2)
   const floor = new Mesh(floorGeometry, new MeshStandardMaterial({ color: FLOOR_COLOUR, roughness: 0.9, side: DoubleSide }))
@@ -207,8 +200,24 @@ export function buildRoom(description: SceneDescription): Group {
     }
   }
 
-  // Obstructions get drawn as solids so a pillar reads as a pillar rather than
-  // as a hole somebody's desk keeps refusing to go into.
+  // Columns and pillars, stood up from the floor to their own height.
+  //
+  // This drew a lid and nothing else: one flat plate floating at pillar height
+  // over a hole in the floor. From directly above it looked plausible and from
+  // every angle anybody actually uses it was a hairline or nothing at all, which
+  // is why columns read as having failed to render.
+  //
+  // Deliberately a little see-through. An opaque column standing between the
+  // camera and a desk hides the desk, and looking at the furniture is the whole
+  // reason for switching to 3D. Solid enough to read as structure, thin enough
+  // to read the chair behind it. One material for the lot, so a room full of
+  // pillars is one material to upload and one to dispose.
+  const obstructionMaterial = new MeshStandardMaterial({
+    color: WALL_COLOUR,
+    roughness: 1,
+    transparent: true,
+    opacity: OBSTRUCTION_OPACITY,
+  })
   for (const obstruction of description.obstructions) {
     const solid = new Shape()
     obstruction.outline.forEach((point, index) => {
@@ -216,12 +225,18 @@ export function buildRoom(description: SceneDescription): Group {
       else solid.lineTo(point.x, point.z)
     })
     solid.closePath()
-    const cap = new ShapeGeometry(solid)
-    cap.rotateX(Math.PI / 2)
-    cap.translate(0, obstruction.heightM, 0)
-    // The lid of a pillar is looked at from above, so unlike the walls it wants
-    // both sides.
-    group.add(new Mesh(cap, new MeshStandardMaterial({ color: WALL_COLOUR, roughness: 1, side: DoubleSide })))
+    // Extrusion runs along the shape's own +Z, so the rotation that lays the
+    // floor flat also stands this up - and drops it below the floor on the way,
+    // hence the lift by its own height afterwards.
+    const geometry = new ExtrudeGeometry(solid, { depth: obstruction.heightM, bevelEnabled: false })
+    geometry.rotateX(Math.PI / 2)
+    geometry.translate(0, obstruction.heightM, 0)
+    // Front faces only, unlike the walls. Both sides on a see-through solid
+    // means every pixel blended twice and a column darker than the wall it is
+    // part of.
+    const mesh = new Mesh(geometry, obstructionMaterial)
+    mesh.name = `obstruction:${obstruction.id}`
+    group.add(mesh)
   }
 
   return group

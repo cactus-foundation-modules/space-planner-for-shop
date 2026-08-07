@@ -6,6 +6,7 @@ import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { listPlansForRoom } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
+import { SpaceDeleteButton } from '@/modules/space-planner-for-shop/components/public/SpaceDeleteButton'
 
 export const metadata = { title: 'My spaces' }
 
@@ -68,24 +69,35 @@ export default async function SpacesPage() {
                 {entry.planCount === 1 ? 'layout' : 'layouts'} · last worked on {entry.lastEditedAt.toLocaleDateString('en-GB')}
               </p>
             </div>
-            {/* Measure once, lay out many times - so a room's own link opens it
-                with a fresh layout rather than reopening the last one. */}
-            <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
-              New layout in this room →
-            </Link>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              {/* Measure once, lay out many times - so a room's own link opens it
+                  with a fresh layout rather than reopening the last one. */}
+              <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                New layout in this room →
+              </Link>
+              {/* Deleting the room takes its layouts with it, which the
+                  confirmation says out loud before it happens. */}
+              <SpaceDeleteButton target="room" id={entry.room.id} name={entry.room.name} planCount={entry.planCount} />
+            </div>
           </div>
 
           <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: '0.35rem' }}>
             {plans.map((plan) => (
-              <li key={plan.id}>
+              <li key={plan.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
                 {/* The whole row opens the layout. A list of things somebody
                     spent an afternoon on that cannot be clicked is a list of
-                    things they have effectively lost. */}
+                    things they have effectively lost.
+
+                    The row and its delete are siblings and never nested: a
+                    button inside a link is invalid, and every press of it would
+                    open the layout it was meant to throw away. */}
                 <Link
                   href={`/space-planner?plan=${plan.id}`}
                   prefetch={false}
                   className="spl-space-row"
                   style={{
+                    flex: '1 1 14rem',
+                    minWidth: 0,
                     display: 'flex',
                     justifyContent: 'space-between',
                     gap: '0.75rem',
@@ -105,6 +117,7 @@ export default async function SpacesPage() {
                     {' · open →'}
                   </span>
                 </Link>
+                <SpaceDeleteButton target="plan" id={plan.id} name={plan.name} />
               </li>
             ))}
             {plans.length === 0 && (
