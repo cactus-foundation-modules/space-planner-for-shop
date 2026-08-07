@@ -3,13 +3,14 @@ import { getMemberFromCookie } from '@/lib/members/session'
 import { getMemberAreaPath } from '@/lib/members/paths'
 import { getShopGate } from '@/modules/shop/lib/access'
 import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
-import { getPlanForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
-import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
+import { getPlanForMember, listPlansForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { getRoomForMember, listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
+import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
 import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { ShopClosedNotice } from '@/modules/shop/components/public/ShopClosedNotice'
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
-import type { OpenPlan } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
+import type { OpenPlan, SavedRoomLink } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 
 export const metadata = { title: 'Plan your space' }
@@ -46,6 +47,38 @@ async function loadOpenPlan(
   return null
 }
 
+/** How many rooms the opening screen offers before pointing at My spaces. */
+const OPENING_ROOM_LIMIT = 6
+
+/**
+ * The member's rooms, each pointing at the layout they last worked on.
+ *
+ * Two queries rather than one per room: the layouts come back in a single pass
+ * for the whole member and are grouped here, so a member with a dozen rooms
+ * costs the same as one with a single room. Nothing is asked at all for a
+ * visitor who is signed out, or for one who is opening a saved plan and will
+ * never see the opening screen.
+ */
+async function loadSavedRooms(memberId: string | null): Promise<SavedRoomLink[]> {
+  if (!memberId) return []
+
+  const [rooms, plans] = await Promise.all([listRoomsForMember(memberId), listPlansForMember(memberId)])
+  // listPlansForMember answers newest-worked-on first, so the first plan seen
+  // for a room is the one to reopen.
+  const latest = new Map<string, string>()
+  for (const plan of plans) {
+    if (!latest.has(plan.roomId)) latest.set(plan.roomId, plan.id)
+  }
+
+  return rooms.slice(0, OPENING_ROOM_LIMIT).map((entry) => ({
+    id: entry.room.id,
+    name: entry.room.name,
+    areaM2: polygonAreaM2(entry.room.geometry.vertices),
+    planCount: entry.planCount,
+    planId: latest.get(entry.room.id) ?? null,
+  }))
+}
+
 export default async function SpacePlannerPage({
   searchParams,
 }: {
@@ -74,6 +107,11 @@ export default async function SpacePlannerPage({
   // neither lookup has a form that does not take a member id.
   const openPlan = await loadOpenPlan(params, member?.id ?? null)
 
+  // Only for somebody who is about to see the opening screen: a page that opens
+  // straight into a saved room never renders the list, so there is nothing to
+  // fetch for it.
+  const savedRooms = openPlan ? [] : await loadSavedRooms(member?.id ?? null)
+
   // Switched on and wired up are two different things, and the button is only
   // honest when both are true. Worked out here rather than in the browser so
   // nobody is offered a picture the site cannot take.
@@ -81,7 +119,13 @@ export default async function SpacePlannerPage({
 
   return (
     <div style={{ padding: 'var(--space-3)' }}>
+      {/* Keyed on which room is being shown, because the planner is opened from
+          this same route with different search parameters. The names, the save
+          ids and the history are first-render state, so without a key a soft
+          navigation from one saved room to another would draw the new room
+          under the old one's name and save over the old one's layout. */}
       <SpacePlanner
+        key={openPlan?.planId ?? openPlan?.roomId ?? 'new'}
         signedIn={Boolean(member)}
         signInHref={signInHref}
         heading={config.plannerHeading}
@@ -100,6 +144,7 @@ export default async function SpacePlannerPage({
         currencySymbol={shopConfig.currencySymbol}
         rendersAvailable={rendersAvailable}
         openPlan={openPlan}
+        savedRooms={savedRooms}
         stageCart={params.from === 'cart'}
         stageProductId={typeof params.product === 'string' ? params.product : staged?.id ?? null}
       />

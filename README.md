@@ -182,6 +182,20 @@ module takes the **pre-normalisation** bounding box and never calls it - see
 `lib/three/planner-model.ts`. If rooms ever start looking convincingly wrong, start
 there.
 
+## Nothing blocks a placement
+
+There is no collision rule in here, deliberately. `findClashes` warns and never
+blocks, and `clampItemIntoRoom` holds the outline and nothing else - a chair under
+a desk and a pedestal under a worktop are the arrangements people are aiming for.
+
+So when furniture appears to refuse to pass through other furniture, the suspect is
+`snapToItems`, not a rule. Its two **face** offers put the faces together, and from
+inside the 150 mm radius they eject an overlapping item back out to flush on every
+pointer event. They are offered only while the two are still apart; the far-edge and
+centre alignments are offered either way. `movingAwayFromItems` is no help here -
+`nearestItemGapMm` calls overlapping zero, so pushing further in reads as no movement
+at all.
+
 ## Saving needs an account
 
 Deliberately. A signed-out visitor gets the entire tool - their scratch room lives
@@ -189,6 +203,20 @@ in localStorage exactly as the basket does - and the save button is the sign-in
 prompt. In exchange there are no anonymous rows, no guest retention sweep, no
 adoption reconciliation and no unauthenticated write endpoint anywhere in the
 module.
+
+A member who has saved before is offered their rooms on the opening screen, by
+name, each pointing at the layout they last worked on - six of them, then a link
+to My spaces for the rest. Those rows link to the same route with different
+search parameters, which is why `app/public/space-planner/page.tsx` gives
+`SpacePlanner` a `key`: the room's name, its save ids and the undo history are
+all first-render state, so without one a soft navigation between two saved rooms
+would draw the new room under the old one's name and save over the old one's
+layout.
+
+The room's name is on the toolbar with a pencil beside it. Renaming a room that
+already exists writes straight through rather than waiting for Save, and sends no
+`notes` field - the route reads an absent one as "leave it alone", where an empty
+string would clear whatever was written about the room.
 
 ## Not in this build
 

@@ -86,6 +86,37 @@ export function plannerCss(): string {
 }
 .spl-sub { color: var(--spl-muted); font-size: var(--text-sm, 0.875rem); }
 
+/* The room's own name, sitting under the heading where somebody with four of
+   them can see which one they are looking at. Renamed in place rather than in a
+   dialog: it is a text field and a full stop, and three clicks of ceremony round
+   one field is how a name ends up staying "My space" for ever. */
+.spl-room-name { display: flex; align-items: center; gap: 0.15rem; min-width: 0; }
+.spl-room-name-text {
+  font-size: var(--text-sm, 0.875rem);
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spl-name-edit {
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--spl-muted);
+  border-radius: var(--radius-sm, 6px);
+  /* A pencil is a small target by nature, so the button is padded out to
+     something a finger can find rather than left the size of the glyph. */
+  padding: 0.25rem 0.35rem;
+  line-height: 1;
+  font-size: var(--text-sm, 0.875rem);
+  font-family: inherit;
+  cursor: pointer;
+  flex: none;
+}
+.spl-name-edit:hover { color: var(--color-primary); border-color: var(--color-border); }
+.spl-name-edit:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
 .spl-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 22rem;
@@ -197,6 +228,14 @@ export function plannerCss(): string {
 .spl-field label { font-size: var(--text-xs, 0.75rem); color: var(--spl-muted); }
 .spl-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
 .spl-stack { display: grid; gap: 0.6rem; }
+/* An author's display: beats the browser's own [hidden] rule whatever the
+   specificity, so .spl-stack above quietly un-hid every panel that used it. That
+   is how the side panel's tabs came to do nothing: the browse list stayed on
+   screen and Selected and Item list rendered thousands of pixels below it, out
+   of the scroll box and out of sight. Stated once, for the whole planner, and
+   with !important on purpose - "hidden" means hidden, and the next display: rule
+   somebody adds should not be able to bring this back. */
+.spl-root [hidden] { display: none !important; }
 .spl-buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 /* A tick and its wording, sized so the whole line is the hit target. */
 .spl-check { display: flex; gap: 0.5rem; align-items: flex-start; font-size: var(--text-sm, 0.875rem); cursor: pointer; }
@@ -207,6 +246,10 @@ export function plannerCss(): string {
 /* Label beside its control rather than above it, for the toolbars. */
 .spl-field-inline { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.35rem; }
 .spl-input-sm, .spl-select-sm { width: 6.5rem; min-height: 2rem; padding: 0.2rem 0.4rem; }
+/* The room-name field, alongside the other size overrides rather than up with
+   the rest of the naming rules: .spl-input sets width: 100%, and a single-class
+   rule declared earlier in this sheet would lose to it. */
+.spl-name-input { width: min(14rem, 50vw); min-height: 2rem; padding: 0.2rem 0.4rem; }
 
 .spl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 .spl-card {
@@ -404,6 +447,36 @@ export function plannerCss(): string {
 .spl-choice:hover { border-color: var(--color-primary); }
 .spl-choice:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .spl-choice strong { font-size: var(--text-base, 1rem); }
+
+/* Rooms already saved, offered on the opening screen.
+ *
+ * Rows rather than cards: this is a list somebody scans for a name they chose
+ * themselves, and the two cards above it are the choice being made - a third
+ * box of the same weight would put "open the one I did last week" in
+ * competition with "measure a new room" when they are not the same kind of
+ * decision at all. */
+.spl-saved { display: grid; gap: 0.4rem; }
+.spl-saved-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-surface);
+  padding: 0.55rem 0.7rem;
+  color: var(--color-text);
+  text-decoration: none;
+  font-family: inherit;
+  font-size: var(--text-sm, 0.875rem);
+  text-align: left;
+}
+.spl-saved-row:hover { border-color: var(--color-primary); }
+.spl-saved-row:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.spl-saved-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.spl-saved-meta { color: var(--spl-muted); font-size: var(--text-sm, 0.875rem); }
+.spl-saved-more { color: var(--color-primary); font-size: var(--text-sm, 0.875rem); justify-self: start; }
 
 /* Floating notes over the stage: the loading line, the degraded-items note, and
    the hint about what a click does. Pointer-events off so a note can never eat a

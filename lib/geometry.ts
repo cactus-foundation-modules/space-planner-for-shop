@@ -825,18 +825,43 @@ export function snapToItems(item: PlanItem, others: PlanItem[], toleranceMm = IT
     const gapX = gapOnAxis(-halfWidth, halfWidth, box.minX, box.maxX)
     const gapY = gapOnAxis(-halfDepth, halfDepth, box.minY, box.maxY)
 
+    /**
+     * Whether the two are still apart, and so whether the FACE offers apply.
+     *
+     * They are the two that put the faces together, and they are exactly what
+     * stopped a chair going under a desk: pushed in past the desk's front edge,
+     * the face offer sits a few centimetres away and ejects the chair straight
+     * back out - every pointer event, for ever, so the chair could never get
+     * more than the snap radius in. It reads as the furniture refusing to pass
+     * through other furniture, which is not a rule this planner has: a chair
+     * under a desk and a pedestal under a worktop are the arrangements people
+     * are aiming for, and findClashes already knows the difference.
+     *
+     * So a face is only offered from OUTSIDE. Approach a desk and it still
+     * clicks flush, which is how a bank of desks gets built; push past it and
+     * the tool gets out of the way, because an overlap is a position somebody
+     * had to deliberately drive into. The alignments stay on either way -
+     * lining a chair up with the middle of the desk it has gone under is the
+     * other half of what they were doing.
+     */
+    const apart = gapX > 0 || gapY > 0
+
     // Beside each other on the far axis, give or take the tolerance: only then
     // does lining this one up mean anything.
     if (gapY <= toleranceMm) {
-      bestX = offer(bestX, box.minX - halfWidth)
-      bestX = offer(bestX, box.maxX + halfWidth)
+      if (apart) {
+        bestX = offer(bestX, box.minX - halfWidth)
+        bestX = offer(bestX, box.maxX + halfWidth)
+      }
       bestX = offer(bestX, box.minX + halfWidth)
       bestX = offer(bestX, box.maxX - halfWidth)
       bestX = offer(bestX, (box.minX + box.maxX) / 2)
     }
     if (gapX <= toleranceMm) {
-      bestY = offer(bestY, box.minY - halfDepth)
-      bestY = offer(bestY, box.maxY + halfDepth)
+      if (apart) {
+        bestY = offer(bestY, box.minY - halfDepth)
+        bestY = offer(bestY, box.maxY + halfDepth)
+      }
       bestY = offer(bestY, box.minY + halfDepth)
       bestY = offer(bestY, box.maxY - halfDepth)
       bestY = offer(bestY, (box.minY + box.maxY) / 2)

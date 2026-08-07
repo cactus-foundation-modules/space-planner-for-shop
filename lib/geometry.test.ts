@@ -277,6 +277,33 @@ describe('snapping to other items', () => {
     expect(snapToItems(beside, [turned]).x).toBe(1000 + 400 + 800)
   })
 
+  it('clicks a chair flush to the front of a desk on the way in', () => {
+    const desk = item({ id: 'desk', x: 2000, y: 1500 })
+    // Square in front of it, 70 mm short of touching: desk front face is at
+    // y = 1900, the chair's back face wants to be there.
+    const chair = item({ id: 'chair', widthMm: 650, depthMm: 650, heightMm: 1100, x: 2000, y: 1900 + 325 + 70 })
+    expect(snapToItems(chair, [desk]).y).toBe(1900 + 325)
+  })
+
+  it('lets a chair carry on under the desk once it is past the edge', () => {
+    const desk = item({ id: 'desk', x: 2000, y: 1500 })
+    // 100 mm in past the desk's front face, which is INSIDE the 150 mm snap
+    // radius on purpose: that is the band where the face offer used to fire and
+    // eject the chair straight back out to flush, every pointer event, so a
+    // chair could never be pushed under anything. Any deeper than the radius
+    // and the offer is out of range and the test proves nothing.
+    const under = item({ id: 'chair', widthMm: 650, depthMm: 650, heightMm: 1100, x: 2000, y: 1900 + 325 - 100 })
+    expect(snapToItems(under, [desk]).y).toBe(under.y)
+  })
+
+  it('still lines an overlapping chair up with the middle of the desk', () => {
+    const desk = item({ id: 'desk', x: 2000, y: 1500 })
+    // Under the desk and 40 mm off its centre line: the alignments survive the
+    // change above, because centring the chair is the other half of tucking it.
+    const under = item({ id: 'chair', widthMm: 650, depthMm: 650, heightMm: 1100, x: 2040, y: 1500 })
+    expect(snapToItems(under, [desk]).x).toBe(2000)
+  })
+
   it('measures the gap to the nearest thing, and calls touching nothing at all', () => {
     const left = item({ id: 'left', x: 1000, y: 1500 })
     const touching = item({ id: 'touching', x: 1000 + 1600, y: 1500 })

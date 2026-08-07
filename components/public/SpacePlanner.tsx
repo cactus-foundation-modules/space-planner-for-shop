@@ -1,6 +1,7 @@
 'use client'
 
 import dynamic from 'next/dynamic'
+import Link from 'next/link'
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
 import { formatMoney } from '@/modules/shop/lib/money'
 import { CataloguePanel } from '@/modules/space-planner-for-shop/components/public/CataloguePanel'
@@ -116,6 +117,24 @@ export type OpenPlan = {
   items: PlanItem[]
 }
 
+/**
+ * One room the member has already saved, as the opening screen offers it.
+ *
+ * Flattened to the one link that matters rather than handed the whole room:
+ * somebody picking a room off a list means "put me back where I was", so a room
+ * with layouts in it points at its most recent one. The full tree of rooms and
+ * their layouts is My spaces' job, and this list links there rather than growing
+ * into a second copy of it.
+ */
+export type SavedRoomLink = {
+  id: string
+  name: string
+  areaM2: number
+  planCount: number
+  /** The layout to open. Null when nothing has been laid out in the room yet. */
+  planId: string | null
+}
+
 export type SpacePlannerProps = {
   signedIn: boolean
   signInHref: string
@@ -135,6 +154,14 @@ export type SpacePlannerProps = {
   rendersAvailable: boolean
   /** A room and layout the member already saved, opened from My spaces. */
   openPlan?: OpenPlan | null
+  /**
+   * Rooms this member has saved before, for the opening screen to offer.
+   *
+   * Empty for a signed-out visitor, and empty for a member who has never saved
+   * anything - in both cases the screen simply does not mention it, rather than
+   * showing an empty list with an explanation attached.
+   */
+  savedRooms?: SavedRoomLink[]
   /** Staged straight from the basket when the shopper arrived from the cart. */
   stageCart: boolean
   /** Pre-staged single product when they arrived from a product page. */
@@ -178,8 +205,17 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const roomIdRef = useRef<string | null>(props.openPlan?.roomId ?? null)
   // The names travel with the plan. Saving over somebody's "Ground floor, east
   // wing" and calling it "My space" would be a small theft.
-  const [roomName] = useState(props.openPlan?.roomName ?? 'My space')
+  const [roomName, setRoomName] = useState(props.openPlan?.roomName ?? 'My space')
   const [planName] = useState(props.openPlan?.planName ?? 'Option A')
+  /** Whether the room's name is being typed rather than read. */
+  const [namingRoom, setNamingRoom] = useState(false)
+  /**
+   * Whether the rename field was escaped rather than finished.
+   *
+   * Escape blurs the field, and blur is what commits - so without this, backing
+   * out of a rename would save the half-typed name that was being backed out of.
+   */
+  const nameAbandoned = useRef(false)
   const [dirty, setDirty] = useState(false)
   const [wallEdit, setWallEdit] = useState<{ index: number; lengthMm: number } | null>(null)
   const [roomEdit, setRoomEdit] = useState(false)
@@ -733,6 +769,47 @@ export function SpacePlanner(props: SpacePlannerProps) {
     }
   }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
 
+  /**
+   * Give the room a different name.
+   *
+   * Written through at once when the room already exists on the server rather
+   * than waiting for the next Save: somebody who renames a room, sees the new
+   * name and closes the tab has every reason to expect it to still be there.
+   * A room that has never been saved has nowhere to write to, so its new name
+   * simply travels with the first save along with everything else.
+   */
+  const renameRoom = useCallback(
+    (typed: string) => {
+      const name = typed.trim().slice(0, 120)
+      if (!name || name === roomName) return
+      setRoomName(name)
+      const roomId = roomIdRef.current
+      if (!roomId || !props.signedIn) {
+        setDirty(true)
+        return
+      }
+      void (async () => {
+        try {
+          const response = await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            // Notes deliberately left out rather than sent empty: the route
+            // treats an absent one as "leave it alone", and a rename has no
+            // business clearing what somebody wrote about the room.
+            body: JSON.stringify({ name, geometry: state.geometry }),
+          })
+          if (!response.ok) throw new Error('the rename was refused')
+        } catch {
+          // The name stands on screen. Marking it unsaved is the honest answer:
+          // Save will carry it, and the unsaved-work guard now knows to ask.
+          setDirty(true)
+          setMessage({ tone: 'error', text: 'The new name is here but we could not keep it just yet - press Save.' })
+        }
+      })()
+    },
+    [roomName, props.signedIn, state.geometry],
+  )
+
   // ---- saved viewpoints ---------------------------------------------------
 
   // What is already saved against this room. Only ever for a room that exists:
@@ -1054,6 +1131,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
         setWallEdit(null)
         setRoomEdit(false)
         setStartAgain(false)
+        // A column picked out on the plan takes the toolbar over while it is
+        // selected, so there has to be a key that hands the toolbar back.
+        setObstructionSelection(null)
         // The photo dialog says in its own wording that closing it abandons
         // nothing, so Escape may always close it. The export dialog is only
         // held open while a PDF is actually being made - closing it then would
@@ -1068,6 +1148,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
         applyStep(event.shiftKey ? redo(history, state) : undo(history, state))
         return
       }
+      // A selected column answers to Delete like anything else selected does.
+      // Before the bail below, because picking a column clears the furniture
+      // selection - the two are never both the thing being edited.
+      if (obstructionSelection && (event.key === 'Delete' || event.key === 'Backspace')) {
+        event.preventDefault()
+        commit()
+        dispatch({ type: 'delete-obstruction', id: obstructionSelection })
+        setObstructionSelection(null)
+        setDirty(true)
+        return
+      }
+
       if (state.selection.length === 0) return
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -1093,7 +1185,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [state, history, commit, applyStep, exportBusy])
+  }, [state, history, commit, applyStep, exportBusy, obstructionSelection])
 
   // ---- render -----------------------------------------------------------
 
@@ -1105,6 +1197,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
           heading={props.heading}
           intro={props.intro}
           fromCart={Boolean(props.stageCart)}
+          savedRooms={props.savedRooms ?? []}
+          signedIn={props.signedIn}
+          signInHref={props.signInHref}
           onReady={(geometry) => {
             dispatch({ type: 'set-geometry', geometry })
             setStarted(true)
@@ -1128,6 +1223,45 @@ export function SpacePlanner(props: SpacePlannerProps) {
       <div className="spl-bar">
         <div className="spl-bar-heading">
           <h1 className="spl-title">{props.heading}</h1>
+          {/* Which room this is. A member with a ground floor and a first floor
+              cannot tell one screenful of desks from the other otherwise, and
+              the name is what every PDF, photograph and saved layout is filed
+              under - so it belongs in front of them, not buried in a save. */}
+          <div className="spl-room-name">
+            {namingRoom ? (
+              <input
+                className="spl-input spl-name-input"
+                defaultValue={roomName}
+                autoFocus
+                maxLength={120}
+                aria-label="Room name"
+                onBlur={(event) => {
+                  if (!nameAbandoned.current) renameRoom(event.target.value)
+                  nameAbandoned.current = false
+                  setNamingRoom(false)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur()
+                  if (event.key === 'Escape') {
+                    nameAbandoned.current = true
+                    event.currentTarget.blur()
+                  }
+                }}
+              />
+            ) : (
+              <>
+                <span className="spl-room-name-text">{roomName}</span>
+                <button
+                  type="button"
+                  className="spl-name-edit"
+                  aria-label={`Rename this room, currently called ${roomName}`}
+                  onClick={() => setNamingRoom(true)}
+                >
+                  <span aria-hidden="true">✎</span>
+                </button>
+              </>
+            )}
+          </div>
           <span className="spl-sub">
             {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
             {tray.length > 0 && ` · ${tray.length} waiting`}
@@ -1178,7 +1312,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
             }}
             onDone={() => { setOpeningSelection(null); setPlanMode('furnish') }}
           />
-        ) : planMode === 'obstructions' ? (
+        ) : planMode === 'obstructions' || (planMode === 'furnish' && obstructionSelection) ? (
+          // Also while merely furnishing, when a column has been clicked on the
+          // plan: clicking a thing and being shown what can be done with it is
+          // the whole of a selection, and sending somebody back through Room to
+          // change a column they are looking at is not a selection at all.
           <ObstructionsBar
             geometry={state.geometry}
             selection={obstructionSelection}
@@ -2276,6 +2414,10 @@ function FirstRun(props: {
   intro: string
   /** Arrived from the basket - say so, or the basket appears to have vanished. */
   fromCart?: boolean
+  /** Rooms already saved. Empty for a visitor with none, and for one signed out. */
+  savedRooms: SavedRoomLink[]
+  signedIn: boolean
+  signInHref: string
   onReady: (geometry: RoomGeometry) => void
   onDraw: () => void
 }) {
@@ -2358,6 +2500,45 @@ function FirstRun(props: {
       {props.fromCart && (
         <p className="spl-alert">Your basket is coming along - once the room exists, everything in it will be waiting under the Cart tab.</p>
       )}
+
+      {/* Rooms already saved, first and by name.
+          A visitor with none never sees any of this, so it costs the main path
+          nothing - and somebody who measured their office last week should not
+          have to go via their account to get back into it.
+
+          These link to the SAME route with different search parameters, which is
+          why the page keys the planner on which room it is showing: without that
+          a soft navigation would hand this component a new room while it still
+          held the last one's name and save id. */}
+      {props.savedRooms.length > 0 && (
+        <>
+          <p className="spl-note">Pick up where you left off:</p>
+          <div className="spl-saved">
+            {props.savedRooms.map((room) => (
+              <Link
+                key={room.id}
+                prefetch={false}
+                className="spl-saved-row"
+                href={room.planId ? `/space-planner?plan=${room.planId}` : `/space-planner?room=${room.id}`}
+              >
+                <span className="spl-saved-name">{room.name}</span>
+                <span className="spl-saved-meta">
+                  {room.areaM2.toFixed(1)} m² ·{' '}
+                  {room.planCount === 0
+                    ? 'nothing in it yet'
+                    : `${room.planCount} ${room.planCount === 1 ? 'layout' : 'layouts'}`}{' '}
+                  · open →
+                </span>
+              </Link>
+            ))}
+            <Link prefetch={false} className="spl-saved-more" href="/space-planner/spaces">
+              All your spaces, and every layout in them →
+            </Link>
+          </div>
+          <p className="spl-note">Or measure a new room:</p>
+        </>
+      )}
+
       {/* Two ways to say what the room is, and three shapes to start from and
           change. Split rather than five equal cards: "type it" and "draw it" are
           decisions about how you work, the presets are just a head start, and
@@ -2398,6 +2579,18 @@ function FirstRun(props: {
         Whichever you pick, you can click any wall afterwards and type its real length - the rest of the room follows -
         and <strong>Room</strong> lets you drag the corners about or add new ones.
       </p>
+      {/* One quiet line rather than a block: a signed-out visitor is usually a
+          new one, and the answer to "where have my rooms gone" should be here
+          without the main path having to carry a sign-in prompt. */}
+      {!props.signedIn && (
+        <p className="spl-note">
+          Saved a room here before?{' '}
+          <Link prefetch={false} className="spl-saved-more" href={props.signInHref}>
+            Sign in
+          </Link>{' '}
+          and it will be waiting for you.
+        </p>
+      )}
     </div>
   )
 }

@@ -424,7 +424,13 @@ export function Plan2d(props: Plan2dProps) {
     // they read as floor nothing can stand on rather than as a decorative
     // outline; solid and accented while the one in question is being edited.
     for (const obstruction of props.geometry.obstructions) {
-      const editing = props.mode === 'obstructions' && props.obstructionSelection === obstruction.id
+      // Accented while it is the thing being edited, which is now either mode:
+      // a column can be picked out of the ordinary furnishing view as well as
+      // from its own. Not in the shape, drawing or openings modes though -
+      // there the selection is a leftover, and highlighting it would be the
+      // plan pointing at something the toolbar is not talking about.
+      const editing =
+        (props.mode === 'obstructions' || props.mode === 'furnish') && props.obstructionSelection === obstruction.id
       context.beginPath()
       obstruction.vertices.forEach((vertex, index) => {
         const point = toScreen(vertex)
@@ -813,9 +819,28 @@ export function Plan2d(props: Plan2dProps) {
           ? props.selection
           : [hit.id]
       props.onSelect(ids)
+      // A column and a desk are never both the thing being edited.
+      props.onSelectObstruction?.(null)
       dragRef.current = { kind: 'items', ids, startX: x, startY: y, lastX: x, lastY: y, moved: false }
       props.onDragStart()
     } else {
+      // No furniture here - but there may be a column. Tested AFTER the
+      // furniture on purpose: a column is a fact about the building and the
+      // desk in front of it is the thing being arranged, so where they overlap
+      // the click belongs to the desk. Without this a column was scenery the
+      // moment it was placed: pickable only from Room -> Columns & pillars, and
+      // in the ordinary furnishing mode not clickable at all.
+      const point = toPlan(x, y)
+      const column = [...props.geometry.obstructions].reverse().find((candidate) => pointInCorners(point, candidate.vertices))
+      if (column) {
+        props.onSelect([])
+        props.onSelectObstruction?.(column.id)
+        obstructionDragRef.current = { id: column.id, lastX: point.x, lastY: point.y, moved: false }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        props.onDragStart()
+        return
+      }
+      props.onSelectObstruction?.(null)
       dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
     }
     event.currentTarget.setPointerCapture(event.pointerId)
