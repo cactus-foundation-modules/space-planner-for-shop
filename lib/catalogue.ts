@@ -78,8 +78,13 @@ function stockState(product: ShpProduct): { inStock: boolean; label: string } {
   }
 }
 
+// `storefront` is fixed here rather than left to callers, alongside `status` and
+// `excludeHidden` and for the same reason: the browse panel is a shop listing
+// seen by whoever is in front of it, so whatever the shop hides for being out of
+// stock is hidden here too. Otherwise a planner could be filled with things the
+// category page next door refuses to admit exist.
 export async function browseCatalogue(
-  filter: Omit<ListProductsFilter, 'status' | 'excludeHidden'> & { modelledOnly?: boolean },
+  filter: Omit<ListProductsFilter, 'status' | 'excludeHidden' | 'storefront'> & { modelledOnly?: boolean },
 ): Promise<CatalogueBrowse> {
   const perPage = Math.min(48, Math.max(1, Math.floor(Number(filter.perPage)) || 24))
   const page = Math.max(1, Math.floor(Number(filter.page)) || 1)
@@ -99,7 +104,7 @@ export async function browseCatalogue(
     const all: ShpProduct[] = []
     const scanPer = 100
     for (let scanPage = 1; scanPage <= 25; scanPage += 1) {
-      const batch = await listProducts({ ...filter, page: scanPage, perPage: scanPer, status: 'ACTIVE', excludeHidden: true })
+      const batch = await listProducts({ ...filter, page: scanPage, perPage: scanPer, status: 'ACTIVE', excludeHidden: true, storefront: true })
       all.push(...batch.products)
       if (all.length >= batch.total || batch.products.length < scanPer) break
     }
@@ -115,7 +120,7 @@ export async function browseCatalogue(
     total = matching.length
     products = matching.slice((page - 1) * perPage, page * perPage)
   } else {
-    const result = await listProducts({ ...filter, page, perPage, status: 'ACTIVE', excludeHidden: true })
+    const result = await listProducts({ ...filter, page, perPage, status: 'ACTIVE', excludeHidden: true, storefront: true })
     products = result.products
     total = result.total
   }
