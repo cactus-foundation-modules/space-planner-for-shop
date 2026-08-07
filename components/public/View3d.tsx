@@ -62,6 +62,12 @@ export type View3dProps = {
   /** Whether the room is still being put together, for anything waiting on it. */
   onBusyChange?: (busy: boolean) => void
   /**
+   * Items whose plan size was a guess and whose mesh has now been measured -
+   * the footprint actually drawn, so the flat plan can adopt it. See
+   * BuildItemsResult['measured'].
+   */
+  onMeasuredSizes?: (measured: Array<{ itemId: string; productId: string; widthMm: number; depthMm: number; heightMm: number }>) => void
+  /**
    * Hands the parent a way to read where the camera is standing, so a viewpoint
    * can be saved or photographed. Null on unmount, like registerCapture.
    */
@@ -129,6 +135,11 @@ export function View3d(props: View3dProps) {
   useEffect(() => {
     descriptionRef.current = props.description
   }, [props.description])
+  // Through a ref so a new callback identity does not rebuild the scene.
+  const onMeasuredRef = useRef(props.onMeasuredSizes)
+  useEffect(() => {
+    onMeasuredRef.current = props.onMeasuredSizes
+  }, [props.onMeasuredSizes])
   const [unsupported, setUnsupported] = useState(false)
   const [degraded, setDegraded] = useState(0)
   const [busy, setBusy] = useState(true)
@@ -288,6 +299,7 @@ export function View3d(props: View3dProps) {
       current.items = result.group
       setDegraded(result.degraded.length)
       setBusy(false)
+      if (result.measured.length > 0) onMeasuredRef.current?.(result.measured)
     })()
 
     return () => {

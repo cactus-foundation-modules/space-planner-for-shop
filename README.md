@@ -75,12 +75,11 @@ one need a customer account like everybody else.
   edge to edge, and lined up on the other axis - so a bank of desks actually
   touches. Hold `alt` to escape any of it.
 - **Bring the basket in.** Arriving from the basket stages everything in it under
-  the panel's **Waiting** tab - full cards with picture, price and size - to drop
+  the panel's **Cart** tab - full cards with picture, price and size - to drop
   into the room one at a time or all at once, or take off the list entirely.
   Anything a reshaped room can no longer hold waits in the same place rather than
-  being thrown away. On a narrow screen the whole side panel pulls up by its
-  handle, bottom-sheet fashion, so browsing gets most of the screen - and placing
-  anything hands the screen back to the room.
+  being thrown away. On a narrow screen the panel sits below the room at a fixed,
+  sensible height, and each pane scrolls itself.
 - **Look at it flat or in 3D**, with perspective on for how it will look and off
   for a drawing you can compare sizes on. **Eye height** is a slider down the side
   of the 3D view (Alt and the wheel, or Page Up / Page Down, for anyone who prefers

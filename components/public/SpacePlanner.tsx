@@ -7,7 +7,7 @@ import { CataloguePanel } from '@/modules/space-planner-for-shop/components/publ
 import { Plan2d } from '@/modules/space-planner-for-shop/components/public/Plan2d'
 import type { PlanMode } from '@/modules/space-planner-for-shop/components/public/Plan2d'
 import { plannerCss } from '@/modules/space-planner-for-shop/components/public/planner-css'
-import { addPlanToCart, cartAsStagedItems } from '@/modules/space-planner-for-shop/lib/client/cart-bridge'
+import { addPlanToCart, cartAsStagedItems, readCart } from '@/modules/space-planner-for-shop/lib/client/cart-bridge'
 import { clearScratch, readScratch, writeScratch } from '@/modules/space-planner-for-shop/lib/client/scratch'
 import {
   emptyState,
@@ -19,7 +19,7 @@ import {
   toPlanItems,
   undo,
 } from '@/modules/space-planner-for-shop/lib/client/planner-store'
-import type { History, PlannerState, ProductInfo } from '@/modules/space-planner-for-shop/lib/client/planner-store'
+import type { History, PlannerState, ProductInfo, SpotItem } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/planner-model'
@@ -151,7 +151,7 @@ type Tab = 'catalogue' | 'tray' | 'selected' | 'items'
 type StageView = 'plan' | 'orbit'
 
 const VIEW_LABELS: Record<StageView, string> = { plan: 'Edit', orbit: 'Preview' }
-const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', tray: 'Waiting', selected: 'Selected', items: 'Item list' }
+const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', tray: 'Cart', selected: 'Selected', items: 'Item list' }
 
 export function SpacePlanner(props: SpacePlannerProps) {
   const [state, dispatch] = useReducer(plannerReducer, undefined, () => emptyState(defaultRoomGeometry()))
@@ -162,6 +162,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [products, setProducts] = useState<Record<string, ProductInfo>>({})
   const [models, setModels] = useState<Map<string, PlannerModel>>(new Map())
   const [message, setMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null)
+  /** What the Cart tab says about basket lines that could not come along. */
+  const [trayNote, setTrayNote] = useState('')
   const [savedPlanId, setSavedPlanId] = useState<string | null>(props.openPlan?.planId ?? null)
   const [savedRoomId, setSavedRoomId] = useState<string | null>(props.openPlan?.roomId ?? null)
   /**
@@ -190,7 +192,6 @@ export function SpacePlanner(props: SpacePlannerProps) {
    * toggles this; placing anything switches it back off, because the next thing
    * a shopper wants to see after adding a desk is the desk.
    */
-  const [panelMax, setPanelMax] = useState(false)
   const [startAgain, setStartAgain] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
@@ -347,23 +348,57 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   // ---- staging from the basket and from a product page ------------------
 
-  useEffect(() => {
-    if (!props.stageCart || !started) return
-    const staged = cartAsStagedItems()
-    if (staged.length === 0) return
-    void (async () => {
+  /**
+   * Read the basket and park its contents in the tray.
+   *
+   * 'refresh' clears the current tray first and reads the basket again - the
+   * shopper pressed the button because the basket changed under an open
+   * planner. Placed items are never touched either way. Anything the basket
+   * holds that can no longer be staged (a line since retired from the shop, a
+   * quantity over the cap) is COUNTED AND SAID rather than silently dropped -
+   * a tray that quietly loses things reads as the planner losing them.
+   */
+  const stageFromCart = useCallback(
+    async (mode: 'initial' | 'refresh') => {
+      const lines = readCart()
+      const staged = cartAsStagedItems()
+      if (mode === 'initial' && staged.length === 0) return
       const items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))])
       const byId = new Map(items.map((item) => [item.id, item]))
+      if (mode === 'refresh') {
+        const trayIds = state.items.filter((item) => item.staged).map((item) => item.id)
+        if (trayIds.length > 0) dispatch({ type: 'delete-items', ids: trayIds })
+      }
       for (const entry of staged) {
         const info = byId.get(entry.productId)
         if (!info) continue
         dispatch({ type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true })
       }
+      const missing = new Set(staged.map((entry) => entry.productId).filter((id) => !byId.has(id))).size
+      const clamped = lines.filter((line) => line.quantity > 50).length
+      const notes: string[] = []
+      if (missing > 0) {
+        notes.push(
+          missing === 1
+            ? 'One thing from your basket is no longer sold, so it is not here.'
+            : `${missing} things from your basket are no longer sold, so they are not here.`,
+        )
+      }
+      if (clamped > 0) notes.push('Very large quantities come in as the first 50.')
+      setTrayNote(notes.join(' '))
       setTab('tray')
-      setMessage({ tone: 'info', text: 'Your basket is under "Waiting" - tap anything there to drop it into the room.' })
+    },
+    [fetchProducts, nextId, state.items],
+  )
+
+  useEffect(() => {
+    if (!props.stageCart || !started) return
+    void (async () => {
+      await stageFromCart('initial')
     })()
     // Deliberately once per mount: re-staging on every basket change would
-    // duplicate what the shopper has already placed.
+    // duplicate what the shopper has already placed. The Cart tab's refresh
+    // button is the deliberate version of the same thing.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.stageCart, started])
 
@@ -381,6 +416,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
       const product = { ...info, productId: info.id }
       const spot = findFreeSpot(state.items, state.geometry, product)
       dispatch({ type: 'add-item', id: nextId(), product, x: spot.x, y: spot.y })
+      if (!spot.clear) {
+        setMessage({ tone: 'info', text: 'There was no clear floor left, so it went in on top of something - drag it somewhere free.' })
+      }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the first render after the room exists
   }, [props.stageProductId, started])
@@ -462,6 +500,48 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const placed = useMemo(() => state.items.filter((item) => !item.staged), [state.items])
   const tray = useMemo(() => state.items.filter((item) => item.staged), [state.items])
 
+  /**
+   * The 3D view has measured a model whose plan size was a guess. Adopt the
+   * mesh's footprint, so the flat plan and the 3D view tell one story about how
+   * big the thing is. Not an undo step - nothing the shopper did - and only for
+   * sizes still on a fallback, so a hand-typed size is never overwritten. The
+   * patch flips sizeSource to 'glb', which is what stops the next scene build
+   * reporting the same item again.
+   */
+  const adoptMeasuredSizes = useCallback(
+    (measured: Array<{ itemId: string; productId: string; widthMm: number; depthMm: number; heightMm: number }>) => {
+      for (const entry of measured) {
+        const item = state.items.find((candidate) => candidate.id === entry.itemId)
+        if (!item || item.manualSize) continue
+        if (item.sizeSource !== 'marker' && item.sizeSource !== 'category_default') continue
+        const differs =
+          Math.abs(item.widthMm - entry.widthMm) > 1 ||
+          Math.abs(item.depthMm - entry.depthMm) > 1 ||
+          Math.abs(item.heightMm - entry.heightMm) > 1
+        if (!differs) continue
+        dispatch({
+          type: 'set-item',
+          id: item.id,
+          patch: { widthMm: entry.widthMm, depthMm: entry.depthMm, heightMm: entry.heightMm, sizeSource: 'glb' },
+        })
+      }
+    },
+    [state.items],
+  )
+
+  // How many of each product are in the room, rolled up to the LISTING as well:
+  // the browse panel shows family cards, so a placed variant counts against the
+  // card the shopper actually taps.
+  const placedCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const item of placed) {
+      counts[item.productId] = (counts[item.productId] ?? 0) + 1
+      const parentId = products[item.productId]?.parentId
+      if (parentId) counts[parentId] = (counts[parentId] ?? 0) + 1
+    }
+    return counts
+  }, [placed, products])
+
   // ---- actions ----------------------------------------------------------
 
   /**
@@ -472,14 +552,24 @@ export function SpacePlanner(props: SpacePlannerProps) {
    * variation the shopper picked, at its own size, and hands one of these over.
    */
   const placeProduct = useCallback(
-    (info: ProductInfo) => {
+    (info: ProductInfo, quantity = 1) => {
       commit()
       setProducts((current) => ({ ...current, [info.productId]: info }))
-      const spot = findFreeSpot(state.items, state.geometry, info)
-      dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
-      // A phone panel grown to browse in shrinks back the moment something is
-      // placed: the point of placing a thing is seeing it in the room.
-      setPanelMax(false)
+      // Spots are found against a running copy: the state does not move between
+      // dispatches inside one click, so without this every instance of a
+      // quantity would be offered the same free spot and land in a pile.
+      const count = Math.max(1, Math.min(20, Math.round(quantity)))
+      let working: SpotItem[] = state.items
+      let crowded = false
+      for (let index = 0; index < count; index += 1) {
+        const spot = findFreeSpot(working, state.geometry, info)
+        if (!spot.clear) crowded = true
+        dispatch({ type: 'add-item', id: nextId(), product: info, x: spot.x, y: spot.y })
+        working = [...working, { x: spot.x, y: spot.y, yaw: 0, widthMm: info.widthMm, depthMm: info.depthMm }]
+      }
+      if (crowded) {
+        setMessage({ tone: 'info', text: 'There was no clear floor left, so it went in on top of something - drag it somewhere free.' })
+      }
       // What was handed over carries enough to draw the thing at once, which is
       // why it is used above - but it may have no model and no under-desk
       // measurements. Asking for those here rather than leaving it to the
@@ -504,6 +594,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         image: card.image,
         priceFormatted: card.priceFormatted,
         price: card.price,
+        parentId: null,
         widthMm: card.widthMm,
         depthMm: card.depthMm,
         heightMm: card.heightMm,
@@ -524,7 +615,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
       commit()
       const spot = findFreeSpot(state.items, state.geometry, item)
       dispatch({ type: 'unstage-item', id, x: spot.x, y: spot.y })
-      setPanelMax(false)
+      if (!spot.clear) {
+        setMessage({ tone: 'info', text: 'There was no clear floor left, so it went in on top of something - drag it somewhere free.' })
+      }
     },
     [commit, state.geometry, state.items],
   )
@@ -540,13 +633,17 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const placeAllFromTray = useCallback(() => {
     commit()
     let working = state.items
+    let crowded = false
     for (const item of state.items) {
       if (!item.staged) continue
       const spot = findFreeSpot(working, state.geometry, item)
+      if (!spot.clear) crowded = true
       working = working.map((entry) => (entry.id === item.id ? { ...entry, staged: false, x: spot.x, y: spot.y } : entry))
       dispatch({ type: 'unstage-item', id: item.id, x: spot.x, y: spot.y })
     }
-    setPanelMax(false)
+    if (crowded) {
+      setMessage({ tone: 'info', text: 'The room ran out of clear floor, so some things are on top of each other - drag them apart.' })
+    }
   }, [commit, state.geometry, state.items])
 
   /** Off the waiting list without going into the room - a change of mind. */
@@ -1007,6 +1104,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         <FirstRun
           heading={props.heading}
           intro={props.intro}
+          fromCart={Boolean(props.stageCart)}
           onReady={(geometry) => {
             dispatch({ type: 'set-geometry', geometry })
             setStarted(true)
@@ -1197,7 +1295,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </span>
       </div>
 
-      <div className={planMode !== 'furnish' ? 'spl-body spl-body-editing' : panelMax ? 'spl-body spl-body-panel-max' : 'spl-body'}>
+      <div className={planMode !== 'furnish' ? 'spl-body spl-body-editing' : 'spl-body'}>
         <div className="spl-stage">
           {stage === 'plan' ? (
             <Plan2d
@@ -1255,6 +1353,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
               registerCapture={(capture) => { captureView.current = capture }}
               registerCameraProbe={(probe) => { cameraProbe.current = probe }}
               onBusyChange={(busy) => { viewBusy.current = busy }}
+              onMeasuredSizes={adoptMeasuredSizes}
             />
           )}
 
@@ -1341,21 +1440,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
         </div>
 
         <aside className="spl-side">
-          {/* The pull-up bar, phone only. A sheet handle rather than a button
-              with a word on it, because that is the shape every phone user
-              already knows means "this panel slides". */}
-          <button
-            type="button"
-            className="spl-sheet-handle"
-            aria-expanded={panelMax}
-            aria-label={panelMax ? 'Shrink this panel and show the room' : 'Give this panel most of the screen'}
-            onClick={() => setPanelMax((open) => !open)}
-          >
-            <span aria-hidden />
-          </button>
           <div className="spl-tabs" role="tablist" aria-label="Panels">
             {(tray.length > 0 ? (['catalogue', 'tray', 'selected', 'items'] as Tab[]) : (['catalogue', 'selected', 'items'] as Tab[])).map((option) => (
-              <button key={option} type="button" role="tab" className="spl-tab" aria-selected={activeTab === option} onClick={() => setTab(option)}>
+              <button
+                key={option}
+                type="button"
+                role="tab"
+                id={`spl-tab-${option}`}
+                aria-controls={`spl-panel-${option}`}
+                className="spl-tab"
+                aria-selected={activeTab === option}
+                onClick={() => setTab(option)}
+              >
                 {TAB_LABELS[option]}
                 {option === 'selected' && state.selection.length > 0 ? ` (${state.selection.length})` : ''}
                 {option === 'tray' ? ` (${tray.length})` : ''}
@@ -1364,35 +1460,65 @@ export function SpacePlanner(props: SpacePlannerProps) {
           </div>
 
           <div className="spl-side-scroll">
-            <div className="spl-stack">
-              {activeTab === 'catalogue' && <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} />}
+            {/* The catalogue stays MOUNTED and is merely hidden behind the
+                other tabs: its search, category, page and filter are the
+                shopper's place in a big catalogue, and unmounting the panel on
+                every tab switch threw all four away - place a desk, nudge it,
+                and you were back on page one, unfiltered. */}
+            <div
+              id="spl-panel-catalogue"
+              role="tabpanel"
+              aria-labelledby="spl-tab-catalogue"
+              hidden={activeTab !== 'catalogue'}
+              className="spl-stack"
+            >
+              <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} placedCounts={placedCounts} />
+            </div>
 
+            <div className="spl-stack">
               {activeTab === 'tray' && (
-                <TrayPanel
-                  items={tray}
-                  products={products}
-                  onPlace={placeFromTray}
-                  onPlaceAll={placeAllFromTray}
-                  onRemove={removeFromTray}
-                />
+                <div id="spl-panel-tray" role="tabpanel" aria-labelledby="spl-tab-tray" className="spl-stack">
+                  <TrayPanel
+                    items={tray}
+                    products={products}
+                    note={trayNote}
+                    onPlace={placeFromTray}
+                    onPlaceAll={placeAllFromTray}
+                    onRemove={removeFromTray}
+                    onRefresh={() => void stageFromCart('refresh')}
+                  />
+                </div>
               )}
 
               {activeTab === 'selected' && (
-                <SelectedPanel
-                  state={state}
-                  products={products}
-                  onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
-                  onRotate={(ids, deltaDeg) => { commit(); dispatch({ type: 'rotate-items', ids, deltaDeg, snap: false }) }}
-                  onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
-                  onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
-                  onArray={(id, count, spacing) => {
-                    commit()
-                    dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw: 0, newIds: Array.from({ length: count }, () => nextId()) })
-                  }}
-                />
+                <div id="spl-panel-selected" role="tabpanel" aria-labelledby="spl-tab-selected" className="spl-stack">
+                  <SelectedPanel
+                    state={state}
+                    products={products}
+                    onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
+                    onRotate={(ids, deltaDeg) => { commit(); dispatch({ type: 'rotate-items', ids, deltaDeg, snap: false }) }}
+                    onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
+                    onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
+                    onArray={(id, count, spacing) => {
+                      commit()
+                      dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw: 0, newIds: Array.from({ length: count }, () => nextId()) })
+                    }}
+                  />
+                </div>
               )}
 
-              {activeTab === 'items' && <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />}
+              {activeTab === 'items' && (
+                <div id="spl-panel-items" role="tabpanel" aria-labelledby="spl-tab-items" className="spl-stack">
+                  <ItemListPanel
+                    items={placed}
+                    products={products}
+                    disclaimer={props.guidance.disclaimer}
+                    currencySymbol={props.currencySymbol}
+                    selection={state.selection}
+                    onSelect={(ids) => dispatch({ type: 'select', ids })}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </aside>
@@ -2046,7 +2172,7 @@ function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onCo
             ? 'You will go back to picking a shape for the room.'
             : clearItems
               ? `You will go back to picking a shape, and ${props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen will be taken out.`
-              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits under "Waiting" for you to drop back in.`}
+              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits under "Cart" for you to drop back in.`}
         </p>
         {props.itemCount > 0 && (
           <label className="spl-check" htmlFor={fieldId}>
@@ -2145,7 +2271,14 @@ function RoomDialog(props: {
  * keyboard or screen-reader user, and it is how somebody standing in the room
  * with a tape measure actually holds the information.
  */
-function FirstRun(props: { heading: string; intro: string; onReady: (geometry: RoomGeometry) => void; onDraw: () => void }) {
+function FirstRun(props: {
+  heading: string
+  intro: string
+  /** Arrived from the basket - say so, or the basket appears to have vanished. */
+  fromCart?: boolean
+  onReady: (geometry: RoomGeometry) => void
+  onDraw: () => void
+}) {
   const ids = useId()
   const [mode, setMode] = useState<'choose' | 'type'>('choose')
   const [width, setWidth] = useState('6.2m')
@@ -2222,6 +2355,9 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
     <div className="spl-first-run">
       <h1 className="spl-title">{props.heading}</h1>
       <p className="spl-note">{props.intro}</p>
+      {props.fromCart && (
+        <p className="spl-alert">Your basket is coming along - once the room exists, everything in it will be waiting under the Cart tab.</p>
+      )}
       {/* Two ways to say what the room is, and three shapes to start from and
           change. Split rather than five equal cards: "type it" and "draw it" are
           decisions about how you work, the presets are just a head start, and
@@ -2282,20 +2418,27 @@ function FirstRun(props: { heading: string; intro: string; onReady: (geometry: R
 function TrayPanel(props: {
   items: PlanItem[]
   products: Record<string, ProductInfo>
+  /** Anything the basket held that could not come along, already worded. */
+  note: string
   onPlace: (id: string) => void
   onPlaceAll: () => void
   onRemove: (id: string) => void
+  onRefresh: () => void
 }) {
   if (props.items.length === 0) return <p className="spl-note">Nothing waiting to go in.</p>
 
   return (
     <div className="spl-stack">
-      <p className="spl-note">Waiting to go in - tap one to drop it into the room at a free spot.</p>
+      <p className="spl-note">Tap one to drop it into the room at a free spot.</p>
+      {props.note && <p className="spl-alert">{props.note}</p>}
       {props.items.length > 1 && (
         <button type="button" className="spl-btn" onClick={props.onPlaceAll}>
           Put all {props.items.length} in the room
         </button>
       )}
+      <button type="button" className="spl-btn spl-btn-sm" onClick={props.onRefresh}>
+        Refresh from basket
+      </button>
       <ul className="spl-list">
         {props.items.map((item) => {
           const info = props.products[item.productId]
@@ -2365,15 +2508,13 @@ function SelectedPanel(props: {
         <NumberField label="Turn (°)" value={Math.round(first.yaw)} onChange={(value) => props.onPatch(first.id, { yaw: value })} />
       </div>
 
-      <div className="spl-row">
-        <NumberField label="Width" value={first.widthMm} onChange={(value) => props.onPatch(first.id, { widthMm: value, manualSize: true })} />
-        <NumberField label="Depth" value={first.depthMm} onChange={(value) => props.onPatch(first.id, { depthMm: value, manualSize: true })} />
-        <NumberField label="Height" value={first.heightMm} onChange={(value) => props.onPatch(first.id, { heightMm: value, manualSize: true })} />
-      </div>
+      <p className="spl-note spl-size-line">
+        {Math.round(first.widthMm)} × {Math.round(first.depthMm)} × {Math.round(first.heightMm)} mm
+      </p>
 
       {(first.sizeSource === 'category_default' || first.sizeSource === 'marker') && (
         <p className="spl-note">
-          We do not have exact measurements for this one, so the size shown is typical for its category. Type the real one if you have it.
+          We do not have exact measurements for this one, so the size shown is typical for its category.
         </p>
       )}
 
@@ -2413,21 +2554,34 @@ function NumberField(props: { label: string; value: number; onChange: (value: nu
  * everything in the room, enumerated, with its size. A screen reader gets the
  * whole plan from this table, and so does the printer.
  */
-function ItemListPanel(props: { items: PlanItem[]; products: Record<string, ProductInfo>; disclaimer: string; currencySymbol: string }) {
-  const counts = new Map<string, number>()
-  for (const item of props.items) counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1)
+function ItemListPanel(props: {
+  items: PlanItem[]
+  products: Record<string, ProductInfo>
+  disclaimer: string
+  currencySymbol: string
+  selection?: string[]
+  onSelect?: (ids: string[]) => void
+}) {
+  const groups = new Map<string, string[]>()
+  for (const item of props.items) {
+    const ids = groups.get(item.productId) ?? []
+    ids.push(item.id)
+    groups.set(item.productId, ids)
+  }
 
-  if (counts.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
+  if (groups.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
 
-  const rows = [...counts.entries()]
-  const total = rows.reduce((sum, [productId, quantity]) => sum + (props.products[productId]?.price ?? 0) * quantity, 0)
+  const rows = [...groups.entries()]
+  const total = rows.reduce((sum, [productId, ids]) => sum + (props.products[productId]?.price ?? 0) * ids.length, 0)
   const anyPriced = rows.some(([productId]) => (props.products[productId]?.price ?? 0) > 0)
+  const selectedSet = new Set(props.selection ?? [])
+  const onSelect = props.onSelect
 
   return (
     <div className="spl-stack">
       <table className="spl-bom">
         <caption className="spl-note" style={{ textAlign: 'left', paddingBottom: '0.3rem' }}>
-          Everything in the room
+          {onSelect ? 'Everything in the room - tap a line to pick those items out on the plan.' : 'Everything in the room'}
         </caption>
         <thead>
           <tr>
@@ -2437,13 +2591,33 @@ function ItemListPanel(props: { items: PlanItem[]; products: Record<string, Prod
           </tr>
         </thead>
         <tbody>
-          {rows.map(([productId, quantity]) => (
-            <tr key={productId}>
-              <td>{props.products[productId]?.name ?? 'Item'}</td>
-              <td className="spl-num">{quantity}</td>
-              <td className="spl-num">{props.products[productId]?.priceFormatted ?? '-'}</td>
-            </tr>
-          ))}
+          {rows.map(([productId, ids]) => {
+            const allSelected = ids.length > 0 && ids.every((id) => selectedSet.has(id))
+            return (
+              <tr
+                key={productId}
+                className={onSelect ? `spl-bom-row${allSelected ? ' is-selected' : ''}` : undefined}
+                onClick={onSelect ? () => onSelect(allSelected ? [] : ids) : undefined}
+              >
+                <td>
+                  {onSelect ? (
+                    <button
+                      type="button"
+                      className="spl-bom-select"
+                      aria-pressed={allSelected}
+                      onClick={(event) => { event.stopPropagation(); onSelect(allSelected ? [] : ids) }}
+                    >
+                      {props.products[productId]?.name ?? 'Item'}
+                    </button>
+                  ) : (
+                    props.products[productId]?.name ?? 'Item'
+                  )}
+                </td>
+                <td className="spl-num">{ids.length}</td>
+                <td className="spl-num">{props.products[productId]?.priceFormatted ?? '-'}</td>
+              </tr>
+            )
+          })}
         </tbody>
         {anyPriced && (
           <tfoot>

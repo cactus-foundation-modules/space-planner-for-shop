@@ -471,7 +471,12 @@ export function Plan2d(props: Plan2dProps) {
       context.fill()
       context.lineWidth = selected ? 2 : 1
       context.strokeStyle = clashing.has(item.id) ? danger : selected ? accent : ink
+      // A guessed size is DRAWN as a guess: dashed, with "≈" on the number.
+      // The wrong-size furniture that looks authoritative is how a plan lies.
+      const approximate = (item.sizeSource === 'marker' || item.sizeSource === 'category_default') && !item.manualSize
+      if (approximate) context.setLineDash([5, 4])
       context.stroke()
+      if (approximate) context.setLineDash([])
 
       // Which way it faces. Without it a desk and a desk turned round are the
       // same rectangle, and the room reads wrong in 3D for reasons nobody can
@@ -495,7 +500,7 @@ export function Plan2d(props: Plan2dProps) {
         if (showSize) {
           context.fillStyle = muted
           context.font = '400 10px system-ui, sans-serif'
-          context.fillText(`${Math.round(item.widthMm)} × ${Math.round(item.depthMm)}`, centre.x, centre.y + 7)
+          context.fillText(`${approximate ? '≈ ' : ''}${Math.round(item.widthMm)} × ${Math.round(item.depthMm)}`, centre.x, centre.y + 7)
         }
         context.restore()
       }

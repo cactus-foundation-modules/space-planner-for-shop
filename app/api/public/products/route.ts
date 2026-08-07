@@ -9,6 +9,7 @@ import { formatMoney } from '@/modules/shop/lib/money'
 import { makeDisplayAdjuster, resolveTaxDisplay } from '@/modules/shop/lib/tax-display'
 import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
 import { resolveModelsForProducts, toClientModels } from '@/modules/space-planner-for-shop/lib/model-resolver'
+import { getVariationParents } from '@/modules/space-planner-for-shop/lib/spec-attributes'
 import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
 
 // Everything the planner needs to put a specific set of products in a room:
@@ -31,7 +32,7 @@ export async function POST(request: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: 'Bad request' }, { status: 400 })
 
   const ids = [...new Set(parsed.data.productIds)]
-  const [products, images, dimensions, models, shopConfig, taxDisplay, fromPrices] = await Promise.all([
+  const [products, images, dimensions, models, shopConfig, taxDisplay, fromPrices, parentOf] = await Promise.all([
     getProductsByIds(ids),
     getPrimaryProductImages(ids),
     resolveDimensions(ids),
@@ -41,6 +42,9 @@ export async function POST(request: NextRequest) {
     // A listing priced through its variations has no price of its own. Without
     // this the item list totals a room full of furniture at nothing.
     resolveCardFromPrices(ids),
+    // The listing behind a variant child, so the panel can say "2 in the room"
+    // on the family card the shopper actually browses by.
+    getVariationParents(ids),
   ])
 
   const items = ids
@@ -68,6 +72,7 @@ export async function POST(request: NextRequest) {
         sku: product.sku ?? '',
         slug: product.slug,
         image: images[id] ?? null,
+        parentId: parentOf.get(id) ?? null,
         price,
         priceFormatted: `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`,
         widthMm: size?.widthMm ?? 800,

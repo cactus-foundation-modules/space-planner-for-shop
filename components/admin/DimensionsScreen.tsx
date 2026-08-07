@@ -30,7 +30,7 @@ type Conflict = { productId: string; name: string; note: string }
 type Job = { id: string; status: string; cursor: number; total: number; resolvedCount: number; failedCount: number; error: string }
 /** One modelled product, with a signed url good for this session. */
 type MeasureWork = { productId: string; url: string; cacheKey: string; format: 'glb' | 'fbx' | 'obj'; yawOffsetDeg: number }
-type MeasureState = { done: number; total: number; written: number; failed: number; conflicts: number }
+type MeasureState = { done: number; total: number; written: number; failed: number; conflicts: number; lost: number; implausible: number }
 
 /** Files measured between cache clears. Keeps the tab's memory flat over a long pass. */
 const MEASURE_CLEAR_EVERY = 8
@@ -119,7 +119,7 @@ export function DimensionsScreen() {
   const measureAll = async () => {
     measureCancelled.current = false
     setMeasuring(true)
-    setMeasure({ done: 0, total: 0, written: 0, failed: 0, conflicts: 0 })
+    setMeasure({ done: 0, total: 0, written: 0, failed: 0, conflicts: 0, lost: 0, implausible: 0 })
 
     // Imported here rather than at the top of the file so that opening this
     // screen does not pull three.js in behind it.
@@ -141,22 +141,36 @@ export function DimensionsScreen() {
       else files.set(key, { work, productIds: [work.productId] })
     }
 
-    const totals: MeasureState = { done: 0, total: files.size, written: 0, failed: 0, conflicts: 0 }
+    const totals: MeasureState = { done: 0, total: files.size, written: 0, failed: 0, conflicts: 0, lost: 0, implausible: 0 }
     setMeasure({ ...totals })
 
     let batch: Array<{ productId: string; widthMm: number; depthMm: number; heightMm: number }> = []
     const flush = async () => {
       if (batch.length === 0) return
-      const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/measure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ measurements: batch }),
-      })
+      const body = JSON.stringify({ measurements: batch })
+      const size = batch.length
       batch = []
-      if (!response.ok) return
-      const result = (await response.json()) as { written: number; conflicts: number }
-      totals.written += result.written
-      totals.conflicts += result.conflicts
+      // One retry, then COUNT the loss. This used to drop a failed batch on the
+      // floor without a word, which is how a pass could end "written 9,962" out
+      // of eleven and a half thousand while reporting nothing wrong.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/measure', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+          })
+          if (!response.ok) continue
+          const result = (await response.json()) as { written: number; conflicts: number }
+          totals.written += result.written
+          totals.conflicts += result.conflicts
+          return
+        } catch {
+          // Network hiccup - the retry above is the answer; falling out of the
+          // loop below is the honest failure.
+        }
+      }
+      totals.lost += size
     }
 
     for (const entry of files.values()) {
@@ -170,8 +184,19 @@ export function DimensionsScreen() {
           decimationTarget: 1,
           textureMaxPx: 64,
         })
-        for (const productId of entry.productIds) {
-          batch.push({ productId, widthMm: ready.widthMm, depthMm: ready.depthMm, heightMm: ready.heightMm })
+        // Filtered HERE, not left to the route: the route's validation rejects
+        // a whole batch over one bad number, so a single mesh measuring NaN or
+        // forty metres (a file exported in centimetres) silently cost every
+        // other product in its batch - the same products, every run.
+        const plausible = [ready.widthMm, ready.depthMm, ready.heightMm].every(
+          (mm) => Number.isFinite(mm) && mm >= 5 && mm <= 20_000,
+        )
+        if (!plausible) {
+          totals.implausible += entry.productIds.length
+        } else {
+          for (const productId of entry.productIds) {
+            batch.push({ productId, widthMm: ready.widthMm, depthMm: ready.depthMm, heightMm: ready.heightMm })
+          }
         }
       } catch {
         totals.failed += 1
@@ -247,6 +272,8 @@ export function DimensionsScreen() {
             <p style={{ margin: '0.35rem 0 0', fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
               {measureState.done} of {measureState.total} models · {measureState.written} sizes saved
               {measureState.failed > 0 && ` · ${measureState.failed} would not open`}
+              {measureState.lost > 0 && ` · ${measureState.lost} could not be saved - run it again`}
+              {measureState.implausible > 0 && ` · ${measureState.implausible} measured an impossible size (wrong unit in the file?) - not saved`}
               {measureState.conflicts > 0 && ` · ${measureState.conflicts} disagree with the spec sheet`}
             </p>
           </div>

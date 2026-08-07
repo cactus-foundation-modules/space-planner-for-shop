@@ -32,7 +32,7 @@ export type VariationPickerProps = {
   image: string | null
   onCancel: () => void
   /** Handed the variation, sized and priced, ready to drop in the room. */
-  onPlace: (info: ProductInfo) => void
+  onPlace: (info: ProductInfo, quantity?: number) => void
   /**
    * There turned out to be nothing to choose from - a family whose options have
    * gone, or a shop mid-edit. The listing goes in exactly as it did before this
@@ -66,6 +66,9 @@ export function VariationPicker(props: VariationPickerProps) {
   // keeps this component free of the state-clearing effect that would need.
   const [sized, setSized] = useState<Record<string, SizedProduct>>({})
   const [sizing, setSizing] = useState('')
+  // How many go in at once. Six desks used to be six full trips through this
+  // panel; a stepper is the whole fix.
+  const [quantity, setQuantity] = useState(1)
 
   useEffect(() => {
     let cancelled = false
@@ -157,29 +160,35 @@ export function VariationPicker(props: VariationPickerProps) {
   const place = useCallback(() => {
     if (!variant) return
     if (chosen) {
-      props.onPlace(chosen)
+      props.onPlace(chosen, quantity)
       return
     }
     // The size never arrived. Place it anyway on the ladder's answer for the
     // variation - the planner asks for the real numbers again as it lands, and a
     // shopper who has chosen a chair should get a chair.
-    props.onPlace({
-      productId: variant.childProductId,
-      name: props.productName,
-      image: variant.imageUrls[0] ?? props.image,
-      // Formatted here only because the sized answer never came; everywhere else
-      // the money is formatted server-side, tax display and all.
-      priceFormatted: `${loaded?.currencySymbol ?? ''}${variant.price.toFixed(2)}`,
-      price: variant.price,
-      widthMm: 800,
-      depthMm: 600,
-      heightMm: 750,
-      sizeSource: 'marker',
-      mount: 'floor',
-      underTopHeightMm: null,
-      underTopWidthMm: null,
-    })
-  }, [variant, chosen, props, loaded?.currencySymbol])
+    props.onPlace(
+      {
+        productId: variant.childProductId,
+        name: props.productName,
+        image: variant.imageUrls[0] ?? props.image,
+        // The listing this child belongs to, so the browse card's "in the room"
+        // count picks it up even on this fallback path.
+        parentId: props.productId,
+        // Formatted here only because the sized answer never came; everywhere else
+        // the money is formatted server-side, tax display and all.
+        priceFormatted: `${loaded?.currencySymbol ?? ''}${variant.price.toFixed(2)}`,
+        price: variant.price,
+        widthMm: 800,
+        depthMm: 600,
+        heightMm: 750,
+        sizeSource: 'marker',
+        mount: 'floor',
+        underTopHeightMm: null,
+        underTopWidthMm: null,
+      },
+      quantity,
+    )
+  }, [variant, chosen, props, loaded?.currencySymbol, quantity])
 
   if (error) {
     return (
@@ -228,6 +237,7 @@ export function VariationPicker(props: VariationPickerProps) {
 
       {loaded.payload.options.map((option, index) => {
         if (!isOptionVisible(loaded.payload, selection, index)) return null
+        const anyOut = option.values.some((value) => !isValueAvailable(loaded.payload, selection, option.id, value.id))
         return (
           <div key={option.id} className="spl-field">
             <span className="spl-pick-label">{option.name}</span>
@@ -255,10 +265,14 @@ export function VariationPicker(props: VariationPickerProps) {
                       <span className="spl-pick-swatch" style={{ background: swatch }} aria-hidden />
                     ))}
                     <span>{value.label}</span>
+                    {!available && <span className="spl-visually-hidden"> - not with the rest of your choices</span>}
                   </button>
                 )
               })}
             </div>
+            {/* Said in text, not in a hover tooltip: on a phone there is no
+                hover, and a dimmed pill with no explanation reads as broken. */}
+            {anyOut && <p className="spl-note spl-pick-outnote">Faded choices do not come with the rest of your picks - tap one anyway to switch to it.</p>}
           </div>
         )
       })}
@@ -280,8 +294,20 @@ export function VariationPicker(props: VariationPickerProps) {
                 ? 'Working out the size…'
                 : 'Ready to place.'}
           </span>
+          <div className="spl-pick-qty">
+            <span className="spl-pick-label" id="spl-pick-qty-label">How many?</span>
+            <div className="spl-pick-qty-controls" role="group" aria-labelledby="spl-pick-qty-label">
+              <button type="button" className="spl-btn spl-btn-sm" aria-label="One fewer" disabled={quantity <= 1} onClick={() => setQuantity((q) => Math.max(1, q - 1))}>
+                −
+              </button>
+              <span className="spl-pick-qty-count" aria-live="polite">{quantity}</span>
+              <button type="button" className="spl-btn spl-btn-sm" aria-label="One more" disabled={quantity >= 20} onClick={() => setQuantity((q) => Math.min(20, q + 1))}>
+                +
+              </button>
+            </div>
+          </div>
           <button type="button" className="spl-btn spl-btn-primary" onClick={place}>
-            Put this in the room
+            {quantity > 1 ? `Put ${quantity} in the room` : 'Put this in the room'}
           </button>
         </div>
       ) : (

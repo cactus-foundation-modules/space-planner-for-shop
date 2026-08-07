@@ -1,6 +1,6 @@
 {
   "name": "cactus-module-space-planner-for-shop",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Space Planner for the Cactus shop: shoppers draw their own room to scale, place catalogue products in it in 2D and 3D, check what fits, and get a floor plan, a priced item list and a quote out of it",
   "license": "MIT",
   "private": true

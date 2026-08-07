@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalogue'
 import type { ProductInfo } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { VariationPicker } from '@/modules/space-planner-for-shop/components/public/VariationPicker'
@@ -21,10 +21,14 @@ import { VariationPicker } from '@/modules/space-planner-for-shop/components/pub
 export type CataloguePanelProps = {
   onPlace: (card: CatalogueCard) => void
   /** A specific variation, already sized and priced. See VariationPicker. */
-  onPlaceProduct: (info: ProductInfo) => void
+  onPlaceProduct: (info: ProductInfo, quantity?: number) => void
+  /** How many of each product (and each product's listing) are in the room. */
+  placedCounts: Record<string, number>
 }
 
-type Category = { id: string; name: string; slug: string }
+type Category = { id: string; name: string; slug: string; parentId: string | null }
+
+const PER_PAGE = 24
 
 export function CataloguePanel(props: CataloguePanelProps) {
   const [search, setSearch] = useState('')
@@ -39,13 +43,17 @@ export function CataloguePanel(props: CataloguePanelProps) {
   const [choosing, setChoosing] = useState<CatalogueCard | null>(null)
 
   const load = useCallback(
-    async (nextPage: number, term: string, categorySlug: string) => {
+    async (nextPage: number, term: string, categorySlug: string, modelled: boolean) => {
       setLoading(true)
       setError('')
       try {
-        const params = new URLSearchParams({ page: String(nextPage), perPage: '24', withCategories: '1' })
+        const params = new URLSearchParams({ page: String(nextPage), perPage: String(PER_PAGE), withCategories: '1' })
         if (term) params.set('search', term)
         if (categorySlug) params.set('category', categorySlug)
+        // Server-side, so the page numbers stay honest: filtering a fetched
+        // page here used to show one or two cards while "More" promised
+        // hundreds.
+        if (modelled) params.set('modelledOnly', '1')
         const response = await fetch(`/api/m/space-planner-for-shop/public/catalogue?${params.toString()}`)
         if (!response.ok) throw new Error('Could not load the catalogue')
         const data = (await response.json()) as { cards: CatalogueCard[]; total: number; categories?: Category[] }
@@ -65,12 +73,32 @@ export function CataloguePanel(props: CataloguePanelProps) {
     // Debounced, so typing "desk" is one query rather than four.
     const timer = setTimeout(() => {
       setPage(1)
-      void load(1, search, category)
+      void load(1, search, category, modelledOnly)
     }, 250)
     return () => clearTimeout(timer)
-  }, [search, category, load])
+  }, [search, category, modelledOnly, load])
 
-  const shown = modelledOnly ? cards.filter((card) => card.hasModel) : cards
+  // Sections first, their leaves under each, everything alphabetical - fifty
+  // categories in one long unordered list was a memory test, not a filter.
+  const grouped = useMemo(() => {
+    const parents = categories.filter((entry) => !entry.parentId).sort((a, b) => a.name.localeCompare(b.name))
+    const byParent = new Map<string, Category[]>()
+    const orphans: Category[] = []
+    const parentIds = new Set(parents.map((entry) => entry.id))
+    for (const entry of categories) {
+      if (!entry.parentId) continue
+      if (!parentIds.has(entry.parentId)) {
+        orphans.push(entry)
+        continue
+      }
+      const list = byParent.get(entry.parentId) ?? []
+      list.push(entry)
+      byParent.set(entry.parentId, list)
+    }
+    for (const list of byParent.values()) list.sort((a, b) => a.name.localeCompare(b.name))
+    orphans.sort((a, b) => a.name.localeCompare(b.name))
+    return { parents, byParent, orphans }
+  }, [categories])
 
   // Stable, because the picker's option-list fetch depends on the one it is
   // handed: rebuilt every render, typing in the search box behind the picker
@@ -78,8 +106,8 @@ export function CataloguePanel(props: CataloguePanelProps) {
   const cancelChoosing = useCallback(() => setChoosing(null), [])
   const { onPlace, onPlaceProduct } = props
   const placeChosen = useCallback(
-    (info: ProductInfo) => {
-      onPlaceProduct(info)
+    (info: ProductInfo, quantity?: number) => {
+      onPlaceProduct(info, quantity)
       setChoosing(null)
     },
     [onPlaceProduct],
@@ -112,6 +140,9 @@ export function CataloguePanel(props: CataloguePanelProps) {
     )
   }
 
+  const shownFrom = total === 0 ? 0 : (page - 1) * PER_PAGE + 1
+  const shownTo = Math.min(total, (page - 1) * PER_PAGE + cards.length)
+
   return (
     <div className="spl-stack">
       {/* Sticky within the panel's own scroll, so page two of the catalogue is
@@ -137,7 +168,27 @@ export function CataloguePanel(props: CataloguePanelProps) {
             <label htmlFor="spl-category">Category</label>
             <select id="spl-category" className="spl-select" value={category} onChange={(event) => setCategory(event.target.value)}>
               <option value="">All categories</option>
-              {categories.map((entry) => (
+              {grouped.parents.map((parent) => {
+                const leaves = grouped.byParent.get(parent.id) ?? []
+                if (leaves.length === 0) {
+                  return (
+                    <option key={parent.id} value={parent.slug}>
+                      {parent.name}
+                    </option>
+                  )
+                }
+                return (
+                  <optgroup key={parent.id} label={parent.name}>
+                    <option value={parent.slug}>All {parent.name.toLowerCase()}</option>
+                    {leaves.map((leaf) => (
+                      <option key={leaf.id} value={leaf.slug}>
+                        {leaf.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )
+              })}
+              {grouped.orphans.map((entry) => (
                 <option key={entry.id} value={entry.slug}>
                   {entry.name}
                 </option>
@@ -156,54 +207,65 @@ export function CataloguePanel(props: CataloguePanelProps) {
       {loading && <p className="spl-note">Looking…</p>}
 
       <ul className="spl-list">
-        {shown.map((card) => (
-          <li key={card.id}>
-            <button
-              type="button"
-              className="spl-card"
-              onClick={() => (card.hasVariations ? setChoosing(card) : props.onPlace(card))}
-            >
-              {card.image ? (
-                // eslint-disable-next-line @next/next/no-img-element -- catalogue thumbnails are already sized by the media layer and this list is virtual-scrolled by the browser, not by next/image
-                <img src={card.image} alt="" loading="lazy" />
-              ) : (
-                <span aria-hidden className="spl-card-noimage" />
-              )}
-              <span className="spl-card-body">
-                <span className="spl-card-name">{card.name}</span>
-                <span className="spl-card-meta">
-                  {card.hasVariations ? (
-                    // A family's own size row is nobody's size, so printing it
-                    // here is a small lie the shopper only finds out about once
-                    // the thing is in the room at the wrong size.
-                    <>{card.priceFormatted} · choose a size or finish</>
-                  ) : (
-                    <>
-                      {card.priceFormatted} · {Math.round(card.widthMm)} × {Math.round(card.depthMm)} mm
-                      {card.approximateSize && ' (approx.)'}
-                    </>
-                  )}
+        {cards.map((card) => {
+          const inRoom = props.placedCounts[card.id] ?? 0
+          return (
+            <li key={card.id}>
+              <button
+                type="button"
+                className="spl-card"
+                aria-label={`${card.name}, ${card.priceFormatted}${card.hasVariations ? ', choose a size or finish' : ''}${inRoom > 0 ? `, ${inRoom} in the room` : ''}`}
+                onClick={() => (card.hasVariations ? setChoosing(card) : props.onPlace(card))}
+              >
+                {card.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- catalogue thumbnails are already sized by the media layer and this list is virtual-scrolled by the browser, not by next/image
+                  <img src={card.image} alt="" loading="lazy" />
+                ) : (
+                  <span aria-hidden className="spl-card-noimage" />
+                )}
+                <span className="spl-card-body">
+                  <span className="spl-card-name">{card.name}</span>
+                  <span className="spl-card-meta">
+                    {card.hasVariations ? (
+                      // A family's own size row is nobody's size, so printing it
+                      // here is a small lie the shopper only finds out about once
+                      // the thing is in the room at the wrong size.
+                      <>{card.priceFormatted} · choose a size or finish</>
+                    ) : (
+                      <>
+                        {card.priceFormatted} · {Math.round(card.widthMm)} × {Math.round(card.depthMm)} mm
+                        {card.approximateSize && ' (approx.)'}
+                      </>
+                    )}
+                  </span>
+                  <span className="spl-card-badges">
+                    {inRoom > 0 && <span className="spl-badge spl-badge-count">{inRoom} in the room</span>}
+                    {card.hasModel && <span className="spl-badge spl-badge-3d">3D</span>}
+                    {card.madeToOrder && <span className="spl-badge">Made to order</span>}
+                    {card.stockLabel && <span className="spl-badge spl-badge-warn">{card.stockLabel}</span>}
+                  </span>
                 </span>
-                <span className="spl-card-badges">
-                  {card.hasModel && <span className="spl-badge spl-badge-3d">3D</span>}
-                  {card.madeToOrder && <span className="spl-badge">Made to order</span>}
-                  {card.stockLabel && <span className="spl-badge spl-badge-warn">{card.stockLabel}</span>}
-                </span>
-              </span>
-            </button>
-          </li>
-        ))}
+              </button>
+            </li>
+          )
+        })}
       </ul>
 
-      {shown.length === 0 && !loading && <p className="spl-note">Nothing matches that. Try a shorter word.</p>}
+      {cards.length === 0 && !loading && (
+        <p className="spl-note">
+          {modelledOnly ? 'Nothing with a 3D model matches that. Untick the box to see everything.' : 'Nothing matches that. Try a shorter word.'}
+        </p>
+      )}
 
-      {total > cards.length && (
-        <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'space-between' }}>
-          <button type="button" className="spl-btn" disabled={page <= 1} onClick={() => { const next = page - 1; setPage(next); void load(next, search, category) }}>
+      {total > PER_PAGE && (
+        <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'space-between', alignItems: 'center' }}>
+          <button type="button" className="spl-btn" disabled={page <= 1} onClick={() => { const next = page - 1; setPage(next); void load(next, search, category, modelledOnly) }}>
             Back
           </button>
-          <span className="spl-note">Page {page}</span>
-          <button type="button" className="spl-btn" disabled={page * 24 >= total} onClick={() => { const next = page + 1; setPage(next); void load(next, search, category) }}>
+          <span className="spl-note">
+            {shownFrom}–{shownTo} of {total}
+          </span>
+          <button type="button" className="spl-btn" disabled={page * PER_PAGE >= total} onClick={() => { const next = page + 1; setPage(next); void load(next, search, category, modelledOnly) }}>
             More
           </button>
         </div>

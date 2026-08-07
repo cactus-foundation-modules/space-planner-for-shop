@@ -424,6 +424,14 @@ export type BuildItemsResult = {
   group: Group
   /** Items that fell back to a placeholder because their model would not load. */
   degraded: string[]
+  /**
+   * Items whose PLAN size was a guess but whose model has now been measured:
+   * the mesh's footprint as drawn, in millimetres. The planner adopts these so
+   * the flat plan and the 3D view can never disagree about how big a thing is -
+   * which is exactly how a bench that is really five metres long used to sit on
+   * the plan as an 80 cm box.
+   */
+  measured: Array<{ itemId: string; productId: string; widthMm: number; depthMm: number; heightMm: number }>
 }
 
 /**
@@ -476,6 +484,7 @@ export async function buildItems(
   const group = new Group()
   group.name = 'items'
   const degraded: string[] = []
+  const measured: BuildItemsResult['measured'] = []
 
   // Prepare each distinct file once, in placement order, up to the budget.
   // Beyond it, the remaining products draw as placeholders rather than the tab
@@ -546,6 +555,18 @@ export async function buildItems(
       holder.scale.set(scale.x, scale.y, scale.z)
       holder.userData[SHARED_MODEL] = true
       object = holder
+      // The plan only guessed at this one's size; the mesh knows. Report the
+      // footprint actually drawn so the flat plan can adopt it - but only a
+      // sane one: a file exported in centimetres measures forty metres across,
+      // and adopting that would trade a small wrong box for an enormous one.
+      if (node.approximate) {
+        const widthMm = Math.round(ready.widthMm * scale.x)
+        const depthMm = Math.round(ready.depthMm * scale.z)
+        const heightMm = Math.round(ready.heightMm * scale.y)
+        if ([widthMm, depthMm, heightMm].every((mm) => Number.isFinite(mm) && mm >= 5 && mm <= 20_000)) {
+          measured.push({ itemId: node.itemId, productId: node.productId, widthMm, depthMm, heightMm })
+        }
+      }
     } else {
       if (node.model) degraded.push(node.itemId)
       object = buildPlaceholder(node)
@@ -558,7 +579,7 @@ export async function buildItems(
     group.add(object)
   }
 
-  return { group, degraded }
+  return { group, degraded, measured }
 }
 
 /** The room's own bounding box in world metres, floor to ceiling. */

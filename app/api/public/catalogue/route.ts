@@ -30,6 +30,7 @@ export async function GET(request: NextRequest) {
     categorySlug,
     stock: stock === 'in' || stock === 'low' || stock === 'out' ? stock : undefined,
     sort: 'name-asc',
+    modelledOnly: params.get('modelledOnly') === '1',
   })
 
   return NextResponse.json({

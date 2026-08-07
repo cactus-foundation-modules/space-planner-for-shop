@@ -78,15 +78,47 @@ function stockState(product: ShpProduct): { inStock: boolean; label: string } {
   }
 }
 
-export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' | 'excludeHidden'>): Promise<CatalogueBrowse> {
+export async function browseCatalogue(
+  filter: Omit<ListProductsFilter, 'status' | 'excludeHidden'> & { modelledOnly?: boolean },
+): Promise<CatalogueBrowse> {
   const perPage = Math.min(48, Math.max(1, Math.floor(Number(filter.perPage)) || 24))
   const page = Math.max(1, Math.floor(Number(filter.page)) || 1)
 
-  const [{ products, total }, shopConfig, taxDisplay] = await Promise.all([
-    listProducts({ ...filter, page, perPage, status: 'ACTIVE', excludeHidden: true }),
-    getShopConfigCached(),
-    resolveTaxDisplay(),
-  ])
+  const [shopConfig, taxDisplay] = await Promise.all([getShopConfigCached(), resolveTaxDisplay()])
+
+  let products: ShpProduct[]
+  let total: number
+
+  if (filter.modelledOnly) {
+    // The filter has to run server-side or the page numbers lie: with nineteen
+    // listings in twenty unmodelled, filtering a fetched page client-side shows
+    // one or two cards while "More" promises hundreds. The listing count is a
+    // few hundred, so sweeping them through shop's own filter (which is what
+    // keeps drafts and hidden children out) and keeping the modelled ones is
+    // cheap - and capped, so a pathological catalogue degrades rather than hangs.
+    const all: ShpProduct[] = []
+    const scanPer = 100
+    for (let scanPage = 1; scanPage <= 25; scanPage += 1) {
+      const batch = await listProducts({ ...filter, page: scanPage, perPage: scanPer, status: 'ACTIVE', excludeHidden: true })
+      all.push(...batch.products)
+      if (all.length >= batch.total || batch.products.length < scanPer) break
+    }
+    const allIds = all.map((p) => p.id)
+    const allChildren = await getVariationChildrenForProducts(allIds)
+    const allChildIds: string[] = []
+    for (const list of allChildren.values()) allChildIds.push(...list)
+    const allModels = await getModelsForProducts([...allIds, ...allChildIds])
+    const modelledSet = new Set(allModels.map((model) => model.productId))
+    const matching = all.filter(
+      (p) => modelledSet.has(p.id) || (allChildren.get(p.id) ?? []).some((childId) => modelledSet.has(childId)),
+    )
+    total = matching.length
+    products = matching.slice((page - 1) * perPage, page * perPage)
+  } else {
+    const result = await listProducts({ ...filter, page, perPage, status: 'ACTIVE', excludeHidden: true })
+    products = result.products
+    total = result.total
+  }
 
   const ids = products.map((p) => p.id)
   const [images, models, children, specValues, dimensions, fromPrices] = await Promise.all([
@@ -150,8 +182,10 @@ export async function browseCatalogue(filter: Omit<ListProductsFilter, 'status' 
   return { cards, total, page, perPage, taxSuffix: taxDisplay.display.suffix }
 }
 
-/** The category list the panel filters by, flat and cheap. */
-export async function listPlannerCategories(): Promise<Array<{ id: string; name: string; slug: string }>> {
+/** The category list the panel filters by - flat rows, but carrying the parent
+ *  so the panel can group leaves under their section instead of presenting
+ *  fifty categories as one long unordered list. */
+export async function listPlannerCategories(): Promise<Array<{ id: string; name: string; slug: string; parentId: string | null }>> {
   const categories = await listCategories()
-  return categories.map((category) => ({ id: category.id, name: category.name, slug: category.slug }))
+  return categories.map((category) => ({ id: category.id, name: category.name, slug: category.slug, parentId: category.parentId }))
 }

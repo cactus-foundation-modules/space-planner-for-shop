@@ -60,7 +60,14 @@ export type ProductSize = {
  * two components hand one of these to a third - the browse panel resolves a
  * variation into one, and the planner places it.
  */
-export type ProductInfo = ProductSize & { name: string; image: string | null; priceFormatted: string; price: number }
+export type ProductInfo = ProductSize & {
+  name: string
+  image: string | null
+  priceFormatted: string
+  price: number
+  /** The listing behind a variant child, so counts roll up to the card browsed. */
+  parentId?: string | null
+}
 
 export type PlannerAction =
   | { type: 'set-geometry'; geometry: RoomGeometry }
@@ -584,11 +591,15 @@ export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}, geo
  * gives up gracefully on the centre if the room is genuinely full: the shopper
  * can always drag it out, and refusing to place would be worse.
  */
+/** Just the fields spot-finding reads, so a caller placing several things can
+ *  probe against a running copy without manufacturing full plan items. */
+export type SpotItem = Pick<PlanItem, 'x' | 'y' | 'yaw' | 'widthMm' | 'depthMm'> & { staged?: boolean }
+
 export function findFreeSpot(
-  items: PlanItem[],
+  items: SpotItem[],
   geometry: RoomGeometry,
   size: { widthMm: number; depthMm: number },
-): { x: number; y: number } {
+): { x: number; y: number; clear: boolean } {
   const box = boundingBox(geometry.vertices)
   const centre = { x: Math.round((box.minX + box.maxX) / 2), y: Math.round((box.minY + box.maxY) / 2) }
   const placed = items.filter((item) => !item.staged)
@@ -602,7 +613,7 @@ export function findFreeSpot(
     return !placed.some((item) => footprintsOverlap(probe, item, -20))
   }
 
-  if (free(centre.x, centre.y)) return centre
+  if (free(centre.x, centre.y)) return { ...centre, clear: true }
   for (let ring = 1; ring <= 14; ring++) {
     for (let dy = -ring; dy <= ring; dy++) {
       for (let dx = -ring; dx <= ring; dx++) {
@@ -611,11 +622,14 @@ export function findFreeSpot(
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue
         const x = centre.x + dx * step
         const y = centre.y + dy * step
-        if (free(x, y)) return { x, y }
+        if (free(x, y)) return { x, y, clear: true }
       }
     }
   }
-  return centre
+  // Nowhere free. The centre again - but SAID, so the caller can tell the
+  // shopper it is on top of something rather than leaving them to spot the
+  // clash colour.
+  return { ...centre, clear: false }
 }
 
 /**

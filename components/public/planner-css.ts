@@ -123,9 +123,6 @@ export function plannerCss(): string {
    to escape. */
 .spl-side > .spl-tabs { flex: 0 0 auto; }
 .spl-side-scroll { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1 1 auto; }
-/* The pull-up handle only exists where the panel is a bottom sheet - see the
-   narrow-screen block. Everywhere else it would be a mystery decoration. */
-.spl-sheet-handle { display: none; }
 
 .spl-tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 .spl-tab {
@@ -275,7 +272,21 @@ export function plannerCss(): string {
 /* Not with the rest of the choices - dimmed, never disabled, because it is
    usually available with a different pick and a control you cannot press is a
    dead end you cannot get out of. */
-.spl-pick-value.is-out { opacity: 0.45; }
+.spl-pick-value.is-out { opacity: 0.45; text-decoration: line-through; }
+.spl-pick-outnote { margin-top: 0.25rem; }
+.spl-pick-qty { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.spl-pick-qty-controls { display: inline-flex; align-items: center; gap: 0.5rem; }
+.spl-pick-qty-count { min-width: 1.6rem; text-align: center; font-variant-numeric: tabular-nums; }
+.spl-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 .spl-pick-swatch { width: 1.1rem; height: 1.1rem; border-radius: 999px; border: 1px solid var(--color-border); object-fit: cover; flex: none; }
 .spl-pick-summary {
   display: grid;
@@ -287,6 +298,7 @@ export function plannerCss(): string {
 }
 
 .spl-badge-3d { border-color: var(--color-primary); color: var(--color-primary); }
+.spl-badge-count { background: color-mix(in srgb, var(--color-primary) 14%, transparent); border-color: var(--color-primary); }
 .spl-badge-warn { border-color: var(--color-warning, #a16207); color: var(--color-warning, #a16207); }
 
 .spl-note {
@@ -329,6 +341,27 @@ export function plannerCss(): string {
 .spl-bom th, .spl-bom td { padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--color-border); text-align: left; }
 .spl-bom td.spl-num, .spl-bom th.spl-num { text-align: right; white-space: nowrap; }
 .spl-bom tfoot td { font-weight: 600; border-bottom: none; }
+
+/* Item-list lines double as selection controls: the name is the real button
+   (keyboard and screen-reader path), the whole row is the pointer target. */
+.spl-bom tbody tr.spl-bom-row { cursor: pointer; }
+.spl-bom tbody tr.spl-bom-row:hover td { background: color-mix(in srgb, var(--color-primary) 7%, transparent); }
+.spl-bom tbody tr.spl-bom-row.is-selected td { background: color-mix(in srgb, var(--color-primary) 14%, transparent); }
+.spl-bom-select {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.spl-bom-select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+.spl-size-line { font-variant-numeric: tabular-nums; }
 
 /* The waiting list: a full card that places, and a small button that removes.
    Two separate buttons rather than one card with a corner control inside it,
@@ -644,29 +677,11 @@ export function plannerCss(): string {
 @media (max-width: 900px) {
   .spl-body {
     grid-template-columns: minmax(0, 1fr);
-    /* The room gets the top of the screen and the panel the rest. Both scroll
-       themselves, so neither can push the other off. */
-    grid-template-rows: minmax(11rem, 42fr) minmax(0, 58fr);
+    /* The room gets the top of the screen; the panel sits under it at a fixed,
+       sensible height - no pulling, no resizing. Both scroll themselves, so
+       neither can push the other off. */
+    grid-template-rows: minmax(11rem, 1fr) clamp(16rem, 45dvh, 30rem);
   }
-  /* Pulled up, the panel takes nearly everything: browsing two dozen catalogue
-     cards through a five-line letterbox was the single loudest complaint about
-     this tool on a phone. The room keeps a sliver so the sense of "under this
-     is your plan" survives, and placing anything drops the panel back down. */
-  .spl-body-panel-max { grid-template-rows: 4.5rem minmax(0, 1fr); }
-  /* The handle that does the pulling. A generous hit area around a small pill,
-     tucked into the panel's own padding so it costs almost no height. */
-  .spl-sheet-handle {
-    display: grid;
-    place-items: center;
-    appearance: none;
-    border: 0;
-    background: transparent;
-    padding: 0.15rem 0 0.4rem;
-    margin: calc(var(--spl-gap) * -0.6) calc(var(--spl-gap) * -1) calc(var(--spl-gap) * -0.6);
-    cursor: pointer;
-  }
-  .spl-sheet-handle span { width: 2.75rem; height: 0.3rem; border-radius: 999px; background: var(--color-border); }
-  .spl-sheet-handle:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
   /* One row of panel tabs that slides sideways, never a stack: with the waiting
      tab present there are four, and every row they wrap onto comes straight out
      of the product list underneath. */
