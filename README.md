@@ -139,6 +139,13 @@ the size it claims.
 Anything the parser cannot read lands in the junk tail on the Sizes screen, with
 the actual text, so somebody can fix the sheet.
 
+`spl_dimension_cache.product_id` carries no foreign key - `shp_products` belongs
+to the shop module, and the one foreign key in this schema is between two of our
+own tables - so a deleted product strands its cache row. The nightly sweep clears
+them, on the same reasoning as the orphaned-room sweep. Nothing reads a stranded
+row, but the dimension report counts rows rather than products, so left alone
+they quietly inflate every figure the owner is shown.
+
 ## Fitting the mesh to the size
 
 The plan and the model are two independent statements about how big a thing is,

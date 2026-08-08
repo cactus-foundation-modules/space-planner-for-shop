@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSplConfig } from '@/modules/space-planner-for-shop/lib/config'
-import { listStaleProductIds } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
+import { deleteOrphanedDimensions, listStaleProductIds } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
 import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
 import { purgeOldEvents } from '@/modules/space-planner-for-shop/lib/db/events'
 import { deleteOrphanedRooms } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { claimedMachineIds, failStaleRenderJobs } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { sweepOrphanMachines } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
 
-// The nightly tidy-up. Four small jobs, all bounded, declared as a cron in the
+// The nightly tidy-up. Six small jobs, all bounded, declared as a cron in the
 // manifest so no core file needs editing.
 //
 // Bounded is the point. Everything here shares the dispatcher's sixty-second
@@ -35,24 +35,32 @@ export async function GET(request: NextRequest) {
     report.dimensionsRefreshed = 0
   }
 
-  // 2. Purge the anonymous event counters past their retention.
+  // 2. Cached sizes for products the shop has since deleted. Same reason as the
+  //    rooms below: the shop owns shp_products and this module does not
+  //    foreign-key into it, so nothing cascades. Unbounded on purpose - one hash
+  //    anti-join over two tables the size of the catalogue, which is nothing
+  //    against this job's budget, and a bounded slice would only postpone the
+  //    miscount it exists to prevent.
+  report.orphanedDimensionsRemoved = await deleteOrphanedDimensions()
+
+  // 3. Purge the anonymous event counters past their retention.
   report.eventsPurged = await purgeOldEvents(config.eventRetentionDays)
 
-  // 3. Rooms whose member no longer exists. Core owns the Member table and this
+  // 4. Rooms whose member no longer exists. Core owns the Member table and this
   //    module cannot foreign-key to it, so deletion does not cascade here on its
   //    own - and personal data left behind after a deletion request is a
   //    compliance failure rather than a bug.
   report.orphanedRoomsRemoved = await deleteOrphanedRooms()
 
-  // 4. Renders that were picked up and never came back. Without this, one worker
+  // 5. Renders that were picked up and never came back. Without this, one worker
   //    crash locks that plan out of ever being rendered again, because there is
   //    only ever one live job per plan.
   report.staleRendersFailed = await failStaleRenderJobs()
 
-  // 5. Picture machines nothing is waiting on any more. The third and last
+  // 6. Picture machines nothing is waiting on any more. The third and last
   //    layer of the shutdown story: the callback destroys a machine the moment
   //    its picture lands, the machine destroys itself if it goes quiet, and this
-  //    catches the one that managed neither. Runs AFTER step 4, so a job just
+  //    catches the one that managed neither. Runs AFTER step 5, so a job just
   //    aged out no longer claims its machine and the machine goes with it.
   report.orphanMachinesDestroyed = await sweepOrphanMachines(await claimedMachineIds()).catch(() => 0)
 

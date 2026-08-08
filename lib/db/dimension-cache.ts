@@ -178,6 +178,26 @@ export async function countActiveProducts(): Promise<number> {
   return Number(rows[0]?.count ?? 0)
 }
 
+/**
+ * Cached sizes for products the shop no longer has.
+ *
+ * `product_id` deliberately carries no foreign key - shp_products belongs to the
+ * shop module and this schema keeps its one foreign key between two of its own
+ * tables - so a deleted product leaves its cache row behind rather than
+ * cascading it away. Nothing reads a stranded row, but the dimension report
+ * counts rows rather than products, so they quietly inflate every figure the
+ * owner is shown. Same shape and same reason as the orphaned-room sweep.
+ *
+ * Only ever deletes cache. A row here is the materialised output of the
+ * resolution ladder and rebuilds itself the moment its product comes back.
+ */
+export async function deleteOrphanedDimensions(): Promise<number> {
+  return prisma.$executeRaw`
+    DELETE FROM "spl_dimension_cache" c
+    WHERE NOT EXISTS (SELECT 1 FROM "shp_products" p WHERE p."id" = c."product_id")
+  `
+}
+
 export type DimensionReport = {
   total: number
   bySource: Record<string, number>
