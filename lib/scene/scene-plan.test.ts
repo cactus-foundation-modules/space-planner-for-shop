@@ -22,6 +22,8 @@ function item(id: string, productId: string, overrides: Partial<PlanItem> = {}):
     manualSize: false,
     staged: false,
     modelContext: null,
+    basketLine: null,
+    basketBundle: null,
     ...overrides,
   }
 }

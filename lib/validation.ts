@@ -72,6 +72,22 @@ export const PlanItemSchema = z.object({
     .object({ context: z.string().max(120), extraValueIds: z.array(z.string().max(64)).max(40) })
     .nullable()
     .default(null),
+  // Basket-line snapshots for add-plan-to-basket (see PlanItem). Metas are
+  // opaque replayed bags; the size caps are the only thing asked of them.
+  basketLine: z
+    .object({ lineId: z.string().max(200).nullable(), meta: z.record(z.unknown()).nullable() })
+    .nullable()
+    .default(null),
+  basketBundle: z
+    .array(z.object({
+      productId: z.string().min(1).max(64),
+      lineId: z.string().max(200).nullable(),
+      meta: z.record(z.unknown()).nullable(),
+      qtyPerMain: z.number().int().min(1).max(99),
+    }))
+    .max(20)
+    .nullable()
+    .default(null),
 })
 
 export const PlanItemsSchema = z.object({

@@ -106,6 +106,21 @@ export type PlanItem = {
    * the signature simply draws the base model.
    */
   modelContext: { context: string; extraValueIds: string[] } | null
+  /**
+   * The basket line this item stood for when it was staged, snapshotted so
+   * "add plan to basket" can put back the LINE - identity, personalisation,
+   * grouping meta and all - rather than a bare product id. Null for items
+   * placed from the catalogue, which genuinely are bare products.
+   */
+  basketLine: { lineId: string | null; meta: Record<string, unknown> | null } | null
+  /**
+   * The grouped companion lines that were bought WITH this item but never
+   * staged as items of their own (screens riding inside the combined desk
+   * model, list-only shelves). Snapshotted per ONE unit of this item, so
+   * adding the plan back multiplies them out and the whole set returns to the
+   * basket together. The metas are opaque snapshots - replayed, never read.
+   */
+  basketBundle: Array<{ productId: string; lineId: string | null; meta: Record<string, unknown> | null; qtyPerMain: number }> | null
 }
 
 /**

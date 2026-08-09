@@ -1,6 +1,6 @@
 'use client'
 
-import { addToCart, getCart, subscribeCart } from '@/modules/shop/components/public/cart'
+import { addToCart, cartLineKey, getCart, subscribeCart } from '@/modules/shop/components/public/cart'
 import type { CartLine } from '@/modules/shop/components/public/cart'
 
 // Everything the planner does to the basket goes through shop's own cart
@@ -24,7 +24,17 @@ export function watchCart(callback: () => void): () => void {
   return subscribeCart(callback)
 }
 
-export type PlanCartLine = { productId: string; quantity: number }
+export type PlanCartLine = {
+  productId: string
+  quantity: number
+  // Snapshots carried on the plan's items (see PlanItem.basketLine/basketBundle):
+  // present, the LINE is replayed - identity, personalisation and grouping meta
+  // intact, invisible companions multiplied out - so a desk saved with its
+  // screens returns to the basket as the whole grouped set. Absent, the line is
+  // the plain product id it always was.
+  basketLine?: StagedBasketLine | null
+  basketBundle?: StagedBundleLine[] | null
+}
 
 export type AddPlanResult = { ok: true; added: number } | { ok: false; error: string }
 
@@ -42,9 +52,29 @@ export type AddPlanResult = { ok: true; added: number } | { ok: false; error: st
 export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
   if (lines.length === 0) return { ok: false, error: 'There is nothing in this plan yet.' }
 
+  // Everything about to be written, companions included, so the cap is checked
+  // against the truth. Companion quantities scale with the main line's count.
+  const writes: Array<{ productId: string; quantity: number; lineId?: string; meta?: Record<string, unknown> }> = []
+  for (const line of lines) {
+    writes.push({
+      productId: line.productId,
+      quantity: line.quantity,
+      ...(line.basketLine?.lineId ? { lineId: line.basketLine.lineId } : {}),
+      ...(line.basketLine?.meta ? { meta: line.basketLine.meta } : {}),
+    })
+    for (const companion of line.basketBundle ?? []) {
+      writes.push({
+        productId: companion.productId,
+        quantity: companion.qtyPerMain * line.quantity,
+        ...(companion.lineId ? { lineId: companion.lineId } : {}),
+        ...(companion.meta ? { meta: companion.meta } : {}),
+      })
+    }
+  }
+
   const existing = readCart()
-  const existingIds = new Set(existing.map((line) => line.productId))
-  const newLines = lines.filter((line) => !existingIds.has(line.productId)).length
+  const existingKeys = new Set(existing.map((line) => cartLineKey(line)))
+  const newLines = writes.filter((w) => !existingKeys.has(w.lineId ?? w.productId)).length
 
   if (existing.length + newLines > MEMBER_CART_MAX_LINES) {
     return {
@@ -53,10 +83,10 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
     }
   }
 
-  for (const line of lines) {
-    addToCart(line.productId, line.quantity)
+  for (const write of writes) {
+    addToCart(write.productId, write.quantity, write.lineId || write.meta ? { lineId: write.lineId, meta: write.meta } : undefined)
   }
-  return { ok: true, added: lines.length }
+  return { ok: true, added: writes.length }
 }
 
 // The `modelContext` a line's meta may carry - the 3D module's documented
@@ -70,15 +100,24 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
 //     already inside its main line's combined model (or is a fit-inside part
 //     like a shelf) and must not stage as loose furniture of its own.
 export type StagedModelContext = { context: string; extraValueIds: string[] }
+export type StagedBasketLine = { lineId: string | null; meta: Record<string, unknown> | null }
+export type StagedBundleLine = StagedBasketLine & { productId: string; qtyPerMain: number }
 
 function readLineModelContext(meta: Record<string, unknown> | undefined): {
   staged: StagedModelContext | null
   stageSelf: boolean
+  bundleKey: string | null
+  bundleOf: string | null
+  qtyPerMain: number
 } {
+  const none = { staged: null, stageSelf: true, bundleKey: null, bundleOf: null, qtyPerMain: 1 }
   const raw = meta?.modelContext
-  if (!raw || typeof raw !== 'object') return { staged: null, stageSelf: true }
-  const bag = raw as { contexts?: unknown; extraValueIds?: unknown; stage?: unknown }
-  if (bag.stage === 'none') return { staged: null, stageSelf: false }
+  if (!raw || typeof raw !== 'object') return none
+  const bag = raw as { contexts?: unknown; extraValueIds?: unknown; stage?: unknown; bundleKey?: unknown; bundleOf?: unknown; qtyPerMain?: unknown }
+  const bundleKey = typeof bag.bundleKey === 'string' && bag.bundleKey ? bag.bundleKey : null
+  const bundleOf = typeof bag.bundleOf === 'string' && bag.bundleOf ? bag.bundleOf : null
+  const qtyPerMain = typeof bag.qtyPerMain === 'number' && bag.qtyPerMain >= 1 ? Math.round(bag.qtyPerMain) : 1
+  if (bag.stage === 'none') return { staged: null, stageSelf: false, bundleKey, bundleOf, qtyPerMain }
   if (Array.isArray(bag.contexts) && bag.contexts.length > 0) {
     const contexts = bag.contexts.filter((c): c is string => typeof c === 'string' && !!c)
     const extraValueIds = Array.isArray(bag.extraValueIds)
@@ -86,10 +125,10 @@ function readLineModelContext(meta: Record<string, unknown> | undefined): {
       : []
     if (contexts.length > 0) {
       // The same sorted-join signature p3d matches model tags against.
-      return { staged: { context: [...contexts].sort().join('+'), extraValueIds }, stageSelf: true }
+      return { staged: { context: [...contexts].sort().join('+'), extraValueIds }, stageSelf: true, bundleKey, bundleOf, qtyPerMain }
     }
   }
-  return { staged: null, stageSelf: true }
+  return { ...none, bundleKey, bundleOf, qtyPerMain }
 }
 
 /**
@@ -107,13 +146,54 @@ function readLineModelContext(meta: Record<string, unknown> | undefined): {
  * Add-on lines marked placeable ('self' - a pedestal at an odd quantity) stage
  * exactly like anything else.
  */
-export function cartAsStagedItems(): Array<{ productId: string; index: number; modelContext: StagedModelContext | null }> {
-  const out: Array<{ productId: string; index: number; modelContext: StagedModelContext | null }> = []
-  for (const line of readCart()) {
-    const { staged, stageSelf } = readLineModelContext(line.meta)
+export type StagedEntry = {
+  productId: string
+  index: number
+  modelContext: StagedModelContext | null
+  // The line this instance came from, and - for a line that bundles invisible
+  // companions (screens riding inside the combined desk model) - the
+  // companions themselves per one unit, so add-plan-to-basket can put the
+  // whole set back rather than a bare product id.
+  basketLine: StagedBasketLine
+  basketBundle: StagedBundleLine[] | null
+}
+
+export function cartAsStagedItems(): StagedEntry[] {
+  const out: StagedEntry[] = []
+  const lines = readCart()
+  for (const line of lines) {
+    const { staged, stageSelf, bundleKey } = readLineModelContext(line.meta)
     if (!stageSelf) continue
+
+    // The invisible companions of a bundling line: every line pointing back at
+    // this one's bundle key that does NOT stage as its own item. (A companion
+    // that stages on its own carries its own snapshot on its own instances.)
+    let bundle: StagedBundleLine[] | null = null
+    if (bundleKey) {
+      const companions = lines
+        .filter((other) => {
+          const read = readLineModelContext(other.meta)
+          return read.bundleOf === bundleKey && !read.stageSelf
+        })
+        .map((other) => ({
+          productId: other.productId,
+          lineId: other.lineId ?? null,
+          meta: other.meta ?? null,
+          qtyPerMain: readLineModelContext(other.meta).qtyPerMain,
+        }))
+      if (companions.length > 0) bundle = companions
+    }
+
     const quantity = Math.max(1, Math.min(50, Math.round(line.quantity)))
-    for (let index = 0; index < quantity; index++) out.push({ productId: line.productId, index, modelContext: staged })
+    for (let index = 0; index < quantity; index++) {
+      out.push({
+        productId: line.productId,
+        index,
+        modelContext: staged,
+        basketLine: { lineId: line.lineId ?? null, meta: line.meta ?? null },
+        basketBundle: bundle,
+      })
+    }
   }
   return out
 }

@@ -453,6 +453,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
         dispatch({
           type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true,
           modelContext: entry.modelContext ? { context: entry.modelContext.context, extraValueIds: entry.modelContext.extraValueIds } : null,
+          basketLine: entry.basketLine,
+          basketBundle: entry.basketBundle,
         })
       }
       const missing = new Set(staged.map((entry) => entry.productId).filter((id) => !byId.has(id))).size
@@ -1155,9 +1157,23 @@ export function SpacePlanner(props: SpacePlannerProps) {
   )
 
   const sendToCart = useCallback(() => {
-    const counts = new Map<string, number>()
-    for (const item of placed) counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1)
-    const result = addPlanToCart([...counts.entries()].map(([productId, quantity]) => ({ productId, quantity })))
+    // Instances merge by the LINE they stand for, not the bare product: two
+    // identically-configured desks-with-screens become one line of two (their
+    // companions scaled to match), while a desk saved with different add-ons
+    // stays its own line. Items with no snapshot key by product id, as ever.
+    const grouped = new Map<string, { line: (typeof placed)[number]; quantity: number }>()
+    for (const item of placed) {
+      const key = item.basketLine?.lineId ?? item.productId
+      const entry = grouped.get(key)
+      if (entry) entry.quantity += 1
+      else grouped.set(key, { line: item, quantity: 1 })
+    }
+    const result = addPlanToCart([...grouped.values()].map(({ line, quantity }) => ({
+      productId: line.productId,
+      quantity,
+      basketLine: line.basketLine ?? null,
+      basketBundle: line.basketBundle ?? null,
+    })))
     setMessage(
       result.ok
         ? { tone: 'info', text: `${result.added === 1 ? 'One thing' : `${result.added} things`} added to your basket.` }

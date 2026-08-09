@@ -55,6 +55,8 @@ function item(overrides: Partial<PlanItem> = {}): PlanItem {
     manualSize: false,
     staged: false,
     modelContext: null,
+    basketLine: null,
+    basketBundle: null,
     ...overrides,
   }
 }
