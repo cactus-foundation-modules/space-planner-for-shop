@@ -95,40 +95,76 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
 // may not be installed, and a malformed bag simply reads as no context.
 //
 //   On a MAIN line:  { contexts: string[], extraValueIds: string[] } - the
-//     add-on combination its combined model should be drawn with.
+//     add-on combination its combined model should be drawn with. With
+//     `contextsFrom: 'bundle'` alongside them, that list is a SUMMARY of the
+//     group's own add-on lines and is re-derived from them here instead of
+//     being trusted: a shopper who takes the screens back out on the basket page
+//     is nowhere near the component that wrote it, so the stored list would go
+//     on claiming screens the basket no longer holds.
 //   On an ADD-ON line: { stage: 'none' | 'self' } - 'none' means the item is
 //     already inside its main line's combined model (or is a fit-inside part
-//     like a shelf) and must not stage as loose furniture of its own.
+//     like a shelf) and must not stage as loose furniture of its own. It may
+//     also carry { contextKey, valueIds } - its own contribution to the group's
+//     combined model, which is what the re-derivation above reads.
 export type StagedModelContext = { context: string; extraValueIds: string[] }
 export type StagedBasketLine = { lineId: string | null; meta: Record<string, unknown> | null }
 export type StagedBundleLine = StagedBasketLine & { productId: string; qtyPerMain: number }
 
-function readLineModelContext(meta: Record<string, unknown> | undefined): {
+type ReadLine = {
   staged: StagedModelContext | null
   stageSelf: boolean
   bundleKey: string | null
   bundleOf: string | null
   qtyPerMain: number
-} {
-  const none = { staged: null, stageSelf: true, bundleKey: null, bundleOf: null, qtyPerMain: 1 }
+  /** Set when the main line's contexts are a re-derivable summary of its group. */
+  derivable: boolean
+  /** An add-on line's own contribution to its group's combined model. */
+  contextKey: string | null
+  valueIds: string[]
+}
+
+/** The same sorted-join signature p3d matches model tags against. */
+function toStaged(contexts: string[], extraValueIds: string[]): StagedModelContext | null {
+  const keys = contexts.filter(Boolean)
+  if (keys.length === 0) return null
+  return { context: [...keys].sort().join('+'), extraValueIds: extraValueIds.slice(0, 40) }
+}
+
+function readLineModelContext(meta: Record<string, unknown> | undefined): ReadLine {
+  const none: ReadLine = {
+    staged: null,
+    stageSelf: true,
+    bundleKey: null,
+    bundleOf: null,
+    qtyPerMain: 1,
+    derivable: false,
+    contextKey: null,
+    valueIds: [],
+  }
   const raw = meta?.modelContext
   if (!raw || typeof raw !== 'object') return none
-  const bag = raw as { contexts?: unknown; extraValueIds?: unknown; stage?: unknown; bundleKey?: unknown; bundleOf?: unknown; qtyPerMain?: unknown }
+  const bag = raw as {
+    contexts?: unknown
+    extraValueIds?: unknown
+    stage?: unknown
+    bundleKey?: unknown
+    bundleOf?: unknown
+    qtyPerMain?: unknown
+    contextsFrom?: unknown
+    contextKey?: unknown
+    valueIds?: unknown
+  }
   const bundleKey = typeof bag.bundleKey === 'string' && bag.bundleKey ? bag.bundleKey : null
   const bundleOf = typeof bag.bundleOf === 'string' && bag.bundleOf ? bag.bundleOf : null
   const qtyPerMain = typeof bag.qtyPerMain === 'number' && bag.qtyPerMain >= 1 ? Math.round(bag.qtyPerMain) : 1
-  if (bag.stage === 'none') return { staged: null, stageSelf: false, bundleKey, bundleOf, qtyPerMain }
-  if (Array.isArray(bag.contexts) && bag.contexts.length > 0) {
-    const contexts = bag.contexts.filter((c): c is string => typeof c === 'string' && !!c)
-    const extraValueIds = Array.isArray(bag.extraValueIds)
-      ? bag.extraValueIds.filter((v): v is string => typeof v === 'string').slice(0, 40)
-      : []
-    if (contexts.length > 0) {
-      // The same sorted-join signature p3d matches model tags against.
-      return { staged: { context: [...contexts].sort().join('+'), extraValueIds }, stageSelf: true, bundleKey, bundleOf, qtyPerMain }
-    }
-  }
-  return { ...none, bundleKey, bundleOf, qtyPerMain }
+  const derivable = bag.contextsFrom === 'bundle'
+  const contextKey = typeof bag.contextKey === 'string' && bag.contextKey ? bag.contextKey : null
+  const valueIds = Array.isArray(bag.valueIds) ? bag.valueIds.filter((v): v is string => typeof v === 'string') : []
+  const rest = { bundleKey, bundleOf, qtyPerMain, derivable, contextKey, valueIds }
+  if (bag.stage === 'none') return { ...none, ...rest, stageSelf: false }
+  const contexts = Array.isArray(bag.contexts) ? bag.contexts.filter((c): c is string => typeof c === 'string' && !!c) : []
+  const extraValueIds = Array.isArray(bag.extraValueIds) ? bag.extraValueIds.filter((v): v is string => typeof v === 'string') : []
+  return { ...none, ...rest, staged: toStaged(contexts, extraValueIds) }
 }
 
 /**
@@ -162,26 +198,36 @@ export function cartAsStagedItems(): StagedEntry[] {
   const out: StagedEntry[] = []
   const lines = readCart()
   for (const line of lines) {
-    const { staged, stageSelf, bundleKey } = readLineModelContext(line.meta)
+    const { staged, stageSelf, bundleKey, derivable } = readLineModelContext(line.meta)
     if (!stageSelf) continue
 
     // The invisible companions of a bundling line: every line pointing back at
     // this one's bundle key that does NOT stage as its own item. (A companion
     // that stages on its own carries its own snapshot on its own instances.)
     let bundle: StagedBundleLine[] | null = null
+    let derived: StagedModelContext | null = null
     if (bundleKey) {
-      const companions = lines
-        .filter((other) => {
-          const read = readLineModelContext(other.meta)
-          return read.bundleOf === bundleKey && !read.stageSelf
-        })
-        .map((other) => ({
-          productId: other.productId,
-          lineId: other.lineId ?? null,
-          meta: other.meta ?? null,
-          qtyPerMain: readLineModelContext(other.meta).qtyPerMain,
+      const group = lines.map((other) => ({ other, read: readLineModelContext(other.meta) })).filter((entry) => entry.read.bundleOf === bundleKey)
+      const companions = group
+        .filter((entry) => !entry.read.stageSelf)
+        .map((entry) => ({
+          productId: entry.other.productId,
+          lineId: entry.other.lineId ?? null,
+          meta: entry.other.meta ?? null,
+          qtyPerMain: entry.read.qtyPerMain,
         }))
       if (companions.length > 0) bundle = companions
+
+      // Re-derived from the group as it stands, so an add-on removed on the
+      // basket page stops being drawn on the desk. Only for a main line that
+      // says its list is a summary - anything older keeps the stored list, which
+      // is the only answer it has.
+      if (derivable) {
+        derived = toStaged(
+          group.map((entry) => entry.read.contextKey).filter((key): key is string => !!key),
+          group.flatMap((entry) => entry.read.valueIds),
+        )
+      }
     }
 
     const quantity = Math.max(1, Math.min(50, Math.round(line.quantity)))
@@ -189,7 +235,7 @@ export function cartAsStagedItems(): StagedEntry[] {
       out.push({
         productId: line.productId,
         index,
-        modelContext: staged,
+        modelContext: derivable ? derived : staged,
         basketLine: { lineId: line.lineId ?? null, meta: line.meta ?? null },
         basketBundle: bundle,
       })
