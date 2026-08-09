@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // The render log, with its errors in plain sight, and the switch that turns the
 // whole thing on.
@@ -41,40 +41,70 @@ export function RendersScreen() {
   const [token, setToken] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
+  const mounted = useRef(true)
+  useEffect(() => () => { mounted.current = false }, [])
 
-  useEffect(() => {
-    void (async () => {
+  const load = useCallback(async () => {
+    try {
       const [jobsRes, workerRes] = await Promise.all([
         fetch('/api/m/space-planner-for-shop/admin/renders'),
         fetch('/api/m/space-planner-for-shop/admin/render-worker'),
       ])
+      if (!mounted.current) return
       if (jobsRes.ok) {
         const data = (await jobsRes.json()) as { jobs: Job[] }
-        setJobs(data.jobs)
+        if (mounted.current) setJobs(data.jobs)
       }
-      if (workerRes.ok) setWorker((await workerRes.json()) as WorkerView)
-      setLoading(false)
-    })()
+      if (workerRes.ok && mounted.current) setWorker((await workerRes.json()) as WorkerView)
+      if (!jobsRes.ok && !workerRes.ok) setProblem('This screen would not load. Check the connection and refresh.')
+    } catch {
+      if (mounted.current) setProblem('This screen would not load. Check the connection and refresh.')
+    } finally {
+      if (mounted.current) setLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    void (async () => {
+      await load()
+    })()
+  }, [load])
+
+  // While a picture is being made the log keeps itself current, so the owner
+  // watching one is not left pressing refresh to find out how it went.
+  const anyLive = jobs.some((job) => job.status === 'QUEUED' || job.status === 'RUNNING')
+  useEffect(() => {
+    if (!anyLive) return
+    const timer = setInterval(() => void load(), 5000)
+    return () => clearInterval(timer)
+  }, [anyLive, load])
 
   const setUp = async () => {
     setBusy(true)
     setProblem(null)
     setNotice(null)
-    const response = await fetch('/api/m/space-planner-for-shop/admin/render-worker', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(token.trim() ? { token: token.trim() } : {}),
-    })
-    const data = (await response.json().catch(() => null)) as (WorkerView & { error?: string }) | null
-    if (!response.ok) {
-      setProblem(data?.error ?? 'That did not work.')
-    } else if (data) {
-      setWorker(data)
-      setToken('')
-      setNotice('All set. Nothing is running yet - a machine is made when somebody asks for a picture, and it puts itself away afterwards.')
+    try {
+      const response = await fetch('/api/m/space-planner-for-shop/admin/render-worker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(token.trim() ? { token: token.trim() } : {}),
+      })
+      const data = (await response.json().catch(() => null)) as (WorkerView & { error?: string }) | null
+      if (!mounted.current) return
+      if (!response.ok) {
+        setProblem(data?.error ?? 'That did not work.')
+      } else if (data) {
+        setWorker(data)
+        setToken('')
+        setNotice('All set. Nothing is running yet - a machine is made when somebody asks for a picture, and it puts itself away afterwards.')
+      }
+    } catch {
+      // Without this, a network drop left the button saying "Building it…"
+      // for ever over a service that may or may not exist.
+      if (mounted.current) setProblem('We lost the connection while setting up. Refresh to see whether it finished.')
+    } finally {
+      if (mounted.current) setBusy(false)
     }
-    setBusy(false)
   }
 
   const takeDown = async () => {
@@ -82,17 +112,28 @@ export function RendersScreen() {
     setBusy(true)
     setProblem(null)
     setNotice(null)
-    const response = await fetch('/api/m/space-planner-for-shop/admin/render-worker', { method: 'DELETE' })
-    const data = (await response.json().catch(() => null)) as (WorkerView & { warning?: string }) | null
-    if (data) setWorker(data)
-    if (data?.warning) setProblem(data.warning)
-    else setNotice('Taken down.')
-    setBusy(false)
+    try {
+      const response = await fetch('/api/m/space-planner-for-shop/admin/render-worker', { method: 'DELETE' })
+      const data = (await response.json().catch(() => null)) as (WorkerView & { warning?: string }) | null
+      if (!mounted.current) return
+      if (data) setWorker(data)
+      if (data?.warning) setProblem(data.warning)
+      else setNotice('Taken down.')
+    } catch {
+      if (mounted.current) setProblem('We lost the connection while taking it down. Refresh to see where it got to.')
+    } finally {
+      if (mounted.current) setBusy(false)
+    }
   }
 
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
-      <h1 style={{ margin: 0 }}>Pictures</h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+        <h1 style={{ margin: 0 }}>Pictures</h1>
+        <button type="button" className="btn" onClick={() => void load()} disabled={loading}>
+          Refresh
+        </button>
+      </div>
 
       {worker && <SetUpCard worker={worker} token={token} setToken={setToken} onSetUp={setUp} onTakeDown={takeDown} busy={busy} />}
 

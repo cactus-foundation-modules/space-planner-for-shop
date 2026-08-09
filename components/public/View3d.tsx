@@ -277,6 +277,12 @@ export function View3d(props: View3dProps) {
       canvas.removeEventListener('webglcontextlost', onLost)
       canvas.removeEventListener('webglcontextrestored', onRestored)
       controls.dispose()
+      // The room and item groups own geometries and cloned materials; the
+      // renderer's dispose drops the context but not their JS-side buffers, and
+      // this view unmounts on every switch back to the flat plan.
+      const current = stateRef.current
+      if (current?.room) disposeGroup(current.room)
+      if (current?.items) disposeGroup(current.items)
       renderer.dispose()
       stateRef.current = null
     }

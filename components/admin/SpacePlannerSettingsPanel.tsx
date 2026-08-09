@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SplConfig } from '@/modules/space-planner-for-shop/lib/config'
 
 // The module's settings, hosted inside Shop settings (manifest settingsTabs >
@@ -12,30 +12,51 @@ export function SpacePlannerSettingsPanel() {
   const [renderWorker, setRenderWorker] = useState(false)
   const [deliveryAvailable, setDeliveryAvailable] = useState(false)
   const [status, setStatus] = useState('')
+  const [failed, setFailed] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const mounted = useRef(true)
+  useEffect(() => () => { mounted.current = false }, [])
 
   useEffect(() => {
     void (async () => {
-      const response = await fetch('/api/m/space-planner-for-shop/admin/settings')
-      if (!response.ok) return
-      const data = (await response.json()) as { config: SplConfig; renderWorkerConfigured: boolean; deliveryEstimatesAvailable: boolean }
-      setConfig(data.config)
-      setRenderWorker(data.renderWorkerConfigured)
-      setDeliveryAvailable(data.deliveryEstimatesAvailable)
+      try {
+        const response = await fetch('/api/m/space-planner-for-shop/admin/settings')
+        if (!response.ok) throw new Error()
+        const data = (await response.json()) as { config: SplConfig; renderWorkerConfigured: boolean; deliveryEstimatesAvailable: boolean }
+        if (!mounted.current) return
+        setConfig(data.config)
+        setRenderWorker(data.renderWorkerConfigured)
+        setDeliveryAvailable(data.deliveryEstimatesAvailable)
+      } catch {
+        // "Loading…" for ever is a lie with a spinner. Say it failed.
+        if (mounted.current) setFailed(true)
+      }
     })()
   }, [])
 
+  if (failed) return <p style={{ color: 'var(--color-danger)' }}>The settings would not load. Check the connection and refresh the page.</p>
   if (!config) return <p style={{ color: 'var(--color-text-muted)' }}>Loading…</p>
 
   const patch = (fields: Partial<SplConfig>) => setConfig({ ...config, ...fields })
 
   const save = async () => {
+    // One save at a time: two in flight can land out of order, and the stale
+    // one wins whichever the owner pressed last.
+    if (saving) return
+    setSaving(true)
     setStatus('Saving…')
-    const response = await fetch('/api/m/space-planner-for-shop/admin/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config),
-    })
-    setStatus(response.ok ? 'Saved.' : 'That did not save. Try again.')
+    try {
+      const response = await fetch('/api/m/space-planner-for-shop/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      })
+      if (mounted.current) setStatus(response.ok ? 'Saved.' : 'That did not save. Try again.')
+    } catch {
+      if (mounted.current) setStatus('That did not save. Check the connection and try again.')
+    } finally {
+      if (mounted.current) setSaving(false)
+    }
   }
 
   return (
@@ -119,8 +140,10 @@ export function SpacePlannerSettingsPanel() {
       </section>
 
       <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-        <button type="button" className="btn btn-primary" onClick={() => void save()}>Save settings</button>
-        {status && <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>{status}</span>}
+        <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving}>
+          {saving ? 'Saving…' : 'Save settings'}
+        </button>
+        {status && <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }} role="status">{status}</span>}
       </div>
     </div>
   )
@@ -160,10 +183,13 @@ function NumberField(props: { label: string; value: number; onChange: (value: nu
       <input
         className="form-input"
         type="number"
+        min={0}
         value={props.value}
         onChange={(event) => {
           const value = Number(event.target.value)
-          if (Number.isFinite(value)) props.onChange(value)
+          // Every number on this panel is a count or a millimetre figure, and
+          // a negative one of either is a typo the server would only bounce.
+          if (Number.isFinite(value) && value >= 0) props.onChange(value)
         }}
       />
     </label>

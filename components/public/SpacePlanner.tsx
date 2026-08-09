@@ -85,6 +85,62 @@ async function waitForCapture(
   return null
 }
 
+/**
+ * Keyboard containment for the planner's dialogs.
+ *
+ * Three jobs, none optional for a modal that claims aria-modal: something
+ * inside gets focus when it opens (unless React's own autoFocus already gave it
+ * out), Tab cycles within it rather than wandering off into the page behind,
+ * and whatever had focus before it opened gets it back when it closes. Escape
+ * closes the dialog itself and stops there, so the global Escape handler does
+ * not also clear selections behind it.
+ */
+function useDialogFocus<T extends HTMLElement>(onClose?: () => void) {
+  const ref = useRef<T | null>(null)
+  const closeRef = useRef(onClose)
+  // In an effect rather than during render - the rule is real, and the handler
+  // below only reads this after the commit anyway.
+  useEffect(() => {
+    closeRef.current = onClose
+  })
+
+  useEffect(() => {
+    const node = ref.current
+    if (!node) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const selector = 'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    if (!node.contains(document.activeElement)) {
+      node.querySelector<HTMLElement>(selector)?.focus()
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && closeRef.current) {
+        event.stopPropagation()
+        closeRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusables = [...node.querySelectorAll<HTMLElement>(selector)]
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    node.addEventListener('keydown', onKey)
+    return () => {
+      node.removeEventListener('keydown', onKey)
+      opener?.focus()
+    }
+  }, [])
+
+  return ref
+}
+
 /** One resolved model as the browser holds it - see lib/model-resolver's ClientModel. */
 type PlannerModel = {
   url: string
@@ -203,6 +259,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
    * state would do.
    */
   const roomIdRef = useRef<string | null>(props.openPlan?.roomId ?? null)
+  /** Whether a save is in flight - see savePlan for what two at once did. */
+  const savingRef = useRef(false)
   // The names travel with the plan. Saving over somebody's "Ground floor, east
   // wing" and calling it "My space" would be a small theft.
   const [roomName, setRoomName] = useState(props.openPlan?.roomName ?? 'My space')
@@ -220,14 +278,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [wallEdit, setWallEdit] = useState<{ index: number; lengthMm: number } | null>(null)
   const [roomEdit, setRoomEdit] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
-  /**
-   * Whether the side panel has taken most of a narrow screen.
-   *
-   * On a phone the workspace splits room-above, panel-below, and the panel's
-   * share is enough to pick from but not to browse in. The drag-handle bar
-   * toggles this; placing anything switches it back off, because the next thing
-   * a shopper wants to see after adding a desk is the desk.
-   */
+  /** Whether the start-again confirmation is up. */
   const [startAgain, setStartAgain] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
@@ -775,6 +826,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
       window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
       return null
     }
+    // One save at a time. Two clicks of Save in quick succession both saw "no
+    // room yet" and each made one - the member ended up with two identical
+    // spaces and their layout filed under whichever finished second.
+    if (savingRef.current) return null
+    savingRef.current = true
     setMessage(null)
     try {
       let roomId = savedRoomId
@@ -790,11 +846,18 @@ export function SpacePlanner(props: SpacePlannerProps) {
         setSavedRoomId(roomId)
         roomIdRef.current = roomId
       } else {
-        await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
+        const roomResponse = await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: roomName, notes: '', geometry: state.geometry }),
         })
+        // Checked, not assumed. This response used to be dropped on the floor,
+        // so a refused room update - the walls, the doors, the columns - saved
+        // the furniture over the OLD room and told the shopper all was well.
+        if (!roomResponse.ok) {
+          const roomData = (await roomResponse.json().catch(() => null)) as { error?: string } | null
+          throw new Error(roomData?.error ?? 'Could not save the room')
+        }
       }
 
       const body = JSON.stringify({ name: planName, items: toPlanItems(state) })
@@ -813,6 +876,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
     } catch (error) {
       setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not save that just now.' })
       return null
+    } finally {
+      savingRef.current = false
     }
   }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
 
@@ -1113,7 +1178,6 @@ export function SpacePlanner(props: SpacePlannerProps) {
           setStage('plan')
           planImage = await waitForCapture(capturePlan)
         }
-        setStage(stageBefore)
 
         const planId = await savePlan({ quiet: true })
         if (!planId) return
@@ -1150,6 +1214,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
       } catch (error) {
         setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not make that PDF just now.' })
       } finally {
+        // Put the workspace back whatever happened. The restores used to sit on
+        // the success path only, so a capture that threw left the shopper
+        // staring at whichever view the export had flicked to, in whichever
+        // projection the last ticked viewpoint wore.
+        setStage(stageBefore)
+        setPerspective(perspectiveBefore)
         setExportBusy(false)
       }
     },
@@ -1195,6 +1265,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
         // A column picked out on the plan takes the toolbar over while it is
         // selected, so there has to be a key that hands the toolbar back.
         setObstructionSelection(null)
+        setOpeningSelection(null)
+        // And the room-editing modes themselves: Escape is the universal "out",
+        // and a mode with no keyboard exit strands anybody who found Doors &
+        // windows and lost the Done button under the message that opened it.
+        if (planMode === 'draw') cancelDrawing()
+        else if (planMode !== 'furnish') setPlanMode('furnish')
         // The photo dialog says in its own wording that closing it abandons
         // nothing, so Escape may always close it. The export dialog is only
         // held open while a PDF is actually being made - closing it then would
@@ -1246,7 +1322,19 @@ export function SpacePlanner(props: SpacePlannerProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [state, history, commit, applyStep, exportBusy, obstructionSelection])
+  }, [state, history, commit, applyStep, exportBusy, obstructionSelection, planMode, cancelDrawing])
+
+  // A confirmation is read once; an instruction is read for as long as the job
+  // takes. So the passing notes - "Saved.", "added to your basket", the
+  // no-clear-floor warning - take themselves away, and anything shown while the
+  // room itself is being edited stays put, because that is the mode whose
+  // messages are directions rather than news. Errors always stay: they name
+  // something that needs doing.
+  useEffect(() => {
+    if (!message || message.tone !== 'info' || planMode !== 'furnish') return
+    const timer = setTimeout(() => setMessage(null), 8000)
+    return () => clearTimeout(timer)
+  }, [message, planMode])
 
   // ---- render -----------------------------------------------------------
 
@@ -1747,6 +1835,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
  */
 function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onCancel: () => void; onSave: (mm: number) => void }) {
   const fieldId = useId()
+  const dialogRef = useDialogFocus<HTMLFormElement>(props.onCancel)
   const [value, setValue] = useState(() => formatLength(props.lengthMm, props.units))
   const [error, setError] = useState('')
 
@@ -1762,6 +1851,7 @@ function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onC
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
       <form
+        ref={dialogRef}
         className="spl-dialog"
         role="dialog"
         aria-modal="true"
@@ -1804,6 +1894,7 @@ function ExportDialog(props: {
   onExport: (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean; viewIds: string[] }) => void
 }) {
   const ids = useId()
+  const dialogRef = useDialogFocus<HTMLDivElement>(props.busy ? undefined : props.onCancel)
   const [includePlanView, setIncludePlanView] = useState(true)
   const [include3dView, setInclude3dView] = useState(false)
   const [includeQuote, setIncludeQuote] = useState(false)
@@ -1815,7 +1906,7 @@ function ExportDialog(props: {
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !props.busy) props.onCancel() }}>
-      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Export as a PDF">
+      <div ref={dialogRef} className="spl-dialog" role="dialog" aria-modal="true" aria-label="Export as a PDF">
         <h2>Save this as a PDF</h2>
         <p className="spl-note">The room&apos;s measurements and everything in it, priced, are always included.</p>
 
@@ -1945,6 +2036,7 @@ function PhotoDialog(props: {
    * inside a desk.
    */
   const [from, setFrom] = useState<string>(props.currentCamera ? 'here' : 'wall')
+  const dialogRef = useDialogFocus<HTMLDivElement>(busy ? undefined : props.onClose)
 
   const live = jobs.find((job) => job.status === 'QUEUED' || job.status === 'RUNNING') ?? null
   const liveId = live?.id ?? ''
@@ -2030,7 +2122,7 @@ function PhotoDialog(props: {
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
-      <div className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="A photograph of your room">
+      <div ref={dialogRef} className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="A photograph of your room">
         <h2>A photograph of your room</h2>
         <p className="spl-note">
           We build the room again properly and take a picture of it, which takes a few minutes. You do not have to sit and
@@ -2360,11 +2452,12 @@ function LengthField(props: { label: string; mm: number; units: RoomGeometry['un
  */
 function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onConfirm: (clearItems: boolean) => void }) {
   const fieldId = useId()
+  const dialogRef = useDialogFocus<HTMLDivElement>(props.onCancel)
   const [clearItems, setClearItems] = useState(false)
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
-      <div className="spl-dialog" role="dialog" aria-modal="true" aria-label="Start again">
+      <div ref={dialogRef} className="spl-dialog" role="dialog" aria-modal="true" aria-label="Start again">
         <h2>Start again?</h2>
         <p className="spl-note">
           {props.itemCount === 0
@@ -2399,12 +2492,14 @@ function RoomDialog(props: {
   onDraw: () => void
 }) {
   const fieldId = useId()
+  const dialogRef = useDialogFocus<HTMLFormElement>(props.onCancel)
   const [value, setValue] = useState(() => formatLength(props.geometry.ceilingMm, props.geometry.units))
   const [error, setError] = useState('')
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) props.onCancel() }}>
       <form
+        ref={dialogRef}
         className="spl-dialog"
         role="dialog"
         aria-modal="true"
@@ -2533,6 +2628,13 @@ function FirstRun(props: {
               const c = parseLengthMm(ceiling)
               if (!w || !d || !c || w < 500 || d < 500) {
                 setError('One of those did not read as a length. Try something like 4.2m or 4200.')
+                return
+              }
+              if (w > 100_000 || d > 100_000) {
+                // A typo, not a warehouse: 4200m reads as a length and draws a
+                // room the grid can barely address. The geometry validators
+                // catch this on every other path in; this is the one they miss.
+                setError('That is over 100 m on a side. If the space really is that big, plan it in sections.')
                 return
               }
               props.onReady({
@@ -2842,11 +2944,13 @@ function ItemListPanel(props: {
             <th scope="col">Item</th>
             <th scope="col" className="spl-num">Qty</th>
             <th scope="col" className="spl-num">Each</th>
+            <th scope="col" className="spl-num">Total</th>
           </tr>
         </thead>
         <tbody>
           {rows.map(([productId, ids]) => {
             const allSelected = ids.length > 0 && ids.every((id) => selectedSet.has(id))
+            const each = props.products[productId]?.price ?? 0
             return (
               <tr
                 key={productId}
@@ -2869,6 +2973,10 @@ function ItemListPanel(props: {
                 </td>
                 <td className="spl-num">{ids.length}</td>
                 <td className="spl-num">{props.products[productId]?.priceFormatted ?? '-'}</td>
+                {/* The line total is the number a buyer of twelve desks actually
+                    wants - "each" alone leaves them doing the twelve-times table
+                    against a screen. */}
+                <td className="spl-num">{each > 0 ? formatMoney(each * ids.length, props.currencySymbol) : '-'}</td>
               </tr>
             )
           })}
@@ -2878,6 +2986,7 @@ function ItemListPanel(props: {
             <tr>
               <td>Roughly</td>
               <td className="spl-num">{props.items.length}</td>
+              <td className="spl-num" aria-hidden="true" />
               <td className="spl-num">{formatMoney(total, props.currencySymbol)}</td>
             </tr>
           </tfoot>

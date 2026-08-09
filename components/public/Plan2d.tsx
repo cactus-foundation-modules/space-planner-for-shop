@@ -161,12 +161,16 @@ export function Plan2d(props: Plan2dProps) {
   /** The turn in progress: which item, where it and the pointer started, and how far it has come. */
   const rotateRef = useRef<{ id: string; startYaw: number; startAngleDeg: number; appliedDeg?: number } | null>(null)
   /** The door or window being slid along its wall. */
-  const openingDragRef = useRef<{ id: string; wallIndex: number; grabOffsetMm: number } | null>(null)
+  const openingDragRef = useRef<{ id: string; wallIndex: number; grabOffsetMm: number; moved: boolean } | null>(null)
   /** The column being dragged across the floor. */
   const obstructionDragRef = useRef<{ id: string; lastX: number; lastY: number; moved: boolean } | null>(null)
   /** The corner being edited in shape mode, and the outline being drawn in draw mode. */
   const [corner, setCorner] = useState<number | null>(null)
   const cornerDragRef = useRef<number | null>(null)
+  /** Whether the grabbed corner has actually gone anywhere - a click on a corner
+   * is a selection, and settling (or undo-banking) a drag that never happened
+   * marked the plan dirty for looking at it. */
+  const cornerMovedRef = useRef(false)
   const [draft, setDraft] = useState<Vertex[]>([])
   const [hover, setHover] = useState<Vertex | null>(null)
 
@@ -687,19 +691,41 @@ export function Plan2d(props: Plan2dProps) {
     const { x, y } = localPoint(event)
     pointersRef.current.set(event.pointerId, { x, y })
 
-    if (props.mode === 'draw') {
-      // Drawing is a sequence of clicks, not a drag: a drag on a phone is how you
-      // scroll, and a room drawn by dragging is a room you cannot correct.
-      const point = snapDraw(toPlan(x, y), draft[draft.length - 1])
-      const first = draft[0]
-      if (first && draft.length >= 3) {
-        const at = toScreen(first)
-        if (Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX) {
-          props.onDrawDone(draft)
-          return
-        }
+    // A second finger landing ANYWHERE is a pinch, whatever the mode. It used
+    // to be recognised only while furnishing, so on a phone the room could not
+    // be pinch-zoomed while being drawn - and worse, the second finger's landing
+    // was read as another tap: a stray corner in draw mode, a stray door in
+    // openings mode, a stray column in obstructions mode. Whatever the first
+    // finger had started is abandoned; anything it had already moved is closed
+    // off properly, so the undo step and the unsaved-work flag are not lost.
+    if (pointersRef.current.size === 2) {
+      const [a, b] = [...pointersRef.current.values()]
+      if (a && b) pinchRef.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom: zoomRef.current }
+      if (dragRef.current?.kind === 'items' && dragRef.current.moved) props.onDragEnd()
+      dragRef.current = null
+      if ((rotateRef.current?.appliedDeg ?? 0) !== 0) props.onDragEnd()
+      rotateRef.current = null
+      if (openingDragRef.current?.moved) props.onDragEnd()
+      openingDragRef.current = null
+      if (obstructionDragRef.current?.moved) props.onDragEnd()
+      obstructionDragRef.current = null
+      if (cornerDragRef.current !== null) {
+        cornerDragRef.current = null
+        // Settle only a drag that went somewhere - a grabbed-but-unmoved corner
+        // has nothing to tidy, and settling it would mark the plan dirty.
+        if (cornerMovedRef.current) props.onShape(props.geometry.vertices, true)
+        cornerMovedRef.current = false
       }
-      setDraft([...draft, point])
+      return
+    }
+
+    if (props.mode === 'draw') {
+      // A tap puts a corner down; a drag pans. Decided on RELEASE rather than
+      // on touch - deciding on touch made panning impossible while drawing,
+      // and the room being drawn is usually bigger than the phone screen it is
+      // being drawn on. See onPointerUp for the corner itself.
+      dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
+      event.currentTarget.setPointerCapture(event.pointerId)
       return
     }
 
@@ -723,22 +749,13 @@ export function Plan2d(props: Plan2dProps) {
           // Where along the opening it was grabbed, so it does not jump to
           // centre itself under the finger on the first pixel of the drag.
           grabOffsetMm: along === null ? grabbed.widthMm / 2 : along - grabbed.offsetMm,
+          moved: false,
         }
         event.currentTarget.setPointerCapture(event.pointerId)
-        props.onDragStart()
         return
       }
-
-      const wall = nearestWallWithin(props.geometry, point, WALL_HIT_PX * 2 / view.scale)
-      if (wall) {
-        const along = offsetAlongWall(props.geometry.vertices, wall.index, point)
-        if (along !== null) {
-          props.onDragStart()
-          props.onAddOpening?.(wall.index, along)
-        }
-        return
-      }
-      props.onSelectOpening?.(null)
+      // Adding happens on release - see onPointerUp - so a drag can pan and a
+      // pinch can zoom without either salting the walls with doors.
       dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
       event.currentTarget.setPointerCapture(event.pointerId)
       return
@@ -752,15 +769,10 @@ export function Plan2d(props: Plan2dProps) {
         props.onSelectObstruction?.(grabbed.id)
         obstructionDragRef.current = { id: grabbed.id, lastX: point.x, lastY: point.y, moved: false }
         event.currentTarget.setPointerCapture(event.pointerId)
-        props.onDragStart()
         return
       }
-      if (pointInPolygon(point, props.geometry.vertices)) {
-        props.onDragStart()
-        props.onAddObstruction?.(Math.round(point.x), Math.round(point.y))
-        return
-      }
-      props.onSelectObstruction?.(null)
+      // Adding happens on release, so dragging across the floor pans rather
+      // than planting a column at the first touch.
       dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
       event.currentTarget.setPointerCapture(event.pointerId)
       return
@@ -774,21 +786,13 @@ export function Plan2d(props: Plan2dProps) {
       if (index >= 0) {
         setCorner(index)
         cornerDragRef.current = index
+        cornerMovedRef.current = false
         event.currentTarget.setPointerCapture(event.pointerId)
         return
       }
       setCorner(null)
       dragRef.current = { kind: 'pan', ids: [], startX: x, startY: y, lastX: x, lastY: y, moved: false }
       event.currentTarget.setPointerCapture(event.pointerId)
-      return
-    }
-    if (pointersRef.current.size === 2) {
-      // Second finger down: this is a pinch, not a drag. Whatever the first
-      // finger had started is abandoned rather than fought with.
-      const [a, b] = [...pointersRef.current.values()]
-      if (a && b) pinchRef.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom: zoomRef.current }
-      dragRef.current = null
-      rotateRef.current = null
       return
     }
 
@@ -803,7 +807,6 @@ export function Plan2d(props: Plan2dProps) {
           startYaw: sole.yaw,
           startAngleDeg: (Math.atan2(point.y - sole.y, point.x - sole.x) * 180) / Math.PI,
         }
-        props.onDragStart()
         event.currentTarget.setPointerCapture(event.pointerId)
         return
       }
@@ -821,8 +824,12 @@ export function Plan2d(props: Plan2dProps) {
       props.onSelect(ids)
       // A column and a desk are never both the thing being edited.
       props.onSelectObstruction?.(null)
+      // The undo step is banked when the drag actually MOVES - see
+      // onPointerMove. Banking it here recorded a step for every plain
+      // selection click, and each one burnt an undo slot on a state identical
+      // to the last: press undo after three clicks and nothing appeared to
+      // happen three times.
       dragRef.current = { kind: 'items', ids, startX: x, startY: y, lastX: x, lastY: y, moved: false }
-      props.onDragStart()
     } else {
       // No furniture here - but there may be a column. Tested AFTER the
       // furniture on purpose: a column is a fact about the building and the
@@ -837,7 +844,6 @@ export function Plan2d(props: Plan2dProps) {
         props.onSelectObstruction?.(column.id)
         obstructionDragRef.current = { id: column.id, lastX: point.x, lastY: point.y, moved: false }
         event.currentTarget.setPointerCapture(event.pointerId)
-        props.onDragStart()
         return
       }
       props.onSelectObstruction?.(null)
@@ -850,7 +856,9 @@ export function Plan2d(props: Plan2dProps) {
     const { x, y } = localPoint(event)
     if (pointersRef.current.has(event.pointerId)) pointersRef.current.set(event.pointerId, { x, y })
 
-    if (props.mode === 'draw') {
+    if (props.mode === 'draw' && !dragRef.current && !pinchRef.current) {
+      // The dashed preview wall, following a pointer that is merely hovering.
+      // While a finger or button is down the gesture below owns the pointer.
       setHover(snapDraw(toPlan(x, y), draft[draft.length - 1]))
       return
     }
@@ -858,7 +866,16 @@ export function Plan2d(props: Plan2dProps) {
     const sliding = openingDragRef.current
     if (sliding) {
       const along = offsetAlongWall(props.geometry.vertices, sliding.wallIndex, toPlan(x, y))
-      if (along !== null) props.onMoveOpening?.(sliding.id, Math.round(along - sliding.grabOffsetMm))
+      if (along !== null) {
+        // The undo step is banked on the first real movement, not on the grab:
+        // tapping a door to select it used to burn an undo slot and mark the
+        // plan dirty without anything having changed.
+        if (!sliding.moved) {
+          sliding.moved = true
+          props.onDragStart()
+        }
+        props.onMoveOpening?.(sliding.id, Math.round(along - sliding.grabOffsetMm))
+      }
       return
     }
 
@@ -870,7 +887,10 @@ export function Plan2d(props: Plan2dProps) {
       if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return
       carrying.lastX = point.x
       carrying.lastY = point.y
-      carrying.moved = true
+      if (!carrying.moved) {
+        carrying.moved = true
+        props.onDragStart()
+      }
       props.onMoveObstruction?.(carrying.id, dx, dy)
       return
     }
@@ -890,6 +910,9 @@ export function Plan2d(props: Plan2dProps) {
       // pointer does, and a delta taken from a stale angle turns twice.
       const delta = target - turning.startYaw - (turning.appliedDeg ?? 0)
       if (Math.abs(delta) < 0.01) return
+      // First actual turn of this gesture: bank the undo step now, so a press
+      // on the handle that never turned anything banks nothing.
+      if ((turning.appliedDeg ?? 0) === 0) props.onDragStart()
       turning.appliedDeg = (turning.appliedDeg ?? 0) + delta
       props.onRotateItems([turning.id], delta, false)
       return
@@ -898,6 +921,7 @@ export function Plan2d(props: Plan2dProps) {
     const dragging = cornerDragRef.current
     if (dragging !== null) {
       const point = snapDraw(toPlan(x, y), props.geometry.vertices[(dragging + props.geometry.vertices.length - 1) % props.geometry.vertices.length])
+      cornerMovedRef.current = true
       const next = props.geometry.vertices.map((vertex, index) => (index === dragging ? point : vertex))
       props.onShape(next, false)
       return
@@ -922,10 +946,22 @@ export function Plan2d(props: Plan2dProps) {
     if (Math.abs(dxPx) < 0.5 && Math.abs(dyPx) < 0.5) return
     drag.lastX = x
     drag.lastY = y
-    if (Math.hypot(x - drag.startX, y - drag.startY) > 3) drag.moved = true
 
     if (drag.kind === 'pan') {
+      if (Math.hypot(x - drag.startX, y - drag.startY) > 3) drag.moved = true
       setView((current) => ({ ...current, offsetX: current.offsetX + dxPx, offsetY: current.offsetY + dyPx }))
+      return
+    }
+
+    // A few pixels of slop separate a click from a drag, and the undo step is
+    // banked the moment the drag declares itself - never on the click. The
+    // accumulated offset is applied in one go on that first step, so the slop
+    // costs no distance.
+    if (!drag.moved) {
+      if (Math.hypot(x - drag.startX, y - drag.startY) <= 3) return
+      drag.moved = true
+      props.onDragStart()
+      props.onDragItems(drag.ids, (x - drag.startX) / view.scale, (y - drag.startY) / view.scale, !event.altKey)
       return
     }
     // Holding alt escapes the snapping, which is what stops a snap being an
@@ -939,9 +975,12 @@ export function Plan2d(props: Plan2dProps) {
     if (pointersRef.current.size < 2) pinchRef.current = null
 
     if (openingDragRef.current) {
+      const slid = openingDragRef.current.moved
       openingDragRef.current = null
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-      props.onDragEnd()
+      // A tap that only selected the door ends nothing: the gesture is only a
+      // gesture once it has moved something.
+      if (slid) props.onDragEnd()
       return
     }
 
@@ -962,10 +1001,14 @@ export function Plan2d(props: Plan2dProps) {
     }
 
     if (cornerDragRef.current !== null) {
+      const movedCorner = cornerMovedRef.current
+      cornerMovedRef.current = false
       cornerDragRef.current = null
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-      // Settle on release, never during: see the reducer's set-shape.
-      props.onShape(props.geometry.vertices, true)
+      // Settle on release, never during: see the reducer's set-shape. And only
+      // a drag that went somewhere - settling a corner that was merely clicked
+      // marked the plan dirty for looking at it.
+      if (movedCorner) props.onShape(props.geometry.vertices, true)
       return
     }
 
@@ -982,6 +1025,50 @@ export function Plan2d(props: Plan2dProps) {
     }
 
     if (drag.kind === 'items') return
+
+    // A tap - the pointer went down and came up without going anywhere. What it
+    // means depends on the mode, and doing it HERE rather than on the way down
+    // is what lets the same finger pan and pinch in every mode.
+
+    if (props.mode === 'draw') {
+      const point = snapDraw(toPlan(x, y), draft[draft.length - 1])
+      const first = draft[0]
+      if (first && draft.length >= 3) {
+        const at = toScreen(first)
+        if (Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX) {
+          props.onDrawDone(draft)
+          return
+        }
+      }
+      setDraft([...draft, point])
+      return
+    }
+
+    if (props.mode === 'openings') {
+      const point = toPlan(x, y)
+      const wall = nearestWallWithin(props.geometry, point, WALL_HIT_PX * 2 / view.scale)
+      if (wall) {
+        const along = offsetAlongWall(props.geometry.vertices, wall.index, point)
+        if (along !== null) {
+          props.onDragStart()
+          props.onAddOpening?.(wall.index, along)
+          return
+        }
+      }
+      props.onSelectOpening?.(null)
+      return
+    }
+
+    if (props.mode === 'obstructions') {
+      const point = toPlan(x, y)
+      if (pointInPolygon(point, props.geometry.vertices)) {
+        props.onDragStart()
+        props.onAddObstruction?.(Math.round(point.x), Math.round(point.y))
+        return
+      }
+      props.onSelectObstruction?.(null)
+      return
+    }
 
     // A click on bare floor. Next to a wall it opens that wall's length;
     // anywhere else it clears the selection. The tolerance is in screen pixels,

@@ -18,8 +18,13 @@ import { sweepOrphanMachines } from '@/modules/space-planner-for-shop/lib/fly/re
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
+  // The same gate every other module cron on this platform keeps: no secret
+  // configured means no nightly run, never an open door. Vercel appends
+  // `Authorization: Bearer $CRON_SECRET` to its own cron requests when the
+  // variable is set.
   const secret = process.env.CRON_SECRET
-  if (secret && request.headers.get('authorization') !== `Bearer ${secret}`) {
+  if (!secret) return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
+  if (request.headers.get('authorization') !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Rooms & plans.
 //
@@ -30,20 +30,36 @@ export function PlansScreen() {
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [problem, setProblem] = useState('')
+  // Only the latest request writes: typing and paging overlap, and responses
+  // come back in whatever order the network pleases. Doubles as the unmount
+  // guard - the cleanup bumps it, and a fetch that lands afterwards is stale by
+  // definition.
+  const requestSeq = useRef(0)
+  useEffect(() => () => { requestSeq.current += 1 }, [])
 
   const load = useCallback(async (nextPage: number, term: string) => {
+    const seq = ++requestSeq.current
     setLoading(true)
-    const params = new URLSearchParams({ page: String(nextPage), withInsights: '1' })
-    if (term) params.set('search', term)
-    const response = await fetch(`/api/m/space-planner-for-shop/admin/plans?${params.toString()}`)
-    if (response.ok) {
+    try {
+      const params = new URLSearchParams({ page: String(nextPage), withInsights: '1' })
+      if (term) params.set('search', term)
+      const response = await fetch(`/api/m/space-planner-for-shop/admin/plans?${params.toString()}`)
+      if (!response.ok) throw new Error()
       const data = (await response.json()) as { rows: Row[]; total: number; summary: Summary; wanted: Wanted[] }
+      if (seq !== requestSeq.current) return
       setRows(data.rows)
       setTotal(data.total)
       setSummary(data.summary)
       setWanted(data.wanted)
+      setProblem('')
+    } catch {
+      // A screen that shows "Nothing saved yet" over a network error tells the
+      // owner their customers' work has vanished. Say what actually happened.
+      if (seq === requestSeq.current) setProblem('The list would not load. Check the connection and try again.')
+    } finally {
+      if (seq === requestSeq.current) setLoading(false)
     }
-    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -89,10 +105,17 @@ export function PlansScreen() {
         style={{ maxWidth: '28rem' }}
       />
 
+      {problem && (
+        <p style={{ margin: 0, color: 'var(--color-danger)' }}>
+          {problem}{' '}
+          <button type="button" className="btn" onClick={() => void load(page, search)}>Try again</button>
+        </p>
+      )}
+
       {loading ? (
         <p style={{ color: 'var(--color-text-muted)' }}>Loading…</p>
       ) : rows.length === 0 ? (
-        <p style={{ color: 'var(--color-text-muted)' }}>Nothing saved yet.</p>
+        !problem && <p style={{ color: 'var(--color-text-muted)' }}>Nothing saved yet.</p>
       ) : (
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>

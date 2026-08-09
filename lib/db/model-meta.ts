@@ -176,10 +176,14 @@ export async function listModelledProductIds(): Promise<string[]> {
  * pointed at the twelve models customers actually use, and worth nothing at all
  * when it is a list of two hundred and fifty in alphabetical order.
  */
-export async function listUnreviewedModels(limit = 50): Promise<Array<{ modelId: string; productId: string; url: string; format: string; placements: number }>> {
-  const rows = await prisma.$queryRaw<Array<{ model_id: string; product_id: string; url: string; format: string; placements: bigint }>>`
+export async function listUnreviewedModels(limit = 50): Promise<Array<{ modelId: string; productId: string; url: string; format: string; placements: number; yawOffsetDegrees: number; noDecimation: boolean }>> {
+  // The current corrections ride along so the screen can SHOW them: a form that
+  // renders every yaw as 0° whatever is stored is a form that tells the person
+  // correcting models that their last correction did not take.
+  const rows = await prisma.$queryRaw<Array<{ model_id: string; product_id: string; url: string; format: string; placements: bigint; yaw_offset_degrees: number | null; no_decimation: boolean | null }>>`
     SELECT m."id" AS model_id, m."product_id", m."url", m."format",
-           COALESCE((SELECT COUNT(*) FROM "spl_events" e WHERE e."product_id" = m."product_id" AND e."event" = 'item.placed'), 0)::bigint AS placements
+           COALESCE((SELECT COUNT(*) FROM "spl_events" e WHERE e."product_id" = m."product_id" AND e."event" = 'item.placed'), 0)::bigint AS placements,
+           meta."yaw_offset_degrees", meta."no_decimation"
     FROM "p3d_models" m
     LEFT JOIN "spl_model_meta" meta ON meta."model_id" = m."id"
     WHERE meta."id" IS NULL OR meta."reviewed_at" IS NULL
@@ -192,5 +196,7 @@ export async function listUnreviewedModels(limit = 50): Promise<Array<{ modelId:
     url: row.url,
     format: row.format,
     placements: Number(row.placements),
+    yawOffsetDegrees: row.yaw_offset_degrees ?? 0,
+    noDecimation: row.no_decimation ?? false,
   }))
 }

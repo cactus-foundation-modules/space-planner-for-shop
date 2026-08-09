@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CatalogueCard } from '@/modules/space-planner-for-shop/lib/catalogue'
 import type { ProductInfo } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import { VariationPicker } from '@/modules/space-planner-for-shop/components/public/VariationPicker'
@@ -42,8 +42,17 @@ export function CataloguePanel(props: CataloguePanelProps) {
   const [error, setError] = useState('')
   const [choosing, setChoosing] = useState<CatalogueCard | null>(null)
 
+  // Which request is the current one. Typing and paging fire overlapping
+  // fetches, and on a slow connection they come back in whatever order they
+  // please: without this, the page-two response could land on top of the
+  // fresher search the shopper had already typed. Only the latest request may
+  // write - and it doubles as the unmount guard, since the cleanup bumps it.
+  const requestSeq = useRef(0)
+  useEffect(() => () => { requestSeq.current += 1 }, [])
+
   const load = useCallback(
     async (nextPage: number, term: string, categorySlug: string, modelled: boolean) => {
+      const seq = ++requestSeq.current
       setLoading(true)
       setError('')
       try {
@@ -57,13 +66,15 @@ export function CataloguePanel(props: CataloguePanelProps) {
         const response = await fetch(`/api/m/space-planner-for-shop/public/catalogue?${params.toString()}`)
         if (!response.ok) throw new Error('Could not load the catalogue')
         const data = (await response.json()) as { cards: CatalogueCard[]; total: number; categories?: Category[] }
+        if (seq !== requestSeq.current) return
         setCards(data.cards)
         setTotal(data.total)
         if (data.categories) setCategories(data.categories)
       } catch {
+        if (seq !== requestSeq.current) return
         setError('We could not load the catalogue just now. Try again in a moment.')
       } finally {
-        setLoading(false)
+        if (seq === requestSeq.current) setLoading(false)
       }
     },
     [],

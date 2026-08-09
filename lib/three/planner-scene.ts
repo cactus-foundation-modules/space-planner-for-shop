@@ -382,11 +382,23 @@ export function buildPlaceholder(node: SceneNode): Object3D {
 // Label textures are shared by text. Twenty identical desks carry twenty labels
 // reading the same thing, and drawing that canvas twenty times - on every item
 // rebuild, which happens on every nudge - is pure waste.
+//
+// Bounded, because "shared" quietly meant "kept for ever": a long session that
+// browses half the catalogue makes a texture per distinct name and nothing ever
+// let one go. Kept in most-recently-used order - a cache hit re-inserts - so
+// every rebuild touches the labels still on screen and the ones that fall off
+// the end are exactly the ones nothing is using any more, which makes them
+// safe to dispose.
+const LABEL_TEXTURE_CAP = 160
 const labelTextures = new Map<string, CanvasTexture>()
 
 function labelTexture(text: string): CanvasTexture {
   const existing = labelTextures.get(text)
-  if (existing) return existing
+  if (existing) {
+    labelTextures.delete(text)
+    labelTextures.set(text, existing)
+    return existing
+  }
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 128
@@ -404,6 +416,12 @@ function labelTexture(text: string): CanvasTexture {
   const texture = new CanvasTexture(canvas)
   texture.colorSpace = SRGBColorSpace
   labelTextures.set(text, texture)
+  while (labelTextures.size > LABEL_TEXTURE_CAP) {
+    const oldest = labelTextures.keys().next().value
+    if (oldest === undefined) break
+    labelTextures.get(oldest)?.dispose()
+    labelTextures.delete(oldest)
+  }
   return texture
 }
 

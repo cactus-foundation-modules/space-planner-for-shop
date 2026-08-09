@@ -129,16 +129,21 @@ export function buildScene(
     thicknessM: geometry.wallThicknessMm / MM,
     openings: geometry.openings
       .filter((opening) => opening.wallIndex === wall.index)
-      .map((opening) => {
+      .flatMap((opening) => {
+        // An opening whose span no longer resolves - its wall shortened out from
+        // under it mid-edit - is left out of the scene entirely. It used to be
+        // drawn as a zero-width gap at the world origin, which cut a sliver out
+        // of whatever wall happened to pass through {0,0}.
         const span = openingSpan(geometry, opening)
-        return {
+        if (!span) return []
+        return [{
           id: opening.id,
           kind: opening.kind,
-          start: span ? toWorld(span.start.x, span.start.y) : { x: 0, z: 0 },
-          end: span ? toWorld(span.end.x, span.end.y) : { x: 0, z: 0 },
+          start: toWorld(span.start.x, span.start.y),
+          end: toWorld(span.end.x, span.end.y),
           sillM: opening.sillMm / MM,
           heightM: opening.heightMm / MM,
-        }
+        }]
       }),
   }))
 

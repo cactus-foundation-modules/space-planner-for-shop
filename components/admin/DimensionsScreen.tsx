@@ -52,18 +52,32 @@ export function DimensionsScreen() {
   const [job, setJob] = useState<Job | null>(null)
   const [running, setRunning] = useState(false)
   const [measuring, setMeasuring] = useState(false)
+  const [problem, setProblem] = useState('')
   const [measureState, setMeasure] = useState<MeasureState | null>(null)
   const cancelled = useRef(false)
   const measureCancelled = useRef(false)
+  // The disabled buttons are a render behind the truth: two fast clicks on
+  // Start both read running=false and two loops set off over the same job.
+  // These refs are the truth the loops actually consult.
+  const rebuildLive = useRef(false)
+  const measureLive = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => () => { mounted.current = false }, [])
 
   const load = useCallback(async () => {
-    const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions')
-    if (!response.ok) return
-    const data = (await response.json()) as { report: Report; junk: Junk[]; conflicts: Conflict[]; job: Job | null }
-    setReport(data.report)
-    setJunk(data.junk)
-    setConflicts(data.conflicts)
-    setJob(data.job)
+    try {
+      const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions')
+      if (!response.ok) throw new Error()
+      const data = (await response.json()) as { report: Report; junk: Junk[]; conflicts: Conflict[]; job: Job | null }
+      if (!mounted.current) return
+      setReport(data.report)
+      setJunk(data.junk)
+      setConflicts(data.conflicts)
+      setJob(data.job)
+      setProblem('')
+    } catch {
+      if (mounted.current) setProblem('The size report would not load. Check the connection and refresh.')
+    }
   }, [])
 
   useEffect(() => {
@@ -76,36 +90,50 @@ export function DimensionsScreen() {
   }, [load])
 
   const rebuild = async () => {
+    if (rebuildLive.current) return
+    rebuildLive.current = true
     cancelled.current = false
     setRunning(true)
-    let current = job && (job.status === 'QUEUED' || job.status === 'RUNNING') ? job : null
+    setProblem('')
+    try {
+      let current = job && (job.status === 'QUEUED' || job.status === 'RUNNING') ? job : null
 
-    if (!current) {
-      const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/rebuild', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      const data = (await response.json()) as { job: Job }
-      current = data.job
-      setJob(current)
+      if (!current) {
+        const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/rebuild', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        if (!response.ok) throw new Error()
+        const data = (await response.json()) as { job: Job }
+        current = data.job
+        if (mounted.current) setJob(current)
+      }
+
+      // The loop is here rather than on the server on purpose: each call is one
+      // bounded step that banks its cursor, so a closed tab pauses the rebuild
+      // rather than losing it.
+      while (current && !cancelled.current) {
+        const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/rebuild', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId: current.id }),
+        })
+        if (!response.ok) break
+        const data = (await response.json()) as { job: Job | null; done: boolean }
+        if (!data.job) break
+        current = data.job
+        if (mounted.current) setJob(current)
+        if (data.done) break
+      }
+    } catch {
+      // A network drop mid-run pauses the job rather than losing it - the
+      // cursor is banked server-side - but the button has to come back, or the
+      // screen sits on "Working…" for ever over a rebuild nothing is driving.
+      if (mounted.current) setProblem('The rebuild lost its connection. Press Start to carry on where it stopped.')
+    } finally {
+      rebuildLive.current = false
+      if (mounted.current) {
+        setRunning(false)
+        void load()
+      }
     }
-
-    // The loop is here rather than on the server on purpose: each call is one
-    // bounded step that banks its cursor, so a closed tab pauses the rebuild
-    // rather than losing it.
-    while (current && !cancelled.current) {
-      const response = await fetch('/api/m/space-planner-for-shop/admin/dimensions/rebuild', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: current.id }),
-      })
-      if (!response.ok) break
-      const data = (await response.json()) as { job: Job | null; done: boolean }
-      if (!data.job) break
-      current = data.job
-      setJob(current)
-      if (data.done) break
-    }
-
-    setRunning(false)
-    void load()
   }
 
   /**
@@ -117,17 +145,21 @@ export function DimensionsScreen() {
    * answers.
    */
   const measureAll = async () => {
+    if (measureLive.current) return
+    measureLive.current = true
     measureCancelled.current = false
     setMeasuring(true)
+    setProblem('')
     setMeasure({ done: 0, total: 0, written: 0, failed: 0, conflicts: 0, lost: 0, implausible: 0 })
 
+    try {
     // Imported here rather than at the top of the file so that opening this
     // screen does not pull three.js in behind it.
     const { clearPreparedModels, prepareModel } = await import('@/modules/space-planner-for-shop/lib/three/planner-model')
 
     const listing = await fetch('/api/m/space-planner-for-shop/admin/dimensions/measure')
     if (!listing.ok) {
-      setMeasuring(false)
+      if (mounted.current) setProblem('The list of models to measure would not load. Try again.')
       return
     }
     const { models } = (await listing.json()) as { models: MeasureWork[] }
@@ -207,14 +239,21 @@ export function DimensionsScreen() {
       // The prepared-model cache exists to make a ROOM cheap; over a whole
       // catalogue it is just a leak with a nice name.
       if (totals.done % MEASURE_CLEAR_EVERY === 0) clearPreparedModels()
-      setMeasure({ ...totals })
+      if (mounted.current) setMeasure({ ...totals })
     }
 
     await flush()
     clearPreparedModels()
-    setMeasure({ ...totals })
-    setMeasuring(false)
-    void load()
+    if (mounted.current) setMeasure({ ...totals })
+    } catch {
+      if (mounted.current) setProblem('The measuring pass stopped early. Run it again - it re-measures cheaply and keeps what it banked.')
+    } finally {
+      measureLive.current = false
+      if (mounted.current) {
+        setMeasuring(false)
+        void load()
+      }
+    }
   }
 
   const stopMeasuring = () => {
@@ -224,7 +263,12 @@ export function DimensionsScreen() {
   const stop = async () => {
     cancelled.current = true
     if (!job) return
-    await fetch(`/api/m/space-planner-for-shop/admin/dimensions/rebuild?jobId=${encodeURIComponent(job.id)}`, { method: 'DELETE' })
+    try {
+      await fetch(`/api/m/space-planner-for-shop/admin/dimensions/rebuild?jobId=${encodeURIComponent(job.id)}`, { method: 'DELETE' })
+    } catch {
+      // The loop above has already been told to stop; the server job merely
+      // stays QUEUED, which the next Start picks up where it left off.
+    }
     void load()
   }
 
@@ -233,6 +277,8 @@ export function DimensionsScreen() {
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
       <h1 style={{ margin: 0 }}>Sizes</h1>
+
+      {problem && <p style={{ margin: 0, color: 'var(--color-danger)' }}>{problem}</p>}
 
       {report && (
         <div className="card" style={{ padding: '1rem', display: 'grid', gap: '0.5rem' }}>

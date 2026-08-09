@@ -57,9 +57,10 @@ export async function renderPlanPdf(html: string, opts: { logoDataUrl?: string |
   try {
     executablePath = chromium ? await chromium.executablePath() : await localChromePath()
   } catch (error) {
-    throw new PlanPdfUnavailableError(
-      `The packaged browser could not be unpacked: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    // The detail goes to the log, not the shopper: a chromium unpack error is
+    // full of paths and errno noise that helps nobody outside this process.
+    console.error('[space-planner] PDF browser unpack failed:', error)
+    throw new PlanPdfUnavailableError('The PDF service could not start just now. Try again in a minute.')
   }
   if (!executablePath) {
     throw new PlanPdfUnavailableError(
@@ -78,9 +79,8 @@ export async function renderPlanPdf(html: string, opts: { logoDataUrl?: string |
       defaultViewport: { width: 794, height: 1123, deviceScaleFactor: 2 },
     })
   } catch (error) {
-    throw new PlanPdfUnavailableError(
-      `The browser would not start: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    console.error('[space-planner] PDF browser launch failed:', error)
+    throw new PlanPdfUnavailableError('The PDF service could not start just now. Try again in a minute.')
   }
 
   try {
