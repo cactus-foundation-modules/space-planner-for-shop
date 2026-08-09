@@ -21,6 +21,7 @@ function item(id: string, productId: string, overrides: Partial<PlanItem> = {}):
     wallIndex: null,
     manualSize: false,
     staged: false,
+    modelContext: null,
     ...overrides,
   }
 }

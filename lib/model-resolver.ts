@@ -35,6 +35,12 @@ import type { MountType } from '@/modules/space-planner-for-shop/lib/types'
 export type PlannerModel = ResolvedModel & {
   /** Freshly signed, for this response only. Never persisted, never a cache key. */
   fetchUrl: string
+  /**
+   * The add-on combination this entry draws ('' = the base model). A variant
+   * lives in the map under plannerModelKey(productId, context), beside - never
+   * instead of - the product's base entry.
+   */
+  context: string
   mountOverride: MountType | null
   /** The paints for this exact variation. Empty for a product with no fabric config. */
   slots: FabricSlot[]
@@ -218,12 +224,26 @@ async function resolveFabric(productIds: string[]): Promise<Map<string, FabricBu
   return out
 }
 
+// The map key a context variant is stored under. Base models keep the bare
+// productId (every consumer that predates contexts reads exactly what it always
+// did); a combined-model variant lives beside it under this composite. The
+// separator can never appear in an id or a context tag (both are slug-grammar).
+export function plannerModelKey(productId: string, context: string): string {
+  return context ? `${productId}@@${context}` : productId
+}
+
 export async function resolveModelsForProducts(
   productIds: string[],
   // The measuring pass wants files and nothing else: paint does not move a
   // bounding box, and resolving colours for every model in the catalogue would
   // be several hundred queries spent on a number that cannot change.
-  opts: { withFabric?: boolean } = {},
+  opts: {
+    withFabric?: boolean
+    // Add-on combinations to resolve ALONGSIDE the base models: for each entry
+    // the tagged file (exact-or-base) and its paints land in the map under
+    // plannerModelKey(productId, context). Base entries are never displaced.
+    contexts?: Array<{ productId: string; context: string; extraValueIds: string[] }>
+  } = {},
 ): Promise<Map<string, PlannerModel>> {
   const out = new Map<string, PlannerModel>()
   const ids = [...new Set(productIds)].filter(Boolean)
@@ -306,6 +326,7 @@ export async function resolveModelsForProducts(
 
     out.set(model.productId, {
       productId: model.productId,
+      context: '',
       plainUrl: plain,
       fetchUrl: signAssetUrl(plain),
       format: chosen.format,
@@ -321,7 +342,81 @@ export async function resolveModelsForProducts(
     })
   }
 
+  // Combined-model variants, resolved after (and beside) the base entries. Few
+  // per room by nature - one per grouped desk, not one per product - so these
+  // go through p3d's own single-child resolver rather than the batch machinery.
+  for (const request of opts.contexts ?? []) {
+    if (!request.context) continue
+    const key = plannerModelKey(request.productId, request.context)
+    if (out.has(key)) continue
+    try {
+      const variant = await resolveContextVariant(request, out.get(request.productId) ?? null)
+      if (variant) out.set(key, variant)
+      // No tagged file: nothing is stored, the scene's lookup falls back to the
+      // base entry, and the room shows the plain product - exact-or-base.
+    } catch {
+      // A combination that will not resolve draws as the base model.
+    }
+  }
+
   return out
+}
+
+// One add-on combination for one placed product: the tagged file for its exact
+// context (or nothing, and the caller falls back to base) plus its paints,
+// companion values included. Cached alongside the fabric cache with the
+// context in the key, for the same reload-churn reason.
+async function resolveContextVariant(
+  request: { productId: string; context: string; extraValueIds: string[] },
+  base: PlannerModel | null,
+): Promise<PlannerModel | null> {
+  const parentOf = await getVariationParents([request.productId])
+  const parentId = parentOf.get(request.productId) ?? request.productId
+  const childId = request.productId
+
+  // The tagged file, child first then parent - the same two shelves p3d's own
+  // resolver checks, with the same exact-match rule.
+  const tagged = await getModelsForProducts([childId, parentId], { includeContexts: true })
+  const model =
+    tagged.find((m) => m.productId === childId && m.context === request.context) ??
+    tagged.find((m) => m.productId === parentId && m.context === request.context)
+  if (!model) return null
+
+  const cacheKey = `${request.productId}|${request.context}|${request.extraValueIds.join(',')}`
+  let bundle: FabricBundle | null
+  const hit = readFabricCache(cacheKey)
+  if (hit) {
+    bundle = hit.bundle
+  } else {
+    const config = await getFabricConfig(parentId)
+    bundle = config
+      ? await resolveFabricForChild(childId, parentId, config, {
+          context: request.context,
+          extraValueIds: request.extraValueIds,
+        })
+      : null
+    writeFabricCache(cacheKey, bundle && bundle.slots.length > 0 ? bundle : null)
+  }
+  const usable = bundle && bundle.slots.length > 0 ? bundle : null
+
+  const fileMeta = await getModelMetaForModels([model.id])
+  const file = fileMeta.get(model.id)
+  const plain = plainUrl(usable?.modelUrl ?? model.url)
+  const slots = toSlots(usable)
+  return {
+    productId: request.productId,
+    context: request.context,
+    plainUrl: plain,
+    fetchUrl: signAssetUrl(plain),
+    format: (usable?.format ?? model.format) as ResolvedModel['format'],
+    yawOffsetDeg: file?.yawOffsetDegrees ?? 0,
+    noDecimation: file?.noDecimation ?? false,
+    fabricKey: fabricKeyFor(slots),
+    mountOverride: base?.mountOverride ?? null,
+    slots,
+    realMetres: usable?.realCm ? usable.realCm / 100 : base?.realMetres ?? null,
+    realAxis: usable?.scaleAxis ?? base?.realAxis ?? 'height',
+  }
 }
 
 /**
@@ -331,6 +426,8 @@ export async function resolveModelsForProducts(
  */
 export type ClientModel = {
   productId: string
+  /** The add-on combination this entry draws; '' for the base model. */
+  context: string
   url: string
   cacheKey: string
   format: ResolvedModel['format']
@@ -345,6 +442,7 @@ export type ClientModel = {
 export function toClientModels(models: Map<string, PlannerModel>): ClientModel[] {
   return [...models.values()].map((model) => ({
     productId: model.productId,
+    context: model.context,
     url: model.fetchUrl,
     cacheKey: model.plainUrl,
     format: model.format,

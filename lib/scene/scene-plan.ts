@@ -146,7 +146,13 @@ export function buildScene(
 
   const nodes: SceneNode[] = placed.map((item) => {
     const entry = snapshot[item.productId]
-    const model = models.get(item.productId) ?? null
+    // Exact-or-base: an item carrying an add-on combination draws its combined
+    // model where one resolved (keyed `${productId}@@${context}`), else the
+    // product's base model exactly as before.
+    const model =
+      (item.modelContext?.context ? models.get(`${item.productId}@@${item.modelContext.context}`) : null) ??
+      models.get(item.productId) ??
+      null
     const world = toWorld(item.x, item.y)
     return {
       itemId: item.id,

@@ -88,16 +88,29 @@ export default async function RenderPage({
   if (!room) notFound()
 
   const config = await getSplConfigCached()
-  const productIds = [...new Set(plan.items.items.filter((item) => !item.staged).map((item) => item.productId))]
-  const models = await resolveModelsForProducts(productIds)
+  const placed = plan.items.items.filter((item) => !item.staged)
+  const productIds = [...new Set(placed.map((item) => item.productId))]
+  // Combined models for items saved with an add-on combination, so a render of
+  // the plan shows the desk WITH its screens exactly as the planner did.
+  const contextRequests = new Map<string, { productId: string; context: string; extraValueIds: string[] }>()
+  for (const item of placed) {
+    if (!item.modelContext?.context) continue
+    const key = `${item.productId}@@${item.modelContext.context}`
+    if (!contextRequests.has(key)) {
+      contextRequests.set(key, { productId: item.productId, context: item.modelContext.context, extraValueIds: item.modelContext.extraValueIds })
+    }
+  }
+  const models = await resolveModelsForProducts(productIds, { contexts: [...contextRequests.values()] })
 
   // Two shapes of the same thing: the scene description is built from the
   // query-stripped urls (which are the cache keys and never expire), while the
   // browser is handed freshly signed ones to actually fetch.
   const resolved = new Map<string, ResolvedModel>()
-  for (const [productId, model] of models) {
-    resolved.set(productId, {
-      productId,
+  for (const [key, model] of models) {
+    // Keyed as the map keys it (composite for a combined-model variant, bare id
+    // for base - see plannerModelKey); the entry itself keeps the real product.
+    resolved.set(key, {
+      productId: model.productId,
       plainUrl: model.plainUrl,
       format: model.format,
       yawOffsetDeg: model.yawOffsetDeg,

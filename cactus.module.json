@@ -1,19 +1,37 @@
 {
   "name": "space-planner-for-shop",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "tablePrefix": "spl_",
   "description": "Lets shoppers draw their own room to scale, place products from your catalogue in it in 2D and 3D, check what actually fits, and take away a floor plan, a priced item list and a quote request. Uses the 3D models you already have and falls back to sized placeholders for everything else.",
   "requiresCoreVersion": "0.5.942",
   "publicBasePath": "space-planner",
   "requiresModules": [
-    { "name": "shop", "minVersion": "0.1.195" },
-    { "name": "product-3d-views-for-shop", "minVersion": "0.1.82" },
-    { "name": "shop-variations", "minVersion": "0.1.107" },
-    { "name": "quote-for-shop", "minVersion": "0.1.8" }
+    {
+      "name": "shop",
+      "minVersion": "0.1.195"
+    },
+    {
+      "name": "product-3d-views-for-shop",
+      "minVersion": "0.1.82"
+    },
+    {
+      "name": "shop-variations",
+      "minVersion": "0.1.107"
+    },
+    {
+      "name": "quote-for-shop",
+      "minVersion": "0.1.8"
+    }
   ],
   "requiredEnvVars": [
-    { "name": "SPACE_PLANNER_RENDER_URL", "required": false },
-    { "name": "SPACE_PLANNER_RENDER_SECRET", "required": false }
+    {
+      "name": "SPACE_PLANNER_RENDER_URL",
+      "required": false
+    },
+    {
+      "name": "SPACE_PLANNER_RENDER_SECRET",
+      "required": false
+    }
   ],
   "permissions": [
     "space-planner.access",
@@ -130,17 +148,35 @@
   ],
   "memberExtensions": {
     "activityTypes": [
-      { "type": "space-planner.room-saved", "label": "Saved a room" },
-      { "type": "space-planner.plan-saved", "label": "Saved a plan" },
-      { "type": "space-planner.plan-quoted", "label": "Asked for a quote from a plan" }
+      {
+        "type": "space-planner.room-saved",
+        "label": "Saved a room"
+      },
+      {
+        "type": "space-planner.plan-saved",
+        "label": "Saved a plan"
+      },
+      {
+        "type": "space-planner.plan-quoted",
+        "label": "Asked for a quote from a plan"
+      }
     ],
     "notificationCategories": [
-      { "category": "space-planner.render", "label": "Space Planner renders" }
+      {
+        "category": "space-planner.render",
+        "label": "Space Planner renders"
+      }
     ],
     "dataExportPath": "/api/m/space-planner-for-shop/member/gdpr-export",
     "routeTiers": [
-      { "pathPrefix": "/api/m/space-planner-for-shop/member", "tier": "MEMBER" },
-      { "pathPrefix": "/api/m/space-planner-for-shop/public", "tier": "PUBLIC" }
+      {
+        "pathPrefix": "/api/m/space-planner-for-shop/member",
+        "tier": "MEMBER"
+      },
+      {
+        "pathPrefix": "/api/m/space-planner-for-shop/public",
+        "tier": "PUBLIC"
+      }
     ]
   },
   "teardown": [

@@ -66,6 +66,12 @@ export const PlanItemSchema = z.object({
   wallIndex: z.number().int().min(0).max(MAX_VERTICES - 1).nullable().default(null),
   manualSize: z.boolean().default(false),
   staged: z.boolean().default(false),
+  // Defaulted null so every plan saved before add-on combinations existed
+  // parses exactly as it always did.
+  modelContext: z
+    .object({ context: z.string().max(120), extraValueIds: z.array(z.string().max(64)).max(40) })
+    .nullable()
+    .default(null),
 })
 
 export const PlanItemsSchema = z.object({

@@ -97,6 +97,15 @@ export type PlanItem = {
   manualSize: boolean
   /** Set only when the item is in the staging tray rather than placed in the room. */
   staged: boolean
+  /**
+   * The add-on combination this item should be drawn with, when it arrived from
+   * a basket line that carried one (a desk bought with its screens): p3d's
+   * sorted context signature plus the companion option values that paint the
+   * combined file. Null for everything else - which is every item there was
+   * before this field existed. Exact-or-base at draw time: no tagged file for
+   * the signature simply draws the base model.
+   */
+  modelContext: { context: string; extraValueIds: string[] } | null
 }
 
 /**

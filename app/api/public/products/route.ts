@@ -20,7 +20,20 @@ import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visi
 // POST rather than GET because a plan can reference a couple of hundred product
 // ids and a query string is not the place for them. Nothing is written.
 
-const Body = z.object({ productIds: z.array(z.string().min(1).max(64)).min(1).max(400) })
+const Body = z.object({
+  productIds: z.array(z.string().min(1).max(64)).min(1).max(400),
+  // Add-on combinations to resolve beside the base models (a desk staged from
+  // the basket with its screens). Optional and capped: one per grouped line,
+  // not one per product.
+  contexts: z
+    .array(z.object({
+      productId: z.string().min(1).max(64),
+      context: z.string().min(1).max(120),
+      extraValueIds: z.array(z.string().max(64)).max(40).default([]),
+    }))
+    .max(80)
+    .optional(),
+})
 
 export async function POST(request: NextRequest) {
   const closed = await shopClosedResponse()
@@ -36,7 +49,7 @@ export async function POST(request: NextRequest) {
     getProductsByIds(ids),
     getPrimaryProductImages(ids),
     resolveDimensions(ids),
-    resolveModelsForProducts(ids),
+    resolveModelsForProducts(ids, { contexts: parsed.data.contexts }),
     getShopConfigCached(),
     resolveTaxDisplay(),
     // A listing priced through its variations has no price of its own. Without

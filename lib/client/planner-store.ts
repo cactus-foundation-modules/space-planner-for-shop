@@ -84,7 +84,7 @@ export type PlannerAction =
    * tray rather than leaving it stranded in the garden.
    */
   | { type: 'set-shape'; vertices: Vertex[]; settle?: boolean }
-  | { type: 'add-item'; product: ProductSize; x: number; y: number; staged?: boolean; id: string }
+  | { type: 'add-item'; product: ProductSize; x: number; y: number; staged?: boolean; id: string; modelContext?: PlanItem['modelContext'] }
   | { type: 'move-items'; ids: string[]; dx: number; dy: number; snap: boolean }
   | { type: 'place-item'; id: string; x: number; y: number; snap: boolean }
   | { type: 'rotate-items'; ids: string[]; deltaDeg: number; snap: boolean }
@@ -235,7 +235,7 @@ function rectVertices(x: number, y: number, widthMm: number, depthMm: number): V
   ]
 }
 
-function makeItem(id: string, product: ProductSize, x: number, y: number, staged: boolean): PlanItem {
+function makeItem(id: string, product: ProductSize, x: number, y: number, staged: boolean, modelContext: PlanItem['modelContext'] = null): PlanItem {
   return {
     id,
     productId: product.productId,
@@ -252,6 +252,7 @@ function makeItem(id: string, product: ProductSize, x: number, y: number, staged
     wallIndex: null,
     manualSize: false,
     staged,
+    modelContext,
   }
 }
 
@@ -284,7 +285,7 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       return applyShape(state, action.vertices, action.settle ?? false, bump)
 
     case 'add-item': {
-      const item = makeItem(action.id, action.product, action.x, action.y, action.staged ?? false)
+      const item = makeItem(action.id, action.product, action.x, action.y, action.staged ?? false, action.modelContext ?? null)
       const placed = action.staged ? item : clampItemIntoRoom(item, state.geometry)
       return bump({ ...state, items: [...state.items, placed], selection: [placed.id] })
     }

@@ -59,6 +59,39 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
   return { ok: true, added: lines.length }
 }
 
+// The `modelContext` a line's meta may carry - the 3D module's documented
+// shape, written at add-to-basket by whichever module grouped the lines (a
+// product-accessories box). Read structurally, no import: the writing module
+// may not be installed, and a malformed bag simply reads as no context.
+//
+//   On a MAIN line:  { contexts: string[], extraValueIds: string[] } - the
+//     add-on combination its combined model should be drawn with.
+//   On an ADD-ON line: { stage: 'none' | 'self' } - 'none' means the item is
+//     already inside its main line's combined model (or is a fit-inside part
+//     like a shelf) and must not stage as loose furniture of its own.
+export type StagedModelContext = { context: string; extraValueIds: string[] }
+
+function readLineModelContext(meta: Record<string, unknown> | undefined): {
+  staged: StagedModelContext | null
+  stageSelf: boolean
+} {
+  const raw = meta?.modelContext
+  if (!raw || typeof raw !== 'object') return { staged: null, stageSelf: true }
+  const bag = raw as { contexts?: unknown; extraValueIds?: unknown; stage?: unknown }
+  if (bag.stage === 'none') return { staged: null, stageSelf: false }
+  if (Array.isArray(bag.contexts) && bag.contexts.length > 0) {
+    const contexts = bag.contexts.filter((c): c is string => typeof c === 'string' && !!c)
+    const extraValueIds = Array.isArray(bag.extraValueIds)
+      ? bag.extraValueIds.filter((v): v is string => typeof v === 'string').slice(0, 40)
+      : []
+    if (contexts.length > 0) {
+      // The same sorted-join signature p3d matches model tags against.
+      return { staged: { context: [...contexts].sort().join('+'), extraValueIds }, stageSelf: true }
+    }
+  }
+  return { staged: null, stageSelf: true }
+}
+
 /**
  * What is in the basket right now, ready to be staged into the room.
  *
@@ -66,12 +99,21 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
  * tray rather than scattered into the room - somebody arriving from the basket
  * has not drawn a room yet, and furniture appearing in a space that does not
  * exist is not a helpful first impression.
+ *
+ * Grouped lines: a main line bought with add-ons stages with its combined-model
+ * context (the desk arrives WITH its screens, as one thing), and an add-on line
+ * whose meta says it is already inside that model stages nothing at all -
+ * otherwise the same screens would also lean against the wall as loose panels.
+ * Add-on lines marked placeable ('self' - a pedestal at an odd quantity) stage
+ * exactly like anything else.
  */
-export function cartAsStagedItems(): Array<{ productId: string; index: number }> {
-  const out: Array<{ productId: string; index: number }> = []
+export function cartAsStagedItems(): Array<{ productId: string; index: number; modelContext: StagedModelContext | null }> {
+  const out: Array<{ productId: string; index: number; modelContext: StagedModelContext | null }> = []
   for (const line of readCart()) {
+    const { staged, stageSelf } = readLineModelContext(line.meta)
+    if (!stageSelf) continue
     const quantity = Math.max(1, Math.min(50, Math.round(line.quantity)))
-    for (let index = 0; index < quantity; index++) out.push({ productId: line.productId, index })
+    for (let index = 0; index < quantity; index++) out.push({ productId: line.productId, index, modelContext: staged })
   }
   return out
 }

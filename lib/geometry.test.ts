@@ -54,6 +54,7 @@ function item(overrides: Partial<PlanItem> = {}): PlanItem {
     wallIndex: null,
     manualSize: false,
     staged: false,
+    modelContext: null,
     ...overrides,
   }
 }

@@ -340,17 +340,23 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   const productIds = useMemo(() => [...new Set(state.items.map((item) => item.productId))], [state.items])
 
-  const fetchProducts = useCallback(async (ids: string[]): Promise<Array<ProductInfo & { id: string }>> => {
+  const fetchProducts = useCallback(async (
+    ids: string[],
+    // Add-on combinations to resolve beside the base models - see the products
+    // route. The models map keys a variant as `${productId}@@${context}`, the
+    // same composite the scene's lookup builds; base entries keep the bare id.
+    contexts?: Array<{ productId: string; context: string; extraValueIds: string[] }>,
+  ): Promise<Array<ProductInfo & { id: string }>> => {
     if (ids.length === 0) return []
     const response = await fetch('/api/m/space-planner-for-shop/public/products', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ productIds: ids }),
+      body: JSON.stringify({ productIds: ids, ...(contexts?.length ? { contexts } : {}) }),
     })
     if (!response.ok) return []
     const data = (await response.json()) as {
       items: Array<ProductInfo & { id: string }>
-      models: Array<PlannerModel & { productId: string }>
+      models: Array<PlannerModel & { productId: string; context?: string }>
     }
     setProducts((current) => {
       const next = { ...current }
@@ -359,7 +365,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
     })
     setModels((current) => {
       const next = new Map(current)
-      for (const model of data.models) next.set(model.productId, model)
+      for (const model of data.models) {
+        next.set(model.context ? `${model.productId}@@${model.context}` : model.productId, model)
+      }
       return next
     })
     return data.items
@@ -382,6 +390,30 @@ export function SpacePlanner(props: SpacePlannerProps) {
     })()
   }, [productIds, products, fetchProducts])
 
+  // A reopened plan carries items with an add-on combination (a desk saved with
+  // its screens) whose combined models the effect above never asks for - it
+  // fetches by product id alone. Ask for any composite the models map lacks,
+  // through the same guard set so a failed request retries and a resolved one
+  // is never asked twice.
+  useEffect(() => {
+    const wanted = new Map<string, { productId: string; context: string; extraValueIds: string[] }>()
+    for (const item of state.items) {
+      if (!item.modelContext?.context) continue
+      const key = `${item.productId}@@${item.modelContext.context}`
+      if (models.has(key) || askedFor.current.has(key) || wanted.has(key)) continue
+      wanted.set(key, { productId: item.productId, context: item.modelContext.context, extraValueIds: item.modelContext.extraValueIds })
+    }
+    if (wanted.size === 0) return
+    for (const key of wanted.keys()) askedFor.current.add(key)
+    void (async () => {
+      try {
+        await fetchProducts([...new Set([...wanted.values()].map((w) => w.productId))], [...wanted.values()])
+      } catch {
+        for (const key of wanted.keys()) askedFor.current.delete(key)
+      }
+    })()
+  }, [state.items, models, fetchProducts])
+
   // ---- staging from the basket and from a product page ------------------
 
   /**
@@ -399,7 +431,17 @@ export function SpacePlanner(props: SpacePlannerProps) {
       const lines = readCart()
       const staged = cartAsStagedItems()
       if (mode === 'initial' && staged.length === 0) return
-      const items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))])
+      // One context request per distinct grouped line, so the desk staged with
+      // its screens arrives as the combined model rather than the plain desk.
+      const contextRequests = new Map<string, { productId: string; context: string; extraValueIds: string[] }>()
+      for (const entry of staged) {
+        if (!entry.modelContext) continue
+        const key = `${entry.productId}@@${entry.modelContext.context}`
+        if (!contextRequests.has(key)) {
+          contextRequests.set(key, { productId: entry.productId, context: entry.modelContext.context, extraValueIds: entry.modelContext.extraValueIds })
+        }
+      }
+      const items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))], [...contextRequests.values()])
       const byId = new Map(items.map((item) => [item.id, item]))
       if (mode === 'refresh') {
         const trayIds = state.items.filter((item) => item.staged).map((item) => item.id)
@@ -408,7 +450,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
       for (const entry of staged) {
         const info = byId.get(entry.productId)
         if (!info) continue
-        dispatch({ type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true })
+        dispatch({
+          type: 'add-item', id: nextId(), product: { ...info, productId: info.id }, x: 0, y: 0, staged: true,
+          modelContext: entry.modelContext ? { context: entry.modelContext.context, extraValueIds: entry.modelContext.extraValueIds } : null,
+        })
       }
       const missing = new Set(staged.map((entry) => entry.productId).filter((id) => !byId.has(id))).size
       const clamped = lines.filter((line) => line.quantity > 50).length
