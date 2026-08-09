@@ -18,7 +18,7 @@ export async function POST(_request: NextRequest, context: { params: Promise<{ i
   if (!plan) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const token = plan.shareToken ?? (await setPlanShare(id, gate.member.id, true))
-  if (!token) return NextResponse.json({ error: 'Could not share that plan.' }, { status: 500 })
+  if (!token) return NextResponse.json({ error: 'Could not share that layout.' }, { status: 500 })
 
   await recordEvent('plan.shared', { planId: id })
   return NextResponse.json({ token, url: `/space-planner/shared/${token}` })

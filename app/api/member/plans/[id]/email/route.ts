@@ -29,7 +29,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   const config = await getSplConfigCached()
   if (!config.emailPlanEnabled) {
-    return NextResponse.json({ error: 'Emailing plans is switched off at the moment.' }, { status: 403 })
+    return NextResponse.json({ error: 'Emailing layouts is switched off at the moment.' }, { status: 403 })
   }
 
   const parsed = Body.safeParse(await request.json().catch(() => ({})))

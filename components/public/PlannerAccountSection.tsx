@@ -7,7 +7,7 @@ import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 // members.account-section point).
 //
 // It earns its place by answering the question somebody opens their account to
-// ask - where did I get to with that room - rather than by being a link to a
+// ask - where did I get to with that space - rather than by being a link to a
 // page they already know about. A member with nothing saved sees nothing at all;
 // the planner's own page is where they should be, and it is in the nav.
 export async function PlannerAccountSection() {

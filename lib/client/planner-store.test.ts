@@ -11,7 +11,7 @@ import {
   undo,
 } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import type { PlannerState, ProductSize } from '@/modules/space-planner-for-shop/lib/client/planner-store'
-import { displacedItems } from '@/modules/space-planner-for-shop/lib/geometry'
+import { boundingBox, displacedItems } from '@/modules/space-planner-for-shop/lib/geometry'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
 import type { PlanItem } from '@/modules/space-planner-for-shop/lib/types'
 
@@ -681,5 +681,51 @@ describe('clash warnings', () => {
     const state = plannerReducer(withDesk(), { type: 'add-item', id: 'b', product: desk, x: 2000, y: 1500 })
     const moved = plannerReducer(state, { type: 'set-item', id: 'b', patch: { x: 2000, y: 1500 } })
     expect(findClashes(moved.items, { desk: { heightMm: 620, widthMm: 1400 } })).toHaveLength(1)
+  })
+})
+
+/**
+ * What the keyboard now reaches.
+ *
+ * A door's position along its wall and a column's position on the floor had no
+ * control at all - both were drag-only, so without a pointer they could be made
+ * and sized but never put anywhere. The bars now type into the two actions
+ * below, and these are the values those boxes hand over, nought included.
+ */
+describe('positions typed rather than dragged', () => {
+  it('slides a door along its wall to a typed offset', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    const moved = plannerReducer(added, { type: 'set-opening', id: 'd1', patch: { offsetMm: 250 } })
+    expect(moved.geometry.openings[0]?.offsetMm).toBe(250)
+  })
+
+  it('accepts nought, which is a door hard against the start of its wall', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    const moved = plannerReducer(added, { type: 'set-opening', id: 'd1', patch: { offsetMm: 0 } })
+    expect(moved.geometry.openings[0]?.offsetMm).toBe(0)
+  })
+
+  it('puts a door typed past the end of its wall at the end of the wall, not off it', () => {
+    const added = plannerReducer(start(), { type: 'add-opening', id: 'd1', kind: 'door', wallIndex: 0, offsetMm: 2000 })
+    const moved = plannerReducer(added, { type: 'set-opening', id: 'd1', patch: { offsetMm: 9_000 } })
+    // Wall zero is four metres long and the door is 900 wide.
+    expect(moved.geometry.openings[0]?.offsetMm).toBe(3100)
+  })
+
+  it('moves a column by the shift a typed centre implies', () => {
+    const added = plannerReducer(start(), {
+      type: 'add-obstruction',
+      id: 'c1',
+      label: 'Column',
+      x: 1000,
+      y: 1000,
+      widthMm: 400,
+      depthMm: 400,
+      heightMm: 2400,
+    })
+    const moved = plannerReducer(added, { type: 'move-obstruction', id: 'c1', dx: 500, dy: -250, settle: true })
+    const box = boundingBox(moved.geometry.obstructions[0]?.vertices ?? [])
+    expect(Math.round((box.minX + box.maxX) / 2)).toBe(1500)
+    expect(Math.round((box.minY + box.maxY) / 2)).toBe(750)
   })
 })

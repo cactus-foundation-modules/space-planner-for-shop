@@ -265,7 +265,7 @@ export function VariationPicker(props: VariationPickerProps) {
         )}
         <span>
           <strong>{props.productName}</strong>
-          <span className="spl-note">Choose which one goes in the room.</span>
+          <span className="spl-note">Choose which one goes in the space.</span>
         </span>
       </div>
 
@@ -341,7 +341,7 @@ export function VariationPicker(props: VariationPickerProps) {
             </div>
           </div>
           <button type="button" className="spl-btn spl-btn-primary" onClick={place}>
-            {quantity > 1 ? `Put ${quantity} in the room` : 'Put this in the room'}
+            {quantity > 1 ? `Put ${quantity} in the room` : 'Put this in the space'}
           </button>
         </div>
       ) : (

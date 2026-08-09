@@ -13,6 +13,7 @@ import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public
 import type { OpenPlan, SavedRoomLink } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
+import { isTurnstileConfigured } from '@/lib/config/env'
 
 export const metadata = { title: 'Plan your space' }
 
@@ -165,6 +166,10 @@ export default async function SpacePlannerPage({
         priceDisclaimer={config.bomDisclaimer}
         currencySymbol={shopConfig.currencySymbol}
         rendersAvailable={rendersAvailable}
+        quoteAvailable={config.quoteEnabled}
+        emailAvailable={config.emailPlanEnabled}
+        turnstileSiteKey={isTurnstileConfigured() ? process.env.TURNSTILE_SITE_KEY ?? null : null}
+        member={member ? { name: member.displayName ?? '', email: member.email } : null}
         openPlan={openPlan}
         savedRooms={savedRooms}
         stageCart={params.from === 'cart'}

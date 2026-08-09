@@ -50,7 +50,7 @@ export type AddPlanResult = { ok: true; added: number } | { ok: false; error: st
  * its push, and a tight loop of writes would defeat that.
  */
 export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
-  if (lines.length === 0) return { ok: false, error: 'There is nothing in this plan yet.' }
+  if (lines.length === 0) return { ok: false, error: 'There is nothing in this layout yet.' }
 
   // Everything about to be written, companions included, so the cap is checked
   // against the truth. Companion quantities scale with the main line's count.

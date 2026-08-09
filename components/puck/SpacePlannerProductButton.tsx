@@ -21,13 +21,13 @@ export function SpacePlannerProductButton(props: SpacePlannerProductButtonProps)
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: plannerCss() }} />
-      <PlannerLaunchButton label={props.label?.trim() || 'See it in your room'} from="product" primary={props.primary} />
+      <PlannerLaunchButton label={props.label?.trim() || 'See it in your space'} from="product" primary={props.primary} />
     </>
   )
 }
 
 export const spacePlannerProductButtonPuckComponent = {
-  label: 'Space Planner: see it in your room',
+  label: 'Space Planner: see it in your space',
   fields: {
     label: { type: 'text' as const, label: 'Button label' },
     primary: {
@@ -39,6 +39,6 @@ export const spacePlannerProductButtonPuckComponent = {
       ],
     },
   },
-  defaultProps: { label: 'See it in your room', primary: false },
+  defaultProps: { label: 'See it in your space', primary: false },
   render: SpacePlannerProductButton,
 }

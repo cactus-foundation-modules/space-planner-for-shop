@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { boundingBox, distanceToWallAlong, itemCorners, offsetAlongWall, openingSpan, pointInPolygon, rotatePoint, walls } from '@/modules/space-planner-for-shop/lib/geometry'
-import { formatLength } from '@/modules/space-planner-for-shop/lib/units'
+import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
 import type { OpeningKind, PlanItem, RoomGeometry, Vertex, WallOpening } from '@/modules/space-planner-for-shop/lib/types'
 
 // The top-down plan. This is the front door and the surface everybody touches
@@ -167,6 +167,7 @@ export function Plan2d(props: Plan2dProps) {
   const obstructionDragRef = useRef<{ id: string; lastX: number; lastY: number; moved: boolean } | null>(null)
   /** The corner being edited in shape mode, and the outline being drawn in draw mode. */
   const [corner, setCorner] = useState<number | null>(null)
+  const fieldIds = useId()
   const cornerDragRef = useRef<number | null>(null)
   /** Whether the grabbed corner has actually gone anywhere - a click on a corner
    * is a selection, and settling (or undo-banking) a drag that never happened
@@ -281,6 +282,39 @@ export function Plan2d(props: Plan2dProps) {
     [props],
   )
 
+  /**
+   * Put a corner halfway along the wall leaving the chosen one.
+   *
+   * The pointer way in is a double-tap on a wall, which is no way in at all
+   * without a pointer. Halfway along is the one position that needs nothing
+   * pointed at, and the corner it makes is picked straight away so the arrow
+   * keys and the boxes below can move it somewhere useful.
+   */
+  const addCornerAfter = useCallback(
+    (index: number) => {
+      const vertices = props.geometry.vertices
+      const from = vertices[index]
+      const to = vertices[(index + 1) % vertices.length]
+      if (!from || !to) return
+      const next = [...vertices]
+      next.splice(index + 1, 0, { x: Math.round((from.x + to.x) / 2), y: Math.round((from.y + to.y) / 2) })
+      props.onShape(next, true)
+      setCorner(index + 1)
+    },
+    [props],
+  )
+
+  /** One settled move of one corner - the keyboard's equivalent of a drag. */
+  const moveCorner = useCallback(
+    (index: number, point: Vertex) => {
+      const next = props.geometry.vertices.map((vertex, at) =>
+        at === index ? { x: Math.round(point.x), y: Math.round(point.y) } : vertex,
+      )
+      props.onShape(next, true)
+    },
+    [props],
+  )
+
   useEffect(() => {
     if (props.mode === 'furnish') return
     const handler = (event: KeyboardEvent) => {
@@ -305,6 +339,22 @@ export function Plan2d(props: Plan2dProps) {
         }
         return
       }
+      // Nudging the chosen corner, which is the only way to move one without a
+      // pointer. A tenth of a metre a press, a centimetre with shift held, and
+      // each press is its own undo step - the same bargain as a drag, just
+      // finer. Inputs are already excluded above, so the boxes in the bar keep
+      // their own arrow keys.
+      if (props.mode === 'shape' && corner !== null && event.key.startsWith('Arrow')) {
+        const vertex = props.geometry.vertices[corner]
+        if (!vertex) return
+        const step = event.shiftKey ? 10 : 100
+        const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0
+        const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0
+        if (dx === 0 && dy === 0) return
+        event.preventDefault()
+        moveCorner(corner, { x: vertex.x + dx, y: vertex.y + dy })
+        return
+      }
       if ((event.key === 'Delete' || event.key === 'Backspace') && corner !== null) {
         event.preventDefault()
         removeCorner(corner)
@@ -312,7 +362,7 @@ export function Plan2d(props: Plan2dProps) {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [props, corner, removeCorner])
+  }, [props, corner, removeCorner, moveCorner])
 
   const toScreen = useCallback((point: Vertex) => ({ x: point.x * view.scale + view.offsetX, y: point.y * view.scale + view.offsetY }), [view])
   const toPlan = useCallback((x: number, y: number) => ({ x: (x - view.offsetX) / view.scale, y: (y - view.offsetY) / view.scale }), [view])
@@ -388,11 +438,19 @@ export function Plan2d(props: Plan2dProps) {
     // A metre grid inside the floor. It is what turns an outline into something
     // a person can judge distances against without measuring anything, and it
     // costs two dozen lines clipped to the room.
+    //
+    // Faded ink rather than the border token, and for the same reason the
+    // dimension figures are (see the palette below). This grid is the thing the
+    // comment above says the whole drawing is judged against, so it is a
+    // graphical object that has to reach 3:1 - and --color-border at 0.55
+    // measured 1.12:1 in light and 1.24:1 in dark, which is a grid you can only
+    // see if you already know it is there. Ink at 0.52 measures 3.27:1 light,
+    // 5.02:1 dark and 3.60:1 on the PDF's ink-on-paper palette.
     context.save()
     context.clip()
     const gridMm = view.scale * 1000 < 26 ? 5000 : view.scale * 1000 > 90 ? 500 : 1000
     const box = boundingBox(outline)
-    context.strokeStyle = withAlpha(line, 0.55)
+    context.strokeStyle = withAlpha(ink, 0.52)
     context.lineWidth = 1
     context.beginPath()
     for (let x = Math.ceil(box.minX / gridMm) * gridMm; x <= box.maxX; x += gridMm) {
@@ -1170,8 +1228,19 @@ export function Plan2d(props: Plan2dProps) {
     props.onSelect([])
   }
 
+  // Derived during render rather than mirrored into state: a corner removed by
+  // somebody else's undo would otherwise leave the boxes editing a vertex that
+  // is not there any more.
+  const chosenCorner = corner === null ? null : props.geometry.vertices[corner] ?? null
+
   return (
     <div ref={wrapRef} className="spl-plan-wrap" style={{ position: 'absolute', inset: 0 }}>
+      {/* role="img", not "application". Application tells assistive tech to stop
+          interpreting and hand every key straight to the widget, and this canvas
+          has never taken the focus or read a key in its life. What is true is
+          that it is a picture whose content is repeated, in words, in the panel
+          beside it - and everything that changes it is an ordinary button or box
+          in the bars below. */}
       <canvas
         ref={canvasRef}
         onPointerDown={onPointerDown}
@@ -1195,8 +1264,8 @@ export function Plan2d(props: Plan2dProps) {
           if (!props.onDropAt) return
           props.onDropAt(Math.round(point.x), Math.round(point.y))
         }}
-        role="application"
-        aria-label="Room plan. Every item here is also listed, with its exact position, in the panel beside it."
+        role="img"
+        aria-label="Floor plan of your space. Every item here is also listed, with its exact position, in the panel beside it."
       />
       {props.mode === 'openings' && (
         <div className="spl-stage-bar">
@@ -1218,7 +1287,52 @@ export function Plan2d(props: Plan2dProps) {
 
       {props.mode === 'shape' && (
         <div className="spl-stage-bar">
-          <span className="spl-note">Drag a corner. Double-tap a wall to add one, or tap a wall to type its length.</span>
+          <span className="spl-note">
+            Drag a corner, or pick one here and nudge it with the arrow keys. Double-tap a wall to add a corner, or tap a wall
+            to type its length.
+          </span>
+          {/* Every one of these does something the pointer could already do and
+              the keyboard could not: pick a corner, move it, add one, take one
+              away. The picker is the way in - nothing else in the bar means
+              anything until a corner is chosen. */}
+          <div className="spl-field spl-field-inline">
+            <label htmlFor={`${fieldIds}-corner`}>Corner</label>
+            <select
+              id={`${fieldIds}-corner`}
+              className="spl-select spl-select-sm"
+              value={corner === null ? '' : String(corner)}
+              onChange={(event) => setCorner(event.target.value === '' ? null : Number(event.target.value))}
+            >
+              <option value="">None picked</option>
+              {props.geometry.vertices.map((_, index) => (
+                <option key={index} value={index}>{`Corner ${index + 1} of ${props.geometry.vertices.length}`}</option>
+              ))}
+            </select>
+          </div>
+          {chosenCorner && (
+            <>
+              <PlanLengthField
+                label="Across"
+                units={props.geometry.units}
+                valueMm={chosenCorner.x}
+                onChange={(mm) => corner !== null && moveCorner(corner, { x: mm, y: chosenCorner.y })}
+              />
+              <PlanLengthField
+                label="Down"
+                units={props.geometry.units}
+                valueMm={chosenCorner.y}
+                onChange={(mm) => corner !== null && moveCorner(corner, { x: chosenCorner.x, y: mm })}
+              />
+            </>
+          )}
+          <button
+            type="button"
+            className="spl-btn"
+            disabled={corner === null}
+            onClick={() => corner !== null && addCornerAfter(corner)}
+          >
+            Add a corner
+          </button>
           <button
             type="button"
             className="spl-btn spl-btn-danger"
@@ -1234,10 +1348,10 @@ export function Plan2d(props: Plan2dProps) {
         <div className="spl-stage-bar">
           <span className="spl-note">
             {draft.length === 0
-              ? 'Tap each corner of your room in turn.'
+              ? 'Tap each corner of your space in turn.'
               : draft.length < 3
                 ? `${draft.length} corner${draft.length === 1 ? '' : 's'} so far - keep going.`
-                : 'Tap the first corner again to close the room.'}
+                : 'Tap the first corner again to close the space.'}
           </span>
           <button type="button" className="spl-btn" disabled={draft.length === 0} onClick={() => setDraft(draft.slice(0, -1))}>
             Back a corner
@@ -1273,10 +1387,54 @@ export function Plan2d(props: Plan2dProps) {
         >
           −
         </button>
-        <button type="button" className="spl-btn spl-btn-icon" title="Fit the room to the view" aria-label="Fit the room to the view" onClick={() => fit(true)}>
+        <button type="button" className="spl-btn spl-btn-icon" title="Fit the space to the view" aria-label="Fit the space to the view" onClick={() => fit(true)}>
           ⤢
         </button>
       </div>
+    </div>
+  )
+}
+
+/**
+ * A length in whatever units the space is in, typed rather than dragged.
+ *
+ * Holds text while it is being typed and only settles on blur or Enter, for the
+ * same reason the admin's number boxes do: enforcing on every keystroke makes
+ * some numbers impossible to type, and an empty box is not the number nought.
+ * Anything that does not read as a length is put back rather than applied - a
+ * corner is not the place to find out that "4.2 metres" parsed as four.
+ */
+function PlanLengthField(props: { label: string; units: RoomGeometry['units']; valueMm: number; onChange: (mm: number) => void }) {
+  const id = useId()
+  const [draft, setDraft] = useState<string | null>(null)
+  const text = draft ?? formatLength(props.valueMm, props.units)
+
+  const settle = () => {
+    const typed = draft
+    setDraft(null)
+    if (typed === null || typed.trim() === '') return
+    const mm = parseLengthMm(typed, props.units === 'imperial' ? 'in' : 'mm')
+    if (mm === null || !Number.isFinite(mm)) return
+    const whole = Math.round(mm)
+    if (whole !== props.valueMm) props.onChange(whole)
+  }
+
+  return (
+    <div className="spl-field spl-field-inline">
+      <label htmlFor={id}>{props.label}</label>
+      <input
+        id={id}
+        className="spl-input spl-input-sm"
+        value={text}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={settle}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+          }
+        }}
+      />
     </div>
   )
 }

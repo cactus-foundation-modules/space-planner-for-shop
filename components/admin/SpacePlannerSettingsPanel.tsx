@@ -80,8 +80,8 @@ export function SpacePlannerSettingsPanel() {
         <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
           On, and the planner vanishes from your shop entirely - no buttons, no links, and its own address says the page does
           not exist. Anyone signed in to this admin with Space Planner access carries on using it as normal, so you can live
-          with it on your real catalogue before anybody else meets it. Plans you have already shared by link keep working, since
-          you sent those to somebody on purpose. Saving a plan still needs a customer account, staff or not.
+          with it on your real catalogue before anybody else meets it. Layouts you have already shared by link keep working, since
+          you sent those to somebody on purpose. Saving a layout still needs a customer account, staff or not.
         </p>
       </section>
 
@@ -99,9 +99,9 @@ export function SpacePlannerSettingsPanel() {
       </section>
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>What customers can do with a plan</h3>
+        <h3 style={{ margin: 0 }}>What customers can do with a layout</h3>
         <Toggle label="Ask for a quote" checked={config.quoteEnabled} onChange={(value) => patch({ quoteEnabled: value })} />
-        <Toggle label="Email themselves the plan" checked={config.emailPlanEnabled} onChange={(value) => patch({ emailPlanEnabled: value })} />
+        <Toggle label="Email themselves the layout" checked={config.emailPlanEnabled} onChange={(value) => patch({ emailPlanEnabled: value })} />
         <Toggle
           label={`Photoreal pictures${renderWorker ? '' : ' (the picture service is not set up on this site yet)'}`}
           checked={config.rendersEnabled}
@@ -112,22 +112,13 @@ export function SpacePlannerSettingsPanel() {
           checked={config.deliveryColumnEnabled}
           onChange={(value) => patch({ deliveryColumnEnabled: value })}
         />
-        <Toggle
-          label="Let customers download the 3D models in their plan"
-          checked={config.glbExportEnabled}
-          onChange={(value) => patch({ glbExportEnabled: value })}
-        />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-          Off by default. With it on, anyone can save your suppliers&apos; 3D models to their own computer. The floor plan, the
-          item list and the pictures all work either way.
-        </p>
       </section>
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Spacing guidance</h3>
         <Toggle label="Warn about tight walkways" checked={config.clearanceWarningsEnabled} onChange={(value) => patch({ clearanceWarningsEnabled: value })} />
         <NumberField label="Walkway (mm)" value={config.walkwayClearanceMm} min={0} max={5000} onChange={(value) => patch({ walkwayClearanceMm: value })} />
-        <NumberField label="Room behind a desk for a chair (mm)" value={config.deskChairClearanceMm} min={0} max={5000} onChange={(value) => patch({ deskChairClearanceMm: value })} />
+        <NumberField label="Space behind a desk for a chair (mm)" value={config.deskChairClearanceMm} min={0} max={5000} onChange={(value) => patch({ deskChairClearanceMm: value })} />
         <Textarea label="Wording shown with every warning and on every printout" value={config.guidanceDisclaimer} onChange={(value) => patch({ guidanceDisclaimer: value })} />
       </section>
 
@@ -141,10 +132,9 @@ export function SpacePlannerSettingsPanel() {
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Housekeeping</h3>
-        <NumberField label="Flag spaces untouched for this many months" value={config.roomIdleFlagMonths} min={0} max={120} onChange={(value) => patch({ roomIdleFlagMonths: value })} />
         <NumberField label="Keep usage counts for this many days" value={config.eventRetentionDays} min={0} max={3650} onChange={(value) => patch({ eventRetentionDays: value })} />
         <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-          Idle spaces are only flagged, never deleted - somebody spent an afternoon on those.
+          Nothing a customer saved is ever deleted by this - somebody spent an afternoon on those.
         </p>
       </section>
 

@@ -79,10 +79,10 @@ one need a customer account like everybody else.
   edge to edge, and lined up on the other axis - so a bank of desks actually
   touches. Hold `alt` to escape any of it.
 - **Bring the basket in.** Arriving from the basket stages everything in it under
-  the panel's **Cart** tab - full cards with picture, price and size - to drop
-  into the room one at a time or all at once, or take off the list entirely.
-  Anything a reshaped room can no longer hold waits in the same place rather than
-  being thrown away. On a narrow screen the panel sits below the room at a fixed,
+  the panel's **Waiting** tab - full cards with picture, price and size - to drop
+  into the space one at a time or all at once, or take off the list entirely.
+  Anything a reshaped space can no longer hold waits in the same place rather than
+  being thrown away. On a narrow screen the panel sits below the space at a fixed,
   sensible height, and each pane scrolls itself.
 - **Look at it flat or in 3D**, with perspective on for how it will look and off
   for a drawing you can compare sizes on. **Eye height** is a slider down the side
@@ -92,7 +92,8 @@ one need a customer account like everybody else.
   one layout, so every option you try in that room can be looked at - and
   photographed - from the identical spot. Twelve per space.
 - **Take it away**: add the lot to the basket, ask for a quote, email it to
-  themselves, or export a PDF - the room's measurements and the priced item list
+  themselves, share a read-only link, look back through earlier versions, or
+  export a PDF - the space's measurements and the priced item list
   always; the flat plan, the 3D view, any of their SAVED views (each photographed
   from its own spot) and a quote page by choice. The site's logo rides in the
   print margin of every page, the flat plan is always captured in ink-on-paper
@@ -249,11 +250,22 @@ Named rather than quietly missing:
   cold Chromium start. Worth doing only if renders ever become frequent enough
   for a machine to catch a second job before its idle clock runs out, which today
   they are not.
-- **Delivery dates on the item list.** Wired to a `shop.delivery-estimates`
-  extension point that `advanced-shipping-for-shop` does not publish yet. Absent,
-  the column simply does not appear.
-- **Whole-room GLB export**, room-level share links, owner-authored proposals, and
-  everything else in §17 of the plan.
+- **Delivery dates on the item list.** The column is drawn from 0.1.23, read off
+  the saved layout, but it still needs a `shop.delivery-estimates` extension
+  point that `advanced-shipping-for-shop` does not publish yet. Absent, the
+  column simply does not appear.
+- **Whole-room GLB export**, space-level share links (a LAYOUT can be shared;
+  a space cannot), owner-authored proposals, and everything else in §17 of the
+  plan.
+
+There used to be a `glbExportEnabled` setting here, offered as the control over
+whether customers could download the 3D models. It has gone, and it is worth
+saying why rather than just deleting it: nothing read it, and it could not have
+done that job even if something had. The planner fetches the GLB files into the
+browser in order to draw them, so anyone with devtools open can save them. That
+is inherent to 3D on the web, and any real answer lives in how the files are
+served - short-lived signed urls, a proxying endpoint, decimated public variants
+- not in a checkbox.
 
 ## Rooms of any shape
 

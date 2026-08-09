@@ -2,7 +2,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasSplPermission } from '@/modules/space-planner-for-shop/lib/access'
 import { PlansScreen } from '@/modules/space-planner-for-shop/components/admin/PlansScreen'
 
-export const metadata = { title: 'Rooms & plans — Admin' }
+export const metadata = { title: 'Spaces & layouts — Admin' }
 
 export default async function SpacePlannerPlansScreenPage() {
   const user = await getSessionFromCookie()

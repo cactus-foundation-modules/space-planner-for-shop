@@ -46,7 +46,7 @@ export function SpacePlannerTeaser(props: SpacePlannerTeaserProps) {
           {props.heading?.trim() || 'Plan your space'}
         </h2>
         <p style={{ margin: 0, color: 'var(--color-text-secondary)', maxWidth: '38rem' }}>
-          {props.body?.trim() || 'Draw your room, drop our furniture into it, and see what fits before you buy a thing.'}
+          {props.body?.trim() || 'Draw your space, drop our furniture into it, and see what fits before you buy a thing.'}
         </p>
         <PlannerLaunchButton label={props.buttonLabel?.trim() || 'Open the Space Planner'} from="plain" primary />
       </div>
@@ -72,7 +72,7 @@ export const spacePlannerTeaserPuckComponent = {
   },
   defaultProps: {
     heading: 'Plan your space',
-    body: 'Draw your room, drop our furniture into it, and see what fits before you buy a thing.',
+    body: 'Draw your space, drop our furniture into it, and see what fits before you buy a thing.',
     buttonLabel: 'Open the Space Planner',
     imageUrl: '',
     align: 'left' as const,

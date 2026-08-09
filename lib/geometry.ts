@@ -282,7 +282,7 @@ export function validateRoomGeometry(geometry: RoomGeometry): GeometryIssue[] {
   const vertices = geometry.vertices
 
   if (vertices.length < 3) {
-    issues.push({ code: 'too-few-walls', message: 'A room needs at least three walls.' })
+    issues.push({ code: 'too-few-walls', message: 'A space needs at least three walls.' })
     return issues
   }
 
@@ -309,7 +309,7 @@ export function validateRoomGeometry(geometry: RoomGeometry): GeometryIssue[] {
 
   const box = boundingBox(vertices)
   if (box.maxX - box.minX > MAX_ROOM_SPAN_MM || box.maxY - box.minY > MAX_ROOM_SPAN_MM) {
-    issues.push({ code: 'room-too-large', message: 'That room is over 200 m across. Plan it in sections.' })
+    issues.push({ code: 'room-too-large', message: 'That space is over 200 m across. Plan it in sections.' })
   }
 
   if (geometry.ceilingMm < MIN_CEILING_MM || geometry.ceilingMm > MAX_CEILING_MM) {

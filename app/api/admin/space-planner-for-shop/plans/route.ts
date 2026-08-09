@@ -3,7 +3,7 @@ import { requireSplUser } from '@/modules/space-planner-for-shop/lib/access'
 import { listPlansForAdmin } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getEventSummary, listMostPlacedWithoutModel } from '@/modules/space-planner-for-shop/lib/db/events'
 
-// The Rooms & plans screen.
+// The Spaces & layouts screen.
 //
 // Useful in its own right the moment a customer rings up about a layout they
 // saved - which is the actual reason this screen exists rather than the

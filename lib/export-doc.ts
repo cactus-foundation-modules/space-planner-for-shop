@@ -259,7 +259,7 @@ export function buildPlanExportHtml(input: PlanExportInput): string {
 
   const drawings = [
     input.planImage ? figure(input.planImage, 'The floor plan, to scale.') : '',
-    input.viewImage ? figure(input.viewImage, 'The room in three dimensions.') : '',
+    input.viewImage ? figure(input.viewImage, 'The space in three dimensions.') : '',
     ...(input.savedViews ?? []).map((entry) => figure(entry.image, `From "${entry.name}".`)),
   ]
     .filter(Boolean)
@@ -284,9 +284,9 @@ export function buildPlanExportHtml(input: PlanExportInput): string {
   ${drawings}
 
   <section>
-    <h2>Everything in the room</h2>
-    ${bom.lines.length > 0 ? bomTable(bom, input.hidePrices ?? false, input.hiddenPriceLabel ?? '') : '<p class="muted">Nothing in the room yet.</p>'}
-    ${bom.missing.length > 0 ? `<p class="small muted">${escapeHtml(bom.missing.length === 1 ? 'One thing in this plan is no longer in the shop:' : `${bom.missing.length} things in this plan are no longer in the shop:`)} ${escapeHtml(bom.missing.join(', '))}.</p>` : ''}
+    <h2>Everything in the space</h2>
+    ${bom.lines.length > 0 ? bomTable(bom, input.hidePrices ?? false, input.hiddenPriceLabel ?? '') : '<p class="muted">Nothing in the space yet.</p>'}
+    ${bom.missing.length > 0 ? `<p class="small muted">${escapeHtml(bom.missing.length === 1 ? 'One thing in this layout is no longer in the shop:' : `${bom.missing.length} things in this plan are no longer in the shop:`)} ${escapeHtml(bom.missing.join(', '))}.</p>` : ''}
     <p class="small muted">${escapeHtml(bom.disclaimer)}</p>
     ${input.planUrl ? `<p class="small muted">Open it again at ${escapeHtml(input.planUrl)}</p>` : ''}
   </section>

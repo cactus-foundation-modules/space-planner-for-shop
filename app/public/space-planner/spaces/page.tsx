@@ -10,11 +10,11 @@ import { SpaceDeleteButton } from '@/modules/space-planner-for-shop/components/p
 
 export const metadata = { title: 'My spaces' }
 
-// The library: rooms, and the layouts inside them.
+// The library: spaces, and the layouts inside them.
 //
 // Measure once, compare layouts - that is what a fit-out buyer is actually doing
-// when they ask for a quote, and it is why a room is a first-class thing here
-// rather than a property of a plan.
+// when they ask for a quote, and it is why a space is a first-class thing here
+// rather than a property of a layout.
 export default async function SpacesPage() {
   if (!(await plannerVisible())) notFound()
 
@@ -24,7 +24,7 @@ export default async function SpacesPage() {
       <div style={{ maxWidth: '40rem', margin: '0 auto', padding: '3rem 1.5rem', display: 'grid', gap: '0.75rem' }}>
         <h1 style={{ margin: 0 }}>My spaces</h1>
         <p style={{ color: 'var(--color-text-secondary)' }}>
-          Sign in to see the rooms you have saved. Anything you were part-way through is still in this browser.
+          Sign in to see the spaces you have saved. Anything you were part-way through is still in this browser.
         </p>
         <Link href={`/${getMemberAreaPath()}/login`} prefetch={false} style={{ color: 'var(--color-primary)' }}>
           Sign in →
@@ -55,7 +55,7 @@ export default async function SpacesPage() {
 
       {withPlans.length === 0 && (
         <p style={{ color: 'var(--color-text-secondary)' }}>
-          Nothing saved yet. <Link href="/space-planner" style={{ color: 'var(--color-primary)' }}>Draw your first room</Link> - it takes a minute.
+          Nothing saved yet. <Link href="/space-planner" style={{ color: 'var(--color-primary)' }}>Draw your first space</Link> - it takes a minute.
         </p>
       )}
 
@@ -70,12 +70,12 @@ export default async function SpacesPage() {
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-              {/* Measure once, lay out many times - so a room's own link opens it
+              {/* Measure once, lay out many times - so a space's own link opens it
                   with a fresh layout rather than reopening the last one. */}
               <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
-                New layout in this room →
+                New layout in this space →
               </Link>
-              {/* Deleting the room takes its layouts with it, which the
+              {/* Deleting the space takes its layouts with it, which the
                   confirmation says out loud before it happens. */}
               <SpaceDeleteButton target="room" id={entry.room.id} name={entry.room.name} planCount={entry.planCount} />
             </div>

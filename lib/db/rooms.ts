@@ -106,7 +106,7 @@ export async function createRoom(input: {
     RETURNING *
   `
   const row = rows[0]
-  if (!row) throw new Error('Could not save that room.')
+  if (!row) throw new Error('Could not save that space.')
   return toRoom(row)
 }
 

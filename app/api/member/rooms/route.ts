@@ -40,12 +40,12 @@ export async function POST(request: NextRequest) {
   // pronounce it valid, so the cheap guard has to come before the thorough one.
   const raw = await request.text()
   if (payloadTooLarge(raw)) {
-    return NextResponse.json({ error: 'That room is bigger than we can store. Simplify the outline and try again.' }, { status: 413 })
+    return NextResponse.json({ error: 'That space is bigger than we can store. Simplify the outline and try again.' }, { status: 413 })
   }
 
   const parsed = RoomWriteSchema.safeParse(safeJson(raw))
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That room did not look right.' }, { status: 400 })
+    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That space did not look right.' }, { status: 400 })
   }
 
   const quota = await roomQuotaExceeded(gate.member.id)
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
   const geometry = { ...rewound, vertices: normaliseOrigin(rewound.vertices) }
   const issues = validateRoomGeometry(geometry)
   if (issues.length > 0) {
-    return NextResponse.json({ error: issues[0]?.message ?? 'That room did not look right.', issues }, { status: 400 })
+    return NextResponse.json({ error: issues[0]?.message ?? 'That space did not look right.', issues }, { status: 400 })
   }
 
   const room = await createRoom({

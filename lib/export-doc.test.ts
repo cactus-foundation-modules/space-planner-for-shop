@@ -123,7 +123,7 @@ describe('the exported document', () => {
     expect(html).toContain('POA')
   })
 
-  it('still lists what is in the room when prices are hidden', () => {
+  it('still lists what is in the space when prices are hidden', () => {
     const html = build({ hidePrices: true, hiddenPriceLabel: 'POA' })
     expect(html).toContain('1600 × 800 × 730 mm')
     expect(html).toContain('&lt;script&gt;')
@@ -153,8 +153,8 @@ describe('the exported document', () => {
     expect(html).toContain('1600 × 800 × 730 mm')
   })
 
-  it('says so when the room is empty rather than printing a headless table', () => {
+  it('says so when the space is empty rather than printing a headless table', () => {
     const html = build({ bom: bom({ lines: [], itemCount: 0, total: 0, missing: [] }) })
-    expect(html).toContain('Nothing in the room yet')
+    expect(html).toContain('Nothing in the space yet')
   })
 })

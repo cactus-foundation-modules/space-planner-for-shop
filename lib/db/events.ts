@@ -19,7 +19,6 @@ export type SplEventName =
   | 'room.saved'
   | 'plan.saved'
   | 'item.placed'
-  | 'plan.added-to-cart'
   | 'plan.quoted'
   | 'plan.emailed'
   | 'plan.shared'
@@ -55,11 +54,15 @@ export async function recordEvents(events: Array<{ event: SplEventName; planId?:
   }
 }
 
+// No basket handoff count here, deliberately. Sending a layout to the basket
+// happens entirely in the browser (lib/client/cart-bridge.ts), so there is no
+// server call to count and the number could only ever have been zero. A stat
+// that is always nought reads as "nobody does this" rather than "we do not
+// measure this", which is worse than not showing it.
 export type EventSummary = {
   plansThisWeek: number
   roomsThisWeek: number
   quotesThisWeek: number
-  cartHandoffsThisWeek: number
   openedThisWeek: number
 }
 
@@ -75,7 +78,6 @@ export async function getEventSummary(): Promise<EventSummary> {
     plansThisWeek: map.get('plan.saved') ?? 0,
     roomsThisWeek: map.get('room.saved') ?? 0,
     quotesThisWeek: map.get('plan.quoted') ?? 0,
-    cartHandoffsThisWeek: map.get('plan.added-to-cart') ?? 0,
     openedThisWeek: (map.get('planner.opened') ?? 0) + (map.get('planner.opened-from-cart') ?? 0) + (map.get('planner.opened-from-product') ?? 0),
   }
 }

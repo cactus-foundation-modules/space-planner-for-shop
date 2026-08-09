@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-// Rooms & plans.
+// Spaces & layouts.
 //
 // This screen earns its place the moment a customer rings up about a layout they
 // saved - which is the actual reason it exists. The numbers beside it are the
@@ -19,7 +19,7 @@ type Row = {
   updatedAt: string
 }
 
-type Summary = { plansThisWeek: number; roomsThisWeek: number; quotesThisWeek: number; cartHandoffsThisWeek: number; openedThisWeek: number }
+type Summary = { plansThisWeek: number; roomsThisWeek: number; quotesThisWeek: number; openedThisWeek: number }
 type Wanted = { productId: string; name: string; placements: number }
 
 /** What the detail endpoint answers with - enough to read a layout to a
@@ -165,14 +165,13 @@ export function PlansScreen() {
 
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
-      <h1 style={{ margin: 0 }}>Rooms &amp; plans</h1>
+      <h1 style={{ margin: 0 }}>Spaces &amp; layouts</h1>
 
       {summary && (
         <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
           <Stat label="Opened this week" value={summary.openedThisWeek} />
-          <Stat label="Rooms drawn" value={summary.roomsThisWeek} />
-          <Stat label="Plans saved" value={summary.plansThisWeek} />
-          <Stat label="Sent to the basket" value={summary.cartHandoffsThisWeek} />
+          <Stat label="Spaces drawn" value={summary.roomsThisWeek} />
+          <Stat label="Layouts saved" value={summary.plansThisWeek} />
           <Stat label="Quotes asked for" value={summary.quotesThisWeek} />
         </div>
       )}
@@ -181,7 +180,7 @@ export function PlansScreen() {
         <div className="card" style={{ padding: '1rem' }}>
           <h2 className="card-title" style={{ margin: '0 0 0.5rem' }}>Worth getting modelled</h2>
           <p style={{ margin: 0, color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }}>
-            Customers keep putting these in rooms and we have no 3D model for them, so they show as plain blocks.
+            Customers keep putting these in their spaces and we have no 3D model for them, so they show as plain blocks.
           </p>
           <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.1rem' }}>
             {wanted.map((entry) => (
@@ -195,8 +194,8 @@ export function PlansScreen() {
 
       <div className="field" style={{ margin: 0, maxWidth: '28rem' }}>
         <input
-          aria-label="Search rooms and plans"
-          placeholder="Search by customer, room or layout name"
+          aria-label="Search spaces and layouts"
+          placeholder="Search by customer, space or layout name"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
@@ -219,7 +218,7 @@ export function PlansScreen() {
             <thead>
               <tr>
                 <Th>Customer</Th>
-                <Th>Room</Th>
+                <Th>Space</Th>
                 <Th>Layout</Th>
                 <Th align="right">Items</Th>
                 <Th>Status</Th>
@@ -320,8 +319,8 @@ function PlanRow(props: {
               <div className="card" style={{ padding: '0.75rem 1rem', marginTop: '0.5rem', display: 'grid', gap: '0.6rem' }}>
                 <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
                   {detail.room
-                    ? <>Room <strong>{detail.room.name}</strong> · {areaM2(detail.room.geometry.vertices).toFixed(1)} m² · ceiling {(detail.room.geometry.ceilingMm / 1000).toFixed(2)} m · started {new Date(detail.plan.createdAt).toLocaleDateString('en-GB')} · last touched {new Date(detail.plan.updatedAt).toLocaleDateString('en-GB')}</>
-                    : <>The room this layout belonged to has been deleted. · started {new Date(detail.plan.createdAt).toLocaleDateString('en-GB')}</>}
+                    ? <>Space <strong>{detail.room.name}</strong> · {areaM2(detail.room.geometry.vertices).toFixed(1)} m² · ceiling {(detail.room.geometry.ceilingMm / 1000).toFixed(2)} m · started {new Date(detail.plan.createdAt).toLocaleDateString('en-GB')} · last touched {new Date(detail.plan.updatedAt).toLocaleDateString('en-GB')}</>
+                    : <>The space this layout belonged to has been deleted. · started {new Date(detail.plan.createdAt).toLocaleDateString('en-GB')}</>}
                 </p>
                 {detail.room?.notes ? (
                   <p style={{ margin: 0, fontSize: 'var(--text-sm)' }}>Their notes: {detail.room.notes}</p>

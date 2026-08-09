@@ -20,7 +20,7 @@ export async function spacePlannerDashboardWidget() {
         </div>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{summary.plansThisWeek}</div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>Plans saved</div>
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>Layouts saved</div>
         </div>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{summary.quotesThisWeek}</div>

@@ -39,12 +39,12 @@ export type PlanQuoteResult =
 
 export async function createQuoteFromPlan(input: PlanQuoteInput): Promise<PlanQuoteResult> {
   const lines = planToCartLines(input.plan)
-  if (lines.length === 0) return { ok: false, error: 'There is nothing in this plan to quote yet.' }
+  if (lines.length === 0) return { ok: false, error: 'There is nothing in this layout to quote yet.' }
 
   const config = await getQuoteConfigCached()
   const snapshot = await buildQuoteSnapshot(lines, { customerEmail: input.email })
   if (snapshot.lines.length === 0) {
-    return { ok: false, error: 'Nothing in this plan can be quoted at the moment.' }
+    return { ok: false, error: 'Nothing in this layout can be quoted at the moment.' }
   }
 
   // The plan itself is the context the owner needs to answer sensibly, so the

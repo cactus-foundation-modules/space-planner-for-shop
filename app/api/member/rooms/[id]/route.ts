@@ -46,7 +46,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
 
   const raw = await request.text()
   if (payloadTooLarge(raw)) {
-    return NextResponse.json({ error: 'That room is bigger than we can store. Simplify the outline and try again.' }, { status: 413 })
+    return NextResponse.json({ error: 'That space is bigger than we can store. Simplify the outline and try again.' }, { status: 413 })
   }
   // Geometry is optional as well as notes. Renaming a room is not a change to
   // its shape, and requiring one meant the rename button had to send whatever
@@ -55,7 +55,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   // furniture staged against an outline the member had not agreed to.
   const parsed = RoomWriteSchema.partial({ notes: true, geometry: true }).safeParse(safeJson(raw))
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That room did not look right.' }, { status: 400 })
+    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That space did not look right.' }, { status: 400 })
   }
 
   const existing = await getRoomForMember(id, gate.member.id)
@@ -69,7 +69,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   if (reshaping) {
     const issues = validateRoomGeometry(geometry)
     if (issues.length > 0) {
-      return NextResponse.json({ error: issues[0]?.message ?? 'That room did not look right.', issues }, { status: 400 })
+      return NextResponse.json({ error: issues[0]?.message ?? 'That space did not look right.', issues }, { status: 400 })
     }
   }
 
@@ -87,7 +87,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     // Archive before touching it. A wall moved ten centimetres should not
     // silently eat a pedestal, and "undo" that only lasts as long as the tab is
     // open is not much of a promise on a document somebody spent an afternoon on.
-    await archivePlanVersion(plan, config.maxVersionsPerPlan, 'Before the room was re-measured')
+    await archivePlanVersion(plan, config.maxVersionsPerPlan, 'Before the space was re-measured')
 
     const displacedIds = new Set(displaced.map((item) => item.id))
     const nextItems = {

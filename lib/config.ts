@@ -35,9 +35,9 @@ export const SplConfigSchema = z.object({
   showOnCart: z.boolean().default(true),
   cartButtonLabel: z.string().default('View in Space Planner'),
   showOnProduct: z.boolean().default(true),
-  productButtonLabel: z.string().default('See it in your room'),
+  productButtonLabel: z.string().default('See it in your space'),
   plannerHeading: z.string().default('Plan your space'),
-  plannerIntro: z.string().default('Draw your room, drop furniture in it, and see what fits before you buy a thing.'),
+  plannerIntro: z.string().default('Draw your space, drop furniture in it, and see what fits before you buy a thing.'),
 
   // ---- Quotas ---------------------------------------------------------------
   // Enforced server-side with a plain-English message rather than a 400. A bored
@@ -71,7 +71,7 @@ export const SplConfigSchema = z.object({
     'These spacings are rules of thumb to help you arrange furniture. They are not a workplace assessment, fire-safety advice or a building-regulations check.',
   ),
   bomDisclaimer: z.string().default(
-    'Guidance only - please check the measurements on site. Prices were correct when this plan was saved and exclude any discounts, which are applied at checkout.',
+    'Guidance only - please check the measurements on site. Prices were correct when this layout was saved and exclude any discounts, which are applied at checkout.',
   ),
 
   // ---- Outputs --------------------------------------------------------------
@@ -79,21 +79,18 @@ export const SplConfigSchema = z.object({
   emailPlanEnabled: z.boolean().default(true),
   rendersEnabled: z.boolean().default(false),
   deliveryColumnEnabled: z.boolean().default(true),
-  /**
-   * Whole-room GLB download. Off by default, and deliberately the owner's call.
-   *
-   * Signed asset urls exist so a scraped model link stops working and a
-   * third-party site cannot embed the models at all. A one-click download that
-   * bundles a dozen supplier models into one unsigned file is precisely the
-   * scraper, supplied by us, with a button on it. The floor plan, the item list
-   * and the render serve a customer who wants their layout elsewhere, and none
-   * of them hands over the geometry.
-   */
-  glbExportEnabled: z.boolean().default(false),
+
+  // There used to be a `glbExportEnabled` switch here, offered as the control
+  // over whether customers could download the 3D models. It was never read by
+  // anything, and - more to the point - it could not have done that job even if
+  // it had been. The planner fetches the GLB files into the browser in order to
+  // draw them at all, so anybody with devtools open can save them. Any real
+  // answer to that lives in how the files are served, not in a checkbox.
+  //
+  // `roomIdleFlagMonths` went the same way: `listIdleRooms` in lib/db/rooms.ts
+  // has no caller, so the number governed nothing.
 
   // ---- Housekeeping ---------------------------------------------------------
-  /** Rooms untouched for this long are flagged to the owner, never destroyed. */
-  roomIdleFlagMonths: z.number().int().min(0).max(120).default(24),
   /** How long the anonymous event counters are kept. Zero keeps them for ever. */
   eventRetentionDays: z.number().int().min(0).max(3650).default(180),
   /** How many stale dimension rows the nightly sweep re-resolves. Bounded on purpose. */

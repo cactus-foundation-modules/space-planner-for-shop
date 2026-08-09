@@ -36,11 +36,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   const raw = await request.text()
   if (payloadTooLarge(raw)) {
-    return NextResponse.json({ error: 'That plan is bigger than we can store.' }, { status: 413 })
+    return NextResponse.json({ error: 'That layout is bigger than we can store.' }, { status: 413 })
   }
   const parsed = PlanWriteSchema.safeParse(safeJson(raw))
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That plan did not look right.' }, { status: 400 })
+    return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That layout did not look right.' }, { status: 400 })
   }
 
   const quota = await planQuotaExceeded(id)

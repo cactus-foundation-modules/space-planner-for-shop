@@ -104,7 +104,7 @@ export async function createPlan(input: {
     RETURNING *
   `
   const row = rows[0]
-  if (!row) throw new Error('Could not save that plan.')
+  if (!row) throw new Error('Could not save that layout.')
   return toPlan(row)
 }
 

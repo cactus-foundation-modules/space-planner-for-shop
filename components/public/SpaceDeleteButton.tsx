@@ -76,7 +76,7 @@ export function SpaceDeleteButton(props: Props) {
             setArmed(true)
           }}
           style={quietStyle}
-          aria-label={props.target === 'room' ? `Delete the room ${props.name}` : `Delete the layout ${props.name}`}
+          aria-label={props.target === 'room' ? `Delete the space ${props.name}` : `Delete the layout ${props.name}`}
         >
           Delete
         </button>
@@ -106,7 +106,7 @@ export function SpaceDeleteButton(props: Props) {
         onClick={remove}
         disabled={working}
         style={dangerStyle}
-        aria-label={props.target === 'room' ? `Yes, delete the room ${props.name}` : `Yes, delete the layout ${props.name}`}
+        aria-label={props.target === 'room' ? `Yes, delete the space ${props.name}` : `Yes, delete the layout ${props.name}`}
       >
         {working ? 'Deleting…' : 'Yes, delete'}
       </button>

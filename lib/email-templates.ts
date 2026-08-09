@@ -21,12 +21,12 @@ import type { EmailTemplateDef } from '@/lib/email/registry'
 export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
   {
     key: 'space-planner.plan-emailed',
-    label: 'Your room plan (to the shopper)',
-    subject: 'Your room plan from {{siteName}} - {{planName}}',
+    label: 'Your layout (to the shopper)',
+    subject: 'Your layout from {{siteName}} - {{planName}}',
     bodyHtml:
-      '<p>Here is the plan you put together at {{siteName}}.</p>' +
+      '<p>Here is the layout you put together at {{siteName}}.</p>' +
       '<p><strong>{{roomName}} - {{planName}}</strong><br>{{itemCount}} items, {{total}}</p>' +
-      '<p><a href="{{planUrl}}">Open your plan</a></p>' +
+      '<p><a href="{{planUrl}}">Open your layout</a></p>' +
       '<p style="color:#666;font-size:13px">Or paste this into your browser: {{planUrl}}</p>' +
       '{{items}}' +
       '<p style="color:#666;font-size:13px">{{disclaimer}}</p>',
@@ -39,13 +39,13 @@ export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
   },
   {
     key: 'space-planner.render-done',
-    label: 'Your room picture is ready (to the shopper)',
+    label: 'Your space picture is ready (to the shopper)',
     subject: 'Your picture of {{planName}} is ready',
     bodyHtml:
-      '<p>The picture of your plan has finished.</p>' +
+      '<p>The picture of your layout has finished.</p>' +
       '<p><a href="{{planUrl}}">Have a look</a></p>' +
       '<p style="color:#666;font-size:13px">Or paste this into your browser: {{planUrl}}</p>' +
-      '{{#if stale}}<p>You have moved things around since you asked for it, so it shows the room as it was on {{renderedFor}}.</p>{{/if}}',
+      '{{#if stale}}<p>You have moved things around since you asked for it, so it shows the space as it was on {{renderedFor}}.</p>{{/if}}',
     // `stale` is a flag rather than wording, but it still has to be declared or
     // the editor does not offer it and the preview cannot exercise the branch.
     mergeTags: ['siteName', 'planName', 'planUrl', 'renderedFor', 'stale'],

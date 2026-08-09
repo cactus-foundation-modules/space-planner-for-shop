@@ -116,6 +116,12 @@ type SceneState = {
  */
 function makeControls(camera: PlannerCamera, canvas: HTMLCanvasElement, onStart?: () => void, onEnd?: () => void): OrbitControls {
   const controls = new OrbitControls(camera, canvas)
+  // Keys, on the canvas itself, which is what makes the 3D view reachable
+  // without a pointer at all. OrbitControls only ever binds keydown when it is
+  // asked to, and it never was: the arrow keys did nothing here, whatever the
+  // comment on the Page Up handler below used to claim. Arrows pan; hold Ctrl,
+  // Shift or Cmd with them to orbit. dispose() unbinds this with the rest.
+  controls.listenToKeyEvents(canvas)
   controls.enableDamping = true
   controls.dampingFactor = 0.08
   controls.screenSpacePanning = false
@@ -334,7 +340,7 @@ export function View3d(props: View3dProps) {
         const result = await Promise.race([
           buildItems(props.description, props.models, props.options),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('the 3D room took too long to build')), BUILD_TIMEOUT_MS),
+            setTimeout(() => reject(new Error('the 3D space took too long to build')), BUILD_TIMEOUT_MS),
           ),
         ])
         if (cancelled) {
@@ -353,7 +359,7 @@ export function View3d(props: View3dProps) {
         if (result.measured.length > 0) onMeasuredRef.current?.(result.measured)
       } catch (error) {
         if (cancelled) return
-        console.error('[space-planner] the 3D room could not be built', error)
+        console.error('[space-planner] the 3D space could not be built', error)
         setFailed(true)
       } finally {
         // Only when this build is still the one on screen: a cancelled build is
@@ -537,10 +543,11 @@ export function View3d(props: View3dProps) {
     <div
       ref={wrapRef}
       style={{ position: 'absolute', inset: 0 }}
-      tabIndex={-1}
       onKeyDown={(event) => {
-        // Page Up and Page Down, because the arrow keys are already orbit and
-        // nobody expects a page key to do anything else inside a 3D view.
+        // Page Up and Page Down, because the arrow keys are taken by pan and
+        // orbit (see makeControls) and nobody expects a page key to do anything
+        // else inside a 3D view. Left on the wrapper rather than the canvas so
+        // it still works from the eye-height slider; keydown bubbles.
         if (event.key !== 'PageUp' && event.key !== 'PageDown') return
         event.preventDefault()
         const state = stateRef.current
@@ -548,7 +555,16 @@ export function View3d(props: View3dProps) {
         nudgeHeight(state.camera.position.y + (event.key === 'PageUp' ? KEY_STEP_M : -KEY_STEP_M))
       }}
     >
-      <canvas ref={canvasRef} aria-label="Three-dimensional view of the room. The item list beside it describes everything in here." />
+      {/* Focusable, and role="application" is now the truth rather than a
+          label on a thing no key could reach: the canvas takes Tab, the arrow
+          keys drive the camera through OrbitControls, and Page Up and Page Down
+          change eye height. */}
+      <canvas
+        ref={canvasRef}
+        tabIndex={0}
+        role="application"
+        aria-label="Three-dimensional view of the space. Arrow keys move the camera, hold Shift with them to look around, and Page Up and Page Down change your eye height. The item list beside it describes everything in here."
+      />
 
       {/* Eye height.
           Visible, and a slider, rather than a modifier key alone. A key nobody
@@ -589,11 +605,11 @@ export function View3d(props: View3dProps) {
       )}
 
       <div className="spl-visually-hidden" role="status" aria-live="polite">
-        {busy ? 'Putting the room together.' : failed ? 'The 3D view could not be put together.' : ''}
+        {busy ? 'Putting the space together.' : failed ? 'The 3D view could not be put together.' : ''}
       </div>
       {busy && (
         <div className="spl-coach" aria-hidden="true">
-          Putting the room together…
+          Putting the space together…
         </div>
       )}
       {!busy && failed && (

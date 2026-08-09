@@ -3,6 +3,7 @@
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
+import TurnstileWidget from '@/components/members/TurnstileWidget'
 import { formatMoney } from '@/modules/shop/lib/money'
 import { CataloguePanel } from '@/modules/space-planner-for-shop/components/public/CataloguePanel'
 import { Plan2d } from '@/modules/space-planner-for-shop/components/public/Plan2d'
@@ -316,6 +317,25 @@ export type SpacePlannerProps = {
    * showing an empty list with an explanation attached.
    */
   savedRooms?: SavedRoomLink[]
+  /**
+   * Whether the owner offers a quote from a layout, and an emailed copy of one.
+   *
+   * These are the owner's own switches under Shop > Space Planner. Until now
+   * nothing read them, because nothing called the routes they guard - so the
+   * two toggles governed a feature that had never been reachable. Passed down
+   * rather than fetched, so the buttons are right on the first paint.
+   */
+  quoteAvailable: boolean
+  emailAvailable: boolean
+  /**
+   * Cloudflare's site key, when this shop uses it. The quote and the email
+   * routes both verify a token, and a shop with Turnstile configured refuses
+   * anything that arrives without one - so a missing widget here is not a
+   * cosmetic omission, it is those two buttons never working.
+   */
+  turnstileSiteKey: string | null
+  /** The signed-in member, to fill their own details in rather than ask for them. */
+  member: { name: string; email: string } | null
   /** Staged straight from the basket when the shopper arrived from the cart. */
   stageCart: boolean
   /** Pre-staged single product when they arrived from a product page. */
@@ -332,7 +352,10 @@ type Tab = 'catalogue' | 'tray' | 'selected' | 'items'
 type StageView = 'plan' | 'orbit'
 
 const VIEW_LABELS: Record<StageView, string> = { plan: 'Edit', orbit: 'Preview' }
-const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', tray: 'Cart', selected: 'Selected', items: 'Item list' }
+// 'Waiting', not 'Cart'. The tray is not the shop's basket - it is the things
+// staged out of it that have not been put down in the space yet, and calling it
+// Cart had shoppers hunting it for an order they had already placed.
+const TAB_LABELS: Record<Tab, string> = { catalogue: 'Add things', tray: 'Waiting', selected: 'Selected', items: 'Item list' }
 
 export function SpacePlanner(props: SpacePlannerProps) {
   const [state, dispatch] = useReducer(plannerReducer, undefined, () => emptyState(defaultRoomGeometry()))
@@ -343,7 +366,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [products, setProducts] = useState<Record<string, ProductInfo>>({})
   const [models, setModels] = useState<Map<string, PlannerModel>>(new Map())
   const [message, setMessage] = useState<{ tone: 'info' | 'error'; text: string } | null>(null)
-  /** What the Cart tab says about basket lines that could not come along. */
+  /** What the Waiting tab says about basket lines that could not come along. */
   const [trayNote, setTrayNote] = useState('')
   const [savedPlanId, setSavedPlanId] = useState<string | null>(props.openPlan?.planId ?? null)
   const [savedRoomId, setSavedRoomId] = useState<string | null>(props.openPlan?.roomId ?? null)
@@ -407,6 +430,21 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const cameraProbe = useRef<(() => SavedCamera | null) | null>(null)
   /** Where they were standing when they pressed "Make a photo". See that button. */
   const [photoCamera, setPhotoCamera] = useState<SavedCamera | null>(null)
+  /**
+   * When the things in this layout arrive, if the shop can say.
+   *
+   * Read off the saved layout rather than worked out here, because the answer
+   * comes from the shipping module through an extension point that only exists
+   * server-side. Only for a saved layout that has not been touched since -
+   * dates against furniture that has been moved about since the save are dates
+   * for a different list.
+   */
+  const [delivery, setDelivery] = useState<Record<string, string> | null>(null)
+  /** The four things a saved layout can become. See the dialogs at the foot of this file. */
+  const [sharing, setSharing] = useState(false)
+  const [emailing, setEmailing] = useState(false)
+  const [quoting, setQuoting] = useState(false)
+  const [versionsOpen, setVersionsOpen] = useState(false)
   /**
    * What the flat plan's pointer means. Editing the room is a mode rather than a
    * second screen, so the shopper never loses sight of what they have already
@@ -506,6 +544,31 @@ export function SpacePlanner(props: SpacePlannerProps) {
     setHistory((current) => pushHistory(current, state))
     setDirty(true)
   }, [state])
+
+  // Delivery dates for the saved layout - see the state above for why this only
+  // runs for a saved, unmodified one.
+  useEffect(() => {
+    if (!savedPlanId || dirty) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${savedPlanId}/bom`)
+        if (!response.ok) throw new Error()
+        const data = (await response.json()) as { delivery: { byProduct: Record<string, { label: string }> } | null }
+        if (cancelled) return
+        setDelivery(
+          data.delivery
+            ? Object.fromEntries(Object.entries(data.delivery.byProduct).map(([id, entry]) => [id, entry.label]))
+            : null,
+        )
+      } catch {
+        // A bonus column. It never takes the item list down with it, and a
+        // shop that cannot answer is not a shop with a problem.
+        if (!cancelled) setDelivery(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [savedPlanId, dirty])
 
   // ---- first run --------------------------------------------------------
 
@@ -667,7 +730,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         // empty answer read as "none of this is sold any more" - told customers
         // their basket had been discontinued over a dropped connection.
         setTrayNote('')
-        setMessage({ tone: 'error', text: 'We could not reach the shop to fetch your basket. Try the Cart tab again in a moment.' })
+        setMessage({ tone: 'error', text: 'We could not reach the shop to fetch your basket. Try the Waiting tab again in a moment.' })
         return
       }
       const byId = new Map(items.map((item) => [item.id, item]))
@@ -730,7 +793,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       await stageFromCart('initial')
     })()
     // Deliberately once: re-staging on every basket change would duplicate what
-    // the shopper has already placed. The Cart tab's refresh button is the
+    // the shopper has already placed. The Waiting tab's refresh button is the
     // deliberate version of the same thing.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.stageCart, started])
@@ -757,7 +820,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       // first-run screen with no explanation at all. The basket path has counted
       // and named exactly this case from the start.
       if (!info) {
-        setMessage({ tone: 'info', text: 'That product is not for sale any more, so there was nothing to put in the room. Everything else still works.' })
+        setMessage({ tone: 'info', text: 'That product is not for sale any more, so there was nothing to put in the space. Everything else still works.' })
         return
       }
       const product = { ...info, productId: info.id }
@@ -1044,7 +1107,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       dispatch({ type: 'unstage-item', id: item.id, x: spot.x, y: spot.y })
     }
     if (crowded) {
-      setMessage({ tone: 'info', text: 'The room ran out of clear floor, so some things are on top of each other - drag them apart.' })
+      setMessage({ tone: 'info', text: 'The space ran out of clear floor, so some things are on top of each other - drag them apart.' })
     }
   }, [commit, state.geometry, state.items])
 
@@ -1398,7 +1461,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     setRoomEdit(false)
     setStage('plan')
     setPlanMode('draw')
-    setMessage({ tone: 'info', text: 'Tap each corner of the room in turn, then tap the first one again to close it.' })
+    setMessage({ tone: 'info', text: 'Tap each corner of the space in turn, then tap the first one again to close it.' })
   }, [commit, state.geometry])
 
   const finishDrawing = useCallback(
@@ -1413,7 +1476,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       shapeBeforeDraw.current = null
       setPlanMode('furnish')
       setDirty(true)
-      setMessage({ tone: 'info', text: 'There is your room. Click any wall to type its exact length.' })
+      setMessage({ tone: 'info', text: 'There is your space. Click any wall to type its exact length.' })
     },
     [state.geometry],
   )
@@ -1443,7 +1506,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const exportPdf = useCallback(
     async (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean; viewIds: string[] }) => {
       setExportBusy(true)
-      setExportStep('Getting the room ready…')
+      setExportStep('Getting the space ready…')
       setMessage(null)
       const stageBefore = stage
       const perspectiveBefore = perspective
@@ -1580,10 +1643,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
       result.ok
         ? result.added === 0
           ? // Nothing to do, said as such. This is the ordinary answer for
-            // somebody who came in from the basket and planned the room without
+            // somebody who came in from the basket and planned the space without
             // changing what was in it - and "0 things added to your basket"
             // reads as a failure when it is the opposite.
-            { tone: 'info', text: 'Your basket already holds everything in this room.' }
+            { tone: 'info', text: 'Your basket already holds everything in this space.' }
           : { tone: 'info', text: `${result.added === 1 ? 'One thing' : `${result.added} things`} added to your basket.` }
         : { tone: 'error', text: result.error },
     )
@@ -1694,7 +1757,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
           onDraw={() => {
             setStarted(true)
             setPlanMode('draw')
-            setMessage({ tone: 'info', text: 'Tap each corner of the room in turn, then tap the first one again to close it.' })
+            setMessage({ tone: 'info', text: 'Tap each corner of the space in turn, then tap the first one again to close it.' })
           }}
         />
       </div>
@@ -1721,7 +1784,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 defaultValue={roomName}
                 autoFocus
                 maxLength={120}
-                aria-label="Room name"
+                aria-label="Space name"
                 onBlur={(event) => {
                   if (!nameAbandoned.current) renameRoom(event.target.value)
                   nameAbandoned.current = false
@@ -1823,6 +1886,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
               dispatch({ type: 'set-obstruction', id: obstructionSelection, patch })
               setDirty(true)
             }}
+            onMove={(dx, dy) => {
+              if (!obstructionSelection || (dx === 0 && dy === 0)) return
+              commit()
+              dispatch({ type: 'move-obstruction', id: obstructionSelection, dx, dy, settle: true })
+              setDirty(true)
+            }}
             onRemove={() => {
               if (!obstructionSelection) return
               commit()
@@ -1834,14 +1903,14 @@ export function SpacePlanner(props: SpacePlannerProps) {
           />
         ) : planMode !== 'furnish' ? (
           <div className="spl-bar-actions">
-            <span className="spl-note">{planMode === 'draw' ? 'Drawing the room' : 'Changing the shape'}</span>
+            <span className="spl-note">{planMode === 'draw' ? 'Drawing the space' : 'Changing the shape'}</span>
             {planMode === 'draw' ? (
               <button type="button" className="spl-btn" onClick={cancelDrawing}>
                 Cancel
               </button>
             ) : (
               <button type="button" className="spl-btn spl-btn-primary" onClick={() => setPlanMode('furnish')}>
-                Done with the room
+                Done with the space
               </button>
             )}
           </div>
@@ -1856,7 +1925,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
             {moreOpen ? 'Fewer' : 'More'}
           </button>
           <button type="button" className="spl-btn spl-secondary" onClick={() => setRoomEdit(true)}>
-            Room
+            Space
           </button>
           <button type="button" className="spl-btn spl-secondary" onClick={() => setStartAgain(true)}>
             Start again
@@ -1888,7 +1957,28 @@ export function SpacePlanner(props: SpacePlannerProps) {
               Make a photo
             </button>
           )}
+          <button type="button" className="spl-btn spl-secondary" onClick={() => setSharing(true)}>
+            Share a link
+          </button>
+          {props.emailAvailable && (
+            <button type="button" className="spl-btn spl-secondary" onClick={() => setEmailing(true)}>
+              Email it to me
+            </button>
+          )}
+          {/* Only for a layout that has been saved at least once: there is
+              nothing to look back at otherwise, and a button that opens an
+              empty list is a button that has to be explained. */}
+          {savedPlanId && (
+            <button type="button" className="spl-btn spl-secondary" onClick={() => setVersionsOpen(true)}>
+              Earlier versions
+            </button>
+          )}
           <span className="spl-bar-sep spl-secondary" aria-hidden="true" />
+          {props.quoteAvailable && (
+            <button type="button" className="spl-btn" onClick={() => setQuoting(true)} disabled={placed.length === 0}>
+              Ask for a quote
+            </button>
+          )}
           <button type="button" className="spl-btn" onClick={sendToCart} disabled={placed.length === 0}>
             Add to basket
           </button>
@@ -2110,6 +2200,53 @@ export function SpacePlanner(props: SpacePlannerProps) {
             />
           )}
 
+          {sharing && (
+            <ShareDialog
+              planId={savedPlanId}
+              savePlan={() => savePlan({ quiet: true })}
+              onClose={() => setSharing(false)}
+            />
+          )}
+
+          {emailing && (
+            <EmailDialog
+              planId={savedPlanId}
+              savePlan={() => savePlan({ quiet: true })}
+              defaultTo={props.member?.email ?? ''}
+              turnstileSiteKey={props.turnstileSiteKey}
+              onClose={() => setEmailing(false)}
+            />
+          )}
+
+          {quoting && (
+            <QuoteDialog
+              planId={savedPlanId}
+              savePlan={() => savePlan({ quiet: true })}
+              defaultName={props.member?.name ?? ''}
+              defaultEmail={props.member?.email ?? ''}
+              turnstileSiteKey={props.turnstileSiteKey}
+              onClose={() => setQuoting(false)}
+              onQuoted={() => setMessage({ tone: 'info', text: 'Your quote request is with us. We will be in touch.' })}
+            />
+          )}
+
+          {versionsOpen && savedPlanId && (
+            <HistoryDialog
+              planId={savedPlanId}
+              onRestore={(items) => {
+                // Through the ordinary undo stack, so putting an old version
+                // back is itself undoable on the screen as well as on the
+                // server. The geometry is not versioned - the space is a thing
+                // in its own right - so only the contents come back.
+                commit()
+                dispatch({ type: 'load', snapshot: { geometry: state.geometry, items } })
+                setMessage({ tone: 'info', text: 'That version is back. Save if you want to keep it.' })
+                setDirty(true)
+              }}
+              onClose={() => setVersionsOpen(false)}
+            />
+          )}
+
           {startAgain && (
             <StartAgainDialog
               itemCount={state.items.length}
@@ -2235,6 +2372,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                   disclaimer={props.guidance.disclaimer}
                   priceDisclaimer={props.priceDisclaimer}
                   currencySymbol={props.currencySymbol}
+                  delivery={delivery}
                   selection={state.selection}
                   onSelect={(ids) => dispatch({ type: 'select', ids })}
                 />
@@ -2254,6 +2392,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
           disclaimer={props.guidance.disclaimer}
           priceDisclaimer={props.priceDisclaimer}
           currencySymbol={props.currencySymbol}
+          delivery={delivery}
         />
       </div>
     </div>
@@ -2349,11 +2488,11 @@ function ExportDialog(props: {
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !props.busy) props.onCancel() }}>
       <div ref={dialogRef} className="spl-dialog" role="dialog" aria-modal="true" aria-label="Export as a PDF">
         <h2>Save this as a PDF</h2>
-        <p className="spl-note">The room&apos;s measurements and everything in it, priced, are always included.</p>
+        <p className="spl-note">The space&apos;s measurements and everything in it, priced, are always included.</p>
 
         <label className="spl-check" htmlFor={`${ids}-plan`}>
           <input id={`${ids}-plan`} type="checkbox" checked={includePlanView} onChange={(event) => setIncludePlanView(event.target.checked)} />
-          <span>The flat plan, as you have it on screen</span>
+          <span>The floor plan, as you have it on screen</span>
         </label>
         <label className="spl-check" htmlFor={`${ids}-3d`}>
           <input id={`${ids}-3d`} type="checkbox" checked={include3dView} onChange={(event) => setInclude3dView(event.target.checked)} />
@@ -2383,7 +2522,7 @@ function ExportDialog(props: {
         </label>
 
         {!props.signedIn && (
-          <p className="spl-note">You will be asked to sign in first - the PDF is made from your saved plan.</p>
+          <p className="spl-note">You will be asked to sign in first - the PDF is made from your saved layout.</p>
         )}
 
         <div className="spl-buttons">
@@ -2568,10 +2707,10 @@ function PhotoDialog(props: {
 
   return (
     <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
-      <div ref={dialogRef} className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="A photograph of your room">
-        <h2>A photograph of your room</h2>
+      <div ref={dialogRef} className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="A photograph of your space">
+        <h2>A photograph of your space</h2>
         <p className="spl-note">
-          We build the room again properly and take a picture of it, which takes a few minutes. You do not have to sit and
+          We build the space again properly and take a picture of it, which takes a few minutes. You do not have to sit and
           watch - close this and it will be waiting for you.
         </p>
 
@@ -2624,7 +2763,7 @@ function PhotoDialog(props: {
           <span>Taken from</span>
           <select className="spl-select" value={from} onChange={(event) => setFrom(event.target.value)} disabled={busy}>
             {props.currentCamera && <option value="here">Where I am looking now</option>}
-            <option value="wall">Standing at the wall, looking down the room</option>
+            <option value="wall">Standing at the wall, looking down the space</option>
             {props.views.map((view) => (
               <option key={view.id} value={view.id}>{view.name}</option>
             ))}
@@ -2634,7 +2773,7 @@ function PhotoDialog(props: {
         {failure && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{failure}</span></p>}
         {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
 
-        {!props.signedIn && <p className="spl-note">You will be asked to sign in first - the picture is made from your saved plan.</p>}
+        {!props.signedIn && <p className="spl-note">You will be asked to sign in first - the picture is made from your saved layout.</p>}
 
         <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={props.onClose} disabled={busy}>Close</button>
@@ -2794,7 +2933,7 @@ function OpeningsBar(props: {
   kind: OpeningKind
   onKind: (kind: OpeningKind) => void
   selection: string | null
-  onPatch: (patch: { widthMm?: number; heightMm?: number; sillMm?: number; kind?: OpeningKind }) => void
+  onPatch: (patch: { widthMm?: number; heightMm?: number; sillMm?: number; kind?: OpeningKind; offsetMm?: number }) => void
   onRemove: () => void
   onDone: () => void
 }) {
@@ -2817,6 +2956,12 @@ function OpeningsBar(props: {
           </select>
           <LengthField label="Wide" mm={selected.widthMm} units={units} onChange={(mm) => props.onPatch({ widthMm: mm })} />
           <LengthField label="Tall" mm={selected.heightMm} units={units} onChange={(mm) => props.onPatch({ heightMm: mm })} />
+          {/* Where it sits along its own wall, measured to its near edge. The
+              only way to move a door used to be to drag it, which is no way at
+              all without a pointer. The reducer refits it to the wall, so a
+              number past the end of the wall lands at the end of the wall
+              rather than off it. */}
+          <LengthField label="Along the wall" mm={selected.offsetMm} units={units} min={0} onChange={(mm) => props.onPatch({ offsetMm: mm })} />
           {selected.kind !== 'door' && (
             <LengthField label="Off the floor" mm={selected.sillMm} units={units} onChange={(mm) => props.onPatch({ sillMm: mm })} />
           )}
@@ -2855,6 +3000,7 @@ function ObstructionsBar(props: {
   geometry: RoomGeometry
   selection: string | null
   onPatch: (patch: { label?: string; widthMm?: number; depthMm?: number; heightMm?: number }) => void
+  onMove: (dx: number, dy: number) => void
   onRemove: () => void
   onDone: () => void
 }) {
@@ -2880,6 +3026,24 @@ function ObstructionsBar(props: {
           <LengthField label="Wide" mm={Math.round(box.maxX - box.minX)} units={units} onChange={(mm) => props.onPatch({ widthMm: mm })} />
           <LengthField label="Deep" mm={Math.round(box.maxY - box.minY)} units={units} onChange={(mm) => props.onPatch({ depthMm: mm })} />
           <LengthField label="Tall" mm={selected.heightMm} units={units} onChange={(mm) => props.onPatch({ heightMm: mm })} />
+          {/* Where it stands, as its centre. Dragging was the only way to move a
+              column, so without a pointer one could be put down and sized but
+              never positioned. Typed as an absolute and applied as the shift it
+              implies, because that is the move the reducer takes. */}
+          <LengthField
+            label="Across"
+            mm={Math.round((box.minX + box.maxX) / 2)}
+            units={units}
+            min={0}
+            onChange={(mm) => props.onMove(mm - Math.round((box.minX + box.maxX) / 2), 0)}
+          />
+          <LengthField
+            label="Down"
+            mm={Math.round((box.minY + box.maxY) / 2)}
+            units={units}
+            min={0}
+            onChange={(mm) => props.onMove(0, mm - Math.round((box.minY + box.maxY) / 2))}
+          />
           <button type="button" className="spl-btn spl-btn-danger" onClick={props.onRemove}>Remove</button>
         </>
       ) : (
@@ -2897,7 +3061,7 @@ function ObstructionsBar(props: {
  * one-millimetre window and clamped to the minimum before the second digit
  * arrives.
  */
-function LengthField(props: { label: string; mm: number; units: RoomGeometry['units']; onChange: (mm: number) => void }) {
+function LengthField(props: { label: string; mm: number; units: RoomGeometry['units']; onChange: (mm: number) => void; min?: number }) {
   const id = useId()
   const [text, setText] = useState(() => formatLength(props.mm, props.units))
   const [editing, setEditing] = useState(false)
@@ -2914,7 +3078,11 @@ function LengthField(props: { label: string; mm: number; units: RoomGeometry['un
         onBlur={() => {
           setEditing(false)
           const mm = parseLengthMm(text, props.units === 'imperial' ? 'in' : 'mm')
-          if (mm !== null && mm > 0) props.onChange(mm)
+          // A floor of one millimetre for a width or a height, because nothing
+          // is nought wide. A POSITION is a different matter: a door at the very
+          // start of its wall, or a column against the left-hand edge, is zero -
+          // and refusing zero left those two the one place they could not be put.
+          if (mm !== null && mm >= (props.min ?? 1)) props.onChange(mm)
         }}
         onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
       />
@@ -2942,19 +3110,19 @@ function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onCo
         <h2>Start again?</h2>
         <p className="spl-note">
           {props.itemCount === 0
-            ? 'You will go back to picking a shape for the room.'
+            ? 'You will go back to picking a shape for the space.'
             : clearItems
               ? `You will go back to picking a shape, and ${props.itemCount === 1 ? 'the one thing' : `all ${props.itemCount} things`} you have chosen will be taken out.`
-              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits under "Cart" for you to drop back in.`}
+              : `You will go back to picking a shape. ${props.itemCount === 1 ? 'The one thing' : `All ${props.itemCount} things`} you have chosen ${props.itemCount === 1 ? 'is' : 'are'} kept - anything that no longer fits the new shape waits under "Waiting" for you to drop back in.`}
         </p>
         {props.itemCount > 0 && (
           <label className="spl-check" htmlFor={fieldId}>
             <input id={fieldId} type="checkbox" checked={clearItems} onChange={(event) => setClearItems(event.target.checked)} />
-            <span>Take everything out of the room as well</span>
+            <span>Take everything out of the space as well</span>
           </label>
         )}
         <div className="spl-buttons">
-          <button type="button" className="spl-btn" onClick={props.onCancel}>Keep this room</button>
+          <button type="button" className="spl-btn" onClick={props.onCancel}>Keep this space</button>
           <button type="button" className="spl-btn spl-btn-danger" autoFocus onClick={() => props.onConfirm(clearItems)}>Start again</button>
         </div>
       </div>
@@ -2962,7 +3130,7 @@ function StartAgainDialog(props: { itemCount: number; onCancel: () => void; onCo
   )
 }
 
-/** The room itself, after the first run: ceiling height, and the way back out. */
+/** The space itself, after the first run: ceiling height, and the way back out. */
 function RoomDialog(props: {
   geometry: RoomGeometry
   onCancel: () => void
@@ -2984,7 +3152,7 @@ function RoomDialog(props: {
         className="spl-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Room"
+        aria-label="Space"
         onSubmit={(event) => {
           event.preventDefault()
           const mm = parseLengthMm(value, props.geometry.units === 'imperial' ? 'in' : 'mm')
@@ -2995,7 +3163,7 @@ function RoomDialog(props: {
           props.onCeiling(Math.round(mm))
         }}
       >
-        <h2>Your room</h2>
+        <h2>Your space</h2>
         <p className="spl-note">
           {props.geometry.vertices.length} walls. Click any one of them on the flat plan to type its length.
         </p>
@@ -3087,7 +3255,7 @@ function FirstRun(props: {
       return
     }
     if (w > 100_000 || d > 100_000) {
-      // A typo, not a warehouse: 4200m reads as a length and draws a room the
+      // A typo, not a warehouse: 4200m reads as a length and draws a space the
       // grid can barely address. The geometry validators catch this on every
       // other path in; this is the one they miss.
       setError('That is over 100 m on a side. If the space really is that big, plan it in sections.')
@@ -3115,7 +3283,7 @@ function FirstRun(props: {
         className="spl-first-run"
         onSubmit={(event) => { event.preventDefault(); submitTyped() }}
       >
-        <h1 className="spl-title">Your room</h1>
+        <h1 className="spl-title">Your space</h1>
         <p className="spl-note">Inside measurements, in whatever units you like - 4200, 4.2m and 13&apos; 9&quot; all work.</p>
         <div className="spl-row">
           <div className="spl-field">
@@ -3147,10 +3315,10 @@ function FirstRun(props: {
       <h1 className="spl-title">{props.heading}</h1>
       <p className="spl-note">{props.intro}</p>
       {props.fromCart && (
-        <p className="spl-alert">Your basket is coming along - once the room exists, everything in it will be waiting under the Cart tab.</p>
+        <p className="spl-alert">Your basket is coming along - once the space exists, everything in it will be waiting under the Waiting tab.</p>
       )}
 
-      {/* Rooms already saved, first and by name.
+      {/* Spaces already saved, first and by name.
           A visitor with none never sees any of this, so it costs the main path
           nothing - and somebody who measured their office last week should not
           have to go via their account to get back into it.
@@ -3184,11 +3352,11 @@ function FirstRun(props: {
               All your spaces, and every layout in them →
             </Link>
           </div>
-          <p className="spl-note">Or measure a new room:</p>
+          <p className="spl-note">Or measure a new space:</p>
         </>
       )}
 
-      {/* Two ways to say what the room is, and three shapes to start from and
+      {/* Two ways to say what the space is, and three shapes to start from and
           change. Split rather than five equal cards: "type it" and "draw it" are
           decisions about how you work, the presets are just a head start, and
           five identical boxes make the choice look harder than it is. */}
@@ -3225,15 +3393,15 @@ function FirstRun(props: {
         </button>
       </div>
       <p className="spl-note">
-        Whichever you pick, you can click any wall afterwards and type its real length - the rest of the room follows -
-        and <strong>Room</strong> lets you drag the corners about or add new ones.
+        Whichever you pick, you can click any wall afterwards and type its real length - the rest of the space follows -
+        and <strong>Space</strong> lets you drag the corners about or add new ones.
       </p>
       {/* One quiet line rather than a block: a signed-out visitor is usually a
-          new one, and the answer to "where have my rooms gone" should be here
+          new one, and the answer to "where have my spaces gone" should be here
           without the main path having to carry a sign-in prompt. */}
       {!props.signedIn && (
         <p className="spl-note">
-          Saved a room here before?{' '}
+          Saved a space here before?{' '}
           <Link prefetch={false} className="spl-saved-more" href={props.signInHref}>
             Sign in
           </Link>{' '}
@@ -3272,11 +3440,11 @@ function TrayPanel(props: {
 
   return (
     <div className="spl-stack">
-      <p className="spl-note">Tap one to drop it into the room at a free spot.</p>
+      <p className="spl-note">Tap one to drop it into the space at a free spot.</p>
       {props.note && <p className="spl-alert">{props.note}</p>}
       {props.items.length > 1 && (
         <button type="button" className="spl-btn" onClick={props.onPlaceAll}>
-          Put all {props.items.length} in the room
+          Put all {props.items.length} in the space
         </button>
       )}
       <div className="spl-buttons">
@@ -3348,7 +3516,7 @@ function SelectedPanel(props: {
   const selected = props.state.items.filter((item) => props.state.selection.includes(item.id))
   const first = selected[0]
 
-  if (!first) return <p className="spl-note">Nothing selected. Click something in the room, or add something from Add things.</p>
+  if (!first) return <p className="spl-note">Nothing selected. Click something in the space, or add something from Add things.</p>
 
   return (
     <div className="spl-stack">
@@ -3452,6 +3620,16 @@ function ItemListPanel(props: {
   currencySymbol: string
   selection?: string[]
   onSelect?: (ids: string[]) => void
+  /**
+   * When each line arrives, keyed by product, or null when this shop cannot say.
+   *
+   * The owner's "show delivery dates on the item list" switch is what decides
+   * whether the server works these out at all, and until this column existed
+   * nothing ever asked it - so the switch governed a column that was never
+   * drawn. Null covers three cases that all look the same from here: switched
+   * off, no shipping module, and a layout that has not been saved yet.
+   */
+  delivery?: Record<string, string> | null
 }) {
   // Which placed items each line stands for, so tapping a line can pick them
   // out on the plan. A companion has no items of its own - it rides inside its
@@ -3467,7 +3645,7 @@ function ItemListPanel(props: {
   // The same rule the PDF, the email and the quote price against, so the number
   // on screen and the number on the paperwork cannot disagree.
   const counts = countPlanProducts(props.items)
-  if (counts.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
+  if (counts.size === 0) return <p className="spl-note">Nothing in the space yet.</p>
 
   const rows = [...counts.entries()]
   const total = rows.reduce((sum, [productId, quantity]) => sum + (props.products[productId]?.price ?? 0) * quantity, 0)
@@ -3475,17 +3653,18 @@ function ItemListPanel(props: {
   const anyPriced = rows.some(([productId]) => (props.products[productId]?.price ?? 0) > 0)
   // A listing priced through its variations quotes a "from". Multiplying that
   // into a line total states a price the shop has not agreed to, so where one is
-  // in the room the totals are marked as the lowest it could be rather than
+  // in the space the totals are marked as the lowest it could be rather than
   // presented as the figure.
   const anyFrom = rows.some(([productId]) => props.products[productId]?.priceVaries)
   const selectedSet = new Set(props.selection ?? [])
   const onSelect = props.onSelect
+  const delivery = props.delivery ?? null
 
   return (
     <div className="spl-stack">
       <table className="spl-bom">
         <caption className="spl-note" style={{ textAlign: 'left', paddingBottom: '0.3rem' }}>
-          {onSelect ? 'Everything in the room - tap a line to pick those items out on the plan.' : 'Everything in the room'}
+          {onSelect ? 'Everything in the space - tap a line to pick those items out on the floor plan.' : 'Everything in the space'}
         </caption>
         <thead>
           <tr>
@@ -3493,6 +3672,7 @@ function ItemListPanel(props: {
             <th scope="col" className="spl-num">Qty</th>
             <th scope="col" className="spl-num">Each</th>
             <th scope="col" className="spl-num">Total</th>
+            {delivery && <th scope="col">Arrives</th>}
           </tr>
         </thead>
         <tbody>
@@ -3532,6 +3712,7 @@ function ItemListPanel(props: {
                     ? `${props.products[productId]?.priceVaries ? 'From ' : ''}${formatMoney(each * quantity, props.currencySymbol)}`
                     : '-'}
                 </td>
+                {delivery && <td>{delivery[productId] ?? '-'}</td>}
               </tr>
             )
           })}
@@ -3543,6 +3724,7 @@ function ItemListPanel(props: {
               <td className="spl-num">{itemCount}</td>
               <td className="spl-num" />
               <td className="spl-num">{`${anyFrom ? 'From ' : ''}${formatMoney(total, props.currencySymbol)}`}</td>
+              {delivery && <td />}
             </tr>
           </tfoot>
         )}
@@ -3552,3 +3734,528 @@ function ItemListPanel(props: {
     </div>
   )
 }
+
+/**
+ * The four things a saved layout can become, and the way back to what it was.
+ *
+ * All of this existed on the server from the first release and none of it had
+ * ever been called: the routes were written, gated and rate-limited, and then
+ * nothing was built to press them. The owner's own switches for "ask for a
+ * quote" and "email themselves the layout" therefore governed nothing, no
+ * layout ever got a share token, so the shared page and the admin's "Shared"
+ * badge were unreachable, and no layout was ever attached to a quote, so
+ * "Quotes asked for" on the Plans screen was permanently nought.
+ *
+ * Each one needs a saved layout, so each one saves first if it has to - exactly
+ * as the photograph does, and for the same reason: the server works from what is
+ * stored, and a desk moved since the dialog opened would otherwise be quoted,
+ * emailed and shared where it used to be.
+ */
+
+/** Whatever the shop's own Turnstile is, when it has one. Nothing when it does not. */
+function DialogTurnstile(props: { siteKey: string | null; onToken: (token: string) => void }) {
+  if (!props.siteKey) return null
+  return (
+    <div style={{ margin: '0.5rem 0' }}>
+      <TurnstileWidget siteKey={props.siteKey} onVerify={props.onToken} onExpire={() => props.onToken('')} />
+    </div>
+  )
+}
+
+/**
+ * A link somebody without an account can open.
+ *
+ * The dialog asks the server what it already knows before offering to make
+ * anything: a layout shared last week still has its token, and a second "Make a
+ * link" that quietly hands back the same one reads as a bug the first time
+ * somebody checks.
+ */
+function ShareDialog(props: {
+  planId: string | null
+  savePlan: () => Promise<string | null>
+  onClose: () => void
+}) {
+  const [planId, setPlanId] = useState<string | null>(props.planId)
+  const [path, setPath] = useState<string | null>(null)
+  const [loading, setLoading] = useState(Boolean(props.planId))
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+  const [copied, setCopied] = useState(false)
+  const dialogRef = useDialogFocus<HTMLDivElement>(busy ? undefined : props.onClose)
+
+  // Already shared? The plan route knows, and this is the only thing that asks
+  // it. A layout that has never been saved has no token by definition, so it is
+  // not saved merely for opening this.
+  const openedWith = props.planId
+  useEffect(() => {
+    if (!openedWith) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${openedWith}`)
+        if (!response.ok) throw new Error()
+        const data = (await response.json()) as { plan?: { shareToken: string | null } }
+        if (cancelled) return
+        if (data.plan?.shareToken) setPath(`/space-planner/shared/${data.plan.shareToken}`)
+      } catch {
+        // Not fatal: the button below still makes one. Saying "we could not
+        // check" about a link they have not asked for yet is noise.
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [openedWith])
+
+  const fullUrl = path ? `${typeof window === 'undefined' ? '' : window.location.origin}${path}` : ''
+
+  const share = async () => {
+    if (busy) return
+    setBusy(true)
+    setProblem('')
+    setCopied(false)
+    try {
+      const id = planId ?? (await props.savePlan())
+      // Null means the save refused or asked them to sign in, and has already
+      // said so where they can read it. A second message here would be a
+      // second explanation of the same thing.
+      if (!id) return
+      setPlanId(id)
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/share`, { method: 'POST' })
+      const data = (await response.json().catch(() => null)) as { url?: string; error?: string } | null
+      if (!response.ok || !data?.url) throw new Error(data?.error ?? '')
+      setPath(data.url)
+    } catch (error) {
+      setProblem(error instanceof Error && error.message ? error.message : 'That link would not be made. Try again in a moment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stopSharing = async () => {
+    if (busy || !planId) return
+    setBusy(true)
+    setProblem('')
+    try {
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/share`, { method: 'DELETE' })
+      if (!response.ok) throw new Error()
+      setPath(null)
+      setCopied(false)
+    } catch {
+      setProblem('That link is still live - we could not turn it off just now. Try again in a moment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(fullUrl)
+      setCopied(true)
+    } catch {
+      // No clipboard permission, or an older browser. The box beside it is
+      // selectable, which is the answer people reach for anyway.
+      setProblem('Your browser would not let us copy it - select the address and copy it yourself.')
+    }
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
+      <div ref={dialogRef} className="spl-dialog" role="dialog" aria-modal="true" aria-label="Share this layout">
+        <h2>Share this layout</h2>
+        <p className="spl-note">
+          Anyone with the link can see the measurements and the item list. They cannot change anything, and they do not need an
+          account. Turn it off here whenever you like and the link stops working straight away.
+        </p>
+
+        {loading ? (
+          <p className="spl-note">Checking…</p>
+        ) : path ? (
+          <>
+            <div className="spl-field">
+              <label htmlFor="spl-share-url">The link</label>
+              <input id="spl-share-url" className="spl-input" readOnly value={fullUrl} onFocus={(event) => event.currentTarget.select()} />
+            </div>
+            <div className="spl-buttons">
+              <button type="button" className="spl-btn" onClick={() => void copy()}>{copied ? 'Copied' : 'Copy'}</button>
+              <button type="button" className="spl-btn spl-btn-danger" disabled={busy} onClick={() => void stopSharing()}>
+                Stop sharing
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="spl-buttons">
+            <button type="button" className="spl-btn spl-btn-primary" autoFocus disabled={busy} onClick={() => void share()}>
+              {busy ? 'Making a link…' : 'Make a link'}
+            </button>
+          </div>
+        )}
+
+        {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
+
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * "Send this to me."
+ *
+ * Goes to the account's own address unless another one is typed, because the
+ * person who measured the space is very often not the person who signs for it.
+ */
+function EmailDialog(props: {
+  planId: string | null
+  savePlan: () => Promise<string | null>
+  defaultTo: string
+  turnstileSiteKey: string | null
+  onClose: () => void
+}) {
+  const ids = useId()
+  const [to, setTo] = useState(props.defaultTo)
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [problem, setProblem] = useState('')
+  const dialogRef = useDialogFocus<HTMLFormElement>(busy ? undefined : props.onClose)
+
+  const send = async () => {
+    if (busy) return
+    setBusy(true)
+    setProblem('')
+    try {
+      const id = props.planId ?? (await props.savePlan())
+      if (!id) return
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim() || undefined, turnstileToken: token || undefined }),
+      })
+      const data = (await response.json().catch(() => null)) as { error?: string } | null
+      if (!response.ok) throw new Error(data?.error ?? '')
+      setSent(true)
+    } catch (error) {
+      setProblem(error instanceof Error && error.message ? error.message : 'That did not send. Try again in a moment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
+      <form
+        ref={dialogRef}
+        className="spl-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Email this layout"
+        onSubmit={(event) => { event.preventDefault(); void send() }}
+      >
+        <h2>Email this layout</h2>
+        {sent ? (
+          <>
+            <p className="spl-note">On its way. It carries the measurements, everything in the layout and what it all comes to.</p>
+            <div className="spl-buttons">
+              <button type="button" className="spl-btn spl-btn-primary" autoFocus onClick={props.onClose}>Close</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="spl-note">The measurements, everything in it and what it comes to - with a link back to this layout.</p>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-to`}>Send it to</label>
+              <input
+                id={`${ids}-to`}
+                className="spl-input"
+                type="email"
+                autoComplete="email"
+                value={to}
+                onChange={(event) => setTo(event.target.value)}
+              />
+            </div>
+            <DialogTurnstile siteKey={props.turnstileSiteKey} onToken={setToken} />
+            {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
+            <div className="spl-buttons">
+              <button type="button" className="spl-btn" onClick={props.onClose}>Cancel</button>
+              <button type="submit" className="spl-btn spl-btn-primary" disabled={busy || (Boolean(props.turnstileSiteKey) && !token)}>
+                {busy ? 'Sending…' : 'Send it'}
+              </button>
+            </div>
+          </>
+        )}
+      </form>
+    </div>
+  )
+}
+
+/**
+ * "Can you price this up properly?"
+ *
+ * The quote itself belongs to the quotes module - this only collects who is
+ * asking. Prefilled from the account, because a signed-in customer being asked
+ * their own name is the sort of thing that ends an enquiry.
+ */
+function QuoteDialog(props: {
+  planId: string | null
+  savePlan: () => Promise<string | null>
+  defaultName: string
+  defaultEmail: string
+  turnstileSiteKey: string | null
+  onClose: () => void
+  onQuoted: () => void
+}) {
+  const ids = useId()
+  const [name, setName] = useState(props.defaultName)
+  const [email, setEmail] = useState(props.defaultEmail)
+  const [phone, setPhone] = useState('')
+  const [company, setCompany] = useState('')
+  const [note, setNote] = useState('')
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+  const [done, setDone] = useState<{ quoteNumber: string; url: string; unavailable: string[] } | null>(null)
+  const dialogRef = useDialogFocus<HTMLFormElement>(busy ? undefined : props.onClose)
+
+  const submit = async () => {
+    if (busy) return
+    setBusy(true)
+    setProblem('')
+    try {
+      const id = props.planId ?? (await props.savePlan())
+      if (!id) return
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${id}/quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+          phone: phone.trim() || undefined,
+          company: company.trim() || undefined,
+          message: note.trim() || undefined,
+          turnstileToken: token || undefined,
+        }),
+      })
+      const data = (await response.json().catch(() => null)) as
+        | { quoteNumber?: string; url?: string; unavailable?: string[]; error?: string }
+        | null
+      if (!response.ok || !data?.quoteNumber) throw new Error(data?.error ?? '')
+      setDone({ quoteNumber: data.quoteNumber, url: data.url ?? '', unavailable: data.unavailable ?? [] })
+      props.onQuoted()
+    } catch (error) {
+      setProblem(error instanceof Error && error.message ? error.message : 'That did not go through. Try again in a moment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
+      <form
+        ref={dialogRef}
+        className="spl-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Ask for a quote"
+        onSubmit={(event) => { event.preventDefault(); void submit() }}
+      >
+        <h2>Ask for a quote</h2>
+        {done ? (
+          <>
+            <p className="spl-note">
+              Thank you - that is with us as quote <strong>{done.quoteNumber}</strong>. We will be in touch.
+            </p>
+            {done.unavailable.length > 0 && (
+              <p className="spl-alert">
+                {/* Said here rather than buried in the reply, because the answer
+                    is usually "ring us" and they are looking at it now. */}
+                We will have to price these separately: {done.unavailable.join(', ')}.
+              </p>
+            )}
+            <div className="spl-buttons">
+              {done.url && (
+                <a className="spl-btn spl-launch" href={done.url} target="_blank" rel="noreferrer">See the quote</a>
+              )}
+              <button type="button" className="spl-btn spl-btn-primary" autoFocus onClick={props.onClose}>Close</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="spl-note">
+              Everything in this layout, priced up properly by a person. We will send you the link, and your layout comes with it.
+            </p>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-name`}>Your name</label>
+              <input id={`${ids}-name`} className="spl-input" autoComplete="name" required value={name} onChange={(event) => setName(event.target.value)} />
+            </div>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-email`}>Email</label>
+              <input id={`${ids}-email`} className="spl-input" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
+            </div>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-phone`}>Telephone (if you would rather we rang)</label>
+              <input id={`${ids}-phone`} className="spl-input" type="tel" autoComplete="tel" value={phone} onChange={(event) => setPhone(event.target.value)} />
+            </div>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-company`}>Company</label>
+              <input id={`${ids}-company`} className="spl-input" autoComplete="organization" value={company} onChange={(event) => setCompany(event.target.value)} />
+            </div>
+            <div className="spl-field">
+              <label htmlFor={`${ids}-note`}>Anything we should know</label>
+              <textarea id={`${ids}-note`} className="spl-input" rows={3} value={note} onChange={(event) => setNote(event.target.value)} />
+            </div>
+            <DialogTurnstile siteKey={props.turnstileSiteKey} onToken={setToken} />
+            {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
+            <div className="spl-buttons">
+              <button type="button" className="spl-btn" onClick={props.onClose}>Cancel</button>
+              <button
+                type="submit"
+                className="spl-btn spl-btn-primary"
+                disabled={busy || !name.trim() || !email.trim() || (Boolean(props.turnstileSiteKey) && !token)}
+              >
+                {busy ? 'Sending…' : 'Send it'}
+              </button>
+            </div>
+          </>
+        )}
+      </form>
+    </div>
+  )
+}
+
+/**
+ * What this layout looked like before.
+ *
+ * Every save has been archiving the one before it since the first release, and
+ * nothing has ever been able to read one back - which matters more than it
+ * sounds, because several notes elsewhere in this module lean on "it is
+ * recoverable" as the reason something is allowed to be destructive.
+ *
+ * Restoring is itself a save, so the thing being replaced is archived on the way
+ * past and a restore can be undone by restoring the one above it.
+ */
+function HistoryDialog(props: {
+  planId: string
+  onRestore: (items: PlanItem[]) => void
+  onClose: () => void
+}) {
+  const [versions, setVersions] = useState<PlanVersionRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState('')
+  const dialogRef = useDialogFocus<HTMLDivElement>(busy ? undefined : props.onClose)
+
+  const planId = props.planId
+  /** Bumped to fetch the list again - see the label handler below. */
+  const [reloads, setReloads] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/versions`)
+        if (!response.ok) throw new Error()
+        const data = (await response.json()) as { versions: PlanVersionRow[] }
+        if (cancelled) return
+        setVersions(data.versions)
+        setProblem('')
+      } catch {
+        if (!cancelled) setProblem('The history would not load. Check the connection and try again.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [planId, reloads])
+
+  const restore = async (version: number) => {
+    if (busy) return
+    setBusy(true)
+    setProblem('')
+    try {
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/versions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version }),
+      })
+      const data = (await response.json().catch(() => null)) as
+        | { plan?: { items: { items: PlanItem[] } }; error?: string }
+        | null
+      if (!response.ok || !data?.plan) throw new Error(data?.error ?? '')
+      props.onRestore(data.plan.items.items)
+      props.onClose()
+    } catch (error) {
+      setProblem(error instanceof Error && error.message ? error.message : 'That version would not come back. Try again in a moment.')
+      setBusy(false)
+    }
+  }
+
+  const label = async (version: number, next: string | null) => {
+    if (busy) return
+    setBusy(true)
+    setProblem('')
+    try {
+      const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/versions`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version, label: next }),
+      })
+      if (!response.ok) throw new Error()
+      setReloads((count) => count + 1)
+    } catch {
+      setProblem('That did not save. Try again in a moment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="spl-dialog-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) props.onClose() }}>
+      <div ref={dialogRef} className="spl-dialog spl-dialog-wide" role="dialog" aria-modal="true" aria-label="Earlier versions of this layout">
+        <h2>Earlier versions</h2>
+        <p className="spl-note">
+          Every save keeps the one before it. Marking one as kept means it stays however many times you save afterwards.
+        </p>
+
+        {loading ? (
+          <p className="spl-note">Loading…</p>
+        ) : versions.length === 0 ? (
+          <p className="spl-note">Nothing yet - this layout has only been saved once.</p>
+        ) : (
+          <ul className="spl-list">
+            {versions.map((version) => (
+              <li key={version.version} className="spl-card">
+                <div>
+                  <strong>{new Date(version.createdAt).toLocaleString('en-GB')}</strong>
+                  <span className="spl-note">
+                    {' '}
+                    · {version.itemCount === 1 ? '1 thing' : `${version.itemCount} things`}
+                    {version.label ? ` · ${version.label}` : ''}
+                  </span>
+                </div>
+                <div className="spl-buttons">
+                  <button type="button" className="spl-btn" disabled={busy} onClick={() => void label(version.version, version.label ? null : 'Kept')}>
+                    {version.label ? 'Stop keeping it' : 'Keep this one'}
+                  </button>
+                  <button type="button" className="spl-btn spl-btn-primary" disabled={busy} onClick={() => void restore(version.version)}>
+                    Put this back
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {problem && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{problem}</span></p>}
+
+        <div className="spl-buttons">
+          <button type="button" className="spl-btn" onClick={props.onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type PlanVersionRow = { version: number; label: string | null; itemCount: number; createdAt: string }

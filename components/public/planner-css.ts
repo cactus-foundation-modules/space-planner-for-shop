@@ -312,10 +312,21 @@ export function plannerCss(): string {
 .spl-pick-value:hover { border-color: var(--color-primary); }
 .spl-pick-value:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .spl-pick-value.is-picked { border-color: var(--color-primary); box-shadow: inset 0 0 0 1px var(--color-primary); }
-/* Not with the rest of the choices - dimmed, never disabled, because it is
+/* Not with the rest of the choices - set apart, never disabled, because it is
    usually available with a different pick and a control you cannot press is a
-   dead end you cannot get out of. */
-.spl-pick-value.is-out { opacity: 0.45; text-decoration: line-through; }
+   dead end you cannot get out of.
+
+   Set apart by colour and a struck-through label rather than by opacity. This
+   was opacity 0.45, which measured 2.68:1 - and WCAG's let-off for an inactive
+   control does not apply to something we go out of our way to keep clickable.
+   The secondary text token measures 5.39:1 in light and 7.16:1 in dark against
+   this pill's own background, and the dashed edge says "different" without
+   leaning on colour alone. */
+.spl-pick-value.is-out {
+  color: var(--color-text-secondary);
+  border-style: dashed;
+  text-decoration: line-through;
+}
 .spl-pick-outnote { margin-top: 0.25rem; }
 .spl-pick-qty { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
 .spl-pick-qty-controls { display: inline-flex; align-items: center; gap: 0.5rem; }
