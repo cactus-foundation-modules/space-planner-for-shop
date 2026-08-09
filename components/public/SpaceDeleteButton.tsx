@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useCallback, useState, useTransition } from 'react'
 import type { CSSProperties } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -30,6 +30,14 @@ type Props = {
 export function SpaceDeleteButton(props: Props) {
   const router = useRouter()
   const [armed, setArmed] = useState(false)
+  // A callback ref rather than an effect: it fires as the confirm button
+  // mounts, which is exactly when focus needs to move onto it. Arming used to
+  // unmount the focused Delete button and mount a span in its place, so focus
+  // fell to the document and a keyboard user had to tab back in from the top of
+  // the page to answer a question they had just asked for.
+  const confirmRef = useCallback((node: HTMLButtonElement | null) => {
+    node?.focus()
+  }, [])
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [refreshing, startTransition] = useTransition()
@@ -59,7 +67,8 @@ export function SpaceDeleteButton(props: Props) {
   if (!armed) {
     return (
       <span style={wrapStyle}>
-        {error && <span style={errorStyle}>{error}</span>}
+        <span role="status" aria-live="polite" style={srOnly}>{error ?? ''}</span>
+        {error && <span style={errorStyle} aria-hidden="true">{error}</span>}
         <button
           type="button"
           onClick={() => {
@@ -77,19 +86,53 @@ export function SpaceDeleteButton(props: Props) {
 
   return (
     <span style={wrapStyle}>
-      <span style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-muted)' }}>
+      {/* A delete that FAILS was completely silent to a screen reader: the
+          message was a conditionally-mounted span with no live region. */}
+      <span role="status" aria-live="polite" style={srOnly}>{error ?? ''}</span>
+      {error && <span style={errorStyle} aria-hidden="true">{error}</span>}
+      <span style={{ fontSize: 'var(--text-sm, 0.875rem)', color: 'var(--color-text-secondary)' }}>
         {props.target === 'room'
           ? `Delete "${props.name}"${props.planCount ? ` and its ${props.planCount} ${props.planCount === 1 ? 'layout' : 'layouts'}` : ''}?`
           : `Delete "${props.name}"?`}
       </span>
-      <button type="button" onClick={remove} disabled={working} style={dangerStyle}>
+      {/* Named, because several rows can be armed at once and an unlabelled
+          "Yes, delete" repeated down a list tells a screen-reader user nothing
+          about which one they are on. Focused on arming, too: the two branches
+          return different elements at the same position, so React unmounted the
+          button that had focus and focus fell to the document. */}
+      <button
+        type="button"
+        ref={confirmRef}
+        onClick={remove}
+        disabled={working}
+        style={dangerStyle}
+        aria-label={props.target === 'room' ? `Yes, delete the room ${props.name}` : `Yes, delete the layout ${props.name}`}
+      >
         {working ? 'Deleting…' : 'Yes, delete'}
       </button>
-      <button type="button" onClick={() => setArmed(false)} disabled={working} style={quietStyle}>
+      <button
+        type="button"
+        onClick={() => setArmed(false)}
+        disabled={working}
+        style={quietStyle}
+        aria-label={`Keep ${props.name}`}
+      >
         Keep it
       </button>
     </span>
   )
+}
+
+/** Announced, never seen. Inline rather than a class: this button renders on
+ *  My spaces, which does not carry the planner's own stylesheet. */
+const srOnly: CSSProperties = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  clipPath: 'inset(50%)',
+  whiteSpace: 'nowrap',
 }
 
 const wrapStyle: CSSProperties = {
@@ -108,10 +151,18 @@ const baseButton: CSSProperties = {
   cursor: 'pointer',
   // A fingertip is not a pointer, and this sits in a list of rows that are
   // themselves links: too small a target here is a tap that opens the layout.
-  minHeight: '2.25rem',
+  //
+  // 2.75rem, and set here rather than left to the module's coarse-pointer block
+  // - an inline style is what @media cannot reach, so naming the hazard above
+  // and then shipping a 36px target was the one control the rule could not
+  // rescue.
+  minHeight: '2.75rem',
 }
 
-const quietStyle: CSSProperties = { ...baseButton, color: 'var(--color-text-muted)' }
+// Full-strength text, not the secondary tone: this is the button's own label,
+// and a control is not supporting text. Quiet here means quiet in weight and
+// border, not in contrast.
+const quietStyle: CSSProperties = { ...baseButton, color: 'var(--color-text)' }
 
 const dangerStyle: CSSProperties = {
   ...baseButton,

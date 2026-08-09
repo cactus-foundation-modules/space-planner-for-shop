@@ -7,6 +7,11 @@ import { prisma } from '@/lib/db/prisma'
 // every one of them reads as an unused file in the library - and the library's
 // "delete everything unused" button would be pointing straight at customers'
 // saved plans.
+//
+// The saved plan's own snapshot counts too. It holds the catalogue thumbnail
+// each line was showing when the plan was saved, and after the product itself is
+// deleted that copy is the only description of it left anywhere - which is
+// precisely the picture the unused-media sweep would otherwise take away.
 export async function spacePlannerMediaUsageProvider(): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ ref: string | null }[]>`
     SELECT "thumbnail_media_id" AS ref FROM "spl_rooms" WHERE "thumbnail_media_id" IS NOT NULL
@@ -16,6 +21,14 @@ export async function spacePlannerMediaUsageProvider(): Promise<string[]> {
     SELECT "result_media_id" AS ref FROM "spl_render_jobs" WHERE "result_media_id" IS NOT NULL
     UNION ALL
     SELECT "result_url" AS ref FROM "spl_render_jobs" WHERE "result_url" <> ''
+    UNION ALL
+    SELECT entry.value ->> 'image' AS ref
+      FROM "spl_plans", jsonb_each("product_snapshot") AS entry
+     WHERE jsonb_typeof("product_snapshot") = 'object' AND entry.value ->> 'image' IS NOT NULL
+    UNION ALL
+    SELECT entry.value ->> 'image' AS ref
+      FROM "spl_plan_versions", jsonb_each("product_snapshot") AS entry
+     WHERE jsonb_typeof("product_snapshot") = 'object' AND entry.value ->> 'image' IS NOT NULL
   `
   return rows.map((row) => row.ref).filter((ref): ref is string => Boolean(ref))
 }

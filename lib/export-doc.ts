@@ -31,6 +31,16 @@ export type PlanExportInput = {
   viewImage?: string | null
   /** The saved views the shopper ticked, each photographed from its own spot. */
   savedViews?: Array<{ name: string; image: string }>
+  /**
+   * Whether this shop shows prices at all.
+   *
+   * A shop-wide decision, so it governs the item list on page one and not only
+   * the quote page - the two disagreeing inside one document was how a
+   * quote-only shop ended up posting its own trade prices out.
+   */
+  hidePrices?: boolean
+  /** What stands in for a price when they are hidden. The shop's own wording. */
+  hiddenPriceLabel?: string
   /** The quote page, when it was asked for. Null leaves it out entirely. */
   quote?: QuotePageInput | null
   /** Today, formatted by the caller - nothing here reads the clock. */
@@ -275,7 +285,7 @@ export function buildPlanExportHtml(input: PlanExportInput): string {
 
   <section>
     <h2>Everything in the room</h2>
-    ${bom.lines.length > 0 ? bomTable(bom, false, '') : '<p class="muted">Nothing in the room yet.</p>'}
+    ${bom.lines.length > 0 ? bomTable(bom, input.hidePrices ?? false, input.hiddenPriceLabel ?? '') : '<p class="muted">Nothing in the room yet.</p>'}
     ${bom.missing.length > 0 ? `<p class="small muted">${escapeHtml(bom.missing.length === 1 ? 'One thing in this plan is no longer in the shop:' : `${bom.missing.length} things in this plan are no longer in the shop:`)} ${escapeHtml(bom.missing.join(', '))}.</p>` : ''}
     <p class="small muted">${escapeHtml(bom.disclaimer)}</p>
     ${input.planUrl ? `<p class="small muted">Open it again at ${escapeHtml(input.planUrl)}</p>` : ''}

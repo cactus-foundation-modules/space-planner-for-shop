@@ -103,7 +103,14 @@ export async function upsertFileMeta(
       ${patch.notes ?? ''},
       ${reviewedAt ?? null}
     )
-    ON CONFLICT ("model_id") DO UPDATE SET
+    -- The predicate is not decoration. Both unique indexes on this table are
+    -- PARTIAL (001_initial: WHERE "model_id" IS NOT NULL, because a product-scope
+    -- row leaves it null), and Postgres will not infer a partial index as the
+    -- arbiter unless the statement repeats its predicate - it raises 42P10 at
+    -- plan time instead. Without it every yaw correction, every "leave the
+    -- detail alone" tick and every "mark as checked" failed, and the screen told
+    -- the owner to check their connection.
+    ON CONFLICT ("model_id") WHERE "model_id" IS NOT NULL DO UPDATE SET
       "yaw_offset_degrees" = COALESCE(${patch.yawOffsetDegrees ?? null}, "spl_model_meta"."yaw_offset_degrees"),
       "footprint_override" = CASE
         WHEN ${patch.footprintOverride === undefined} THEN "spl_model_meta"."footprint_override"
@@ -129,7 +136,8 @@ export async function upsertProductMeta(
   await prisma.$executeRaw`
     INSERT INTO "spl_model_meta" ("scope", "product_id", "mount_type", "notes", "reviewed_at")
     VALUES ('product', ${productId}, ${patch.mountType ?? null}, ${patch.notes ?? ''}, ${reviewedAt ?? null})
-    ON CONFLICT ("product_id") DO UPDATE SET
+    -- Partial index again, same reason as upsertFileMeta above.
+    ON CONFLICT ("product_id") WHERE "product_id" IS NOT NULL DO UPDATE SET
       "mount_type" = CASE
         WHEN ${patch.mountType === undefined} THEN "spl_model_meta"."mount_type"
         ELSE ${patch.mountType ?? null}
@@ -176,27 +184,45 @@ export async function listModelledProductIds(): Promise<string[]> {
  * pointed at the twelve models customers actually use, and worth nothing at all
  * when it is a list of two hundred and fifty in alphabetical order.
  */
-export async function listUnreviewedModels(limit = 50): Promise<Array<{ modelId: string; productId: string; url: string; format: string; placements: number; yawOffsetDegrees: number; noDecimation: boolean }>> {
+export async function listUnreviewedModels(
+  limit = 50,
+  opts: { includeReviewed?: boolean } = {},
+): Promise<Array<{ modelId: string; productId: string; productName: string; url: string; format: string; placements: number; yawOffsetDegrees: number; noDecimation: boolean; reviewed: boolean }>> {
   // The current corrections ride along so the screen can SHOW them: a form that
   // renders every yaw as 0° whatever is stored is a form that tells the person
   // correcting models that their last correction did not take.
-  const rows = await prisma.$queryRaw<Array<{ model_id: string; product_id: string; url: string; format: string; placements: bigint; yaw_offset_degrees: number | null; no_decimation: boolean | null }>>`
-    SELECT m."id" AS model_id, m."product_id", m."url", m."format",
+  //
+  // The product's name rides along too. The screen used to show the file name
+  // alone, and a person correcting "chair_v3_final_FINAL.glb" has no idea which
+  // of forty chairs they are about to turn round.
+  //
+  // includeReviewed drops the worst-offenders filter. This is the only listing
+  // there is, so without it marking a model checked removed the one screen that
+  // can correct it - and a rotation noticed as wrong a week later had nowhere
+  // left to be put right.
+  const unchecked = opts.includeReviewed
+    ? Prisma.sql`TRUE`
+    : Prisma.sql`(meta."id" IS NULL OR meta."reviewed_at" IS NULL)`
+  const rows = await prisma.$queryRaw<Array<{ model_id: string; product_id: string; product_name: string | null; url: string; format: string; placements: bigint; yaw_offset_degrees: number | null; no_decimation: boolean | null; reviewed_at: Date | null }>>`
+    SELECT m."id" AS model_id, m."product_id", p."name" AS product_name, m."url", m."format",
            COALESCE((SELECT COUNT(*) FROM "spl_events" e WHERE e."product_id" = m."product_id" AND e."event" = 'item.placed'), 0)::bigint AS placements,
-           meta."yaw_offset_degrees", meta."no_decimation"
+           meta."yaw_offset_degrees", meta."no_decimation", meta."reviewed_at"
     FROM "p3d_models" m
+    LEFT JOIN "shp_products" p ON p."id" = m."product_id"
     LEFT JOIN "spl_model_meta" meta ON meta."model_id" = m."id"
-    WHERE meta."id" IS NULL OR meta."reviewed_at" IS NULL
+    WHERE ${unchecked}
     ORDER BY placements DESC, m."created_at" DESC
     LIMIT ${limit}
   `
   return rows.map((row) => ({
     modelId: row.model_id,
     productId: row.product_id,
+    productName: row.product_name ?? '',
     url: row.url,
     format: row.format,
     placements: Number(row.placements),
     yawOffsetDegrees: row.yaw_offset_degrees ?? 0,
     noDecimation: row.no_decimation ?? false,
+    reviewed: row.reviewed_at !== null,
   }))
 }

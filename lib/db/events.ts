@@ -27,11 +27,14 @@ export type SplEventName =
   | 'plan.exported'
   | 'plan.printed'
 
-export async function recordEvent(event: SplEventName, opts: { planId?: string | null; productId?: string | null } = {}): Promise<void> {
+export async function recordEvent(
+  event: SplEventName,
+  opts: { planId?: string | null; productId?: string | null; memberId?: string | null } = {},
+): Promise<void> {
   try {
     await prisma.$executeRaw`
-      INSERT INTO "spl_events" ("event", "plan_id", "product_id")
-      VALUES (${event}, ${opts.planId ?? null}, ${opts.productId ?? null})
+      INSERT INTO "spl_events" ("event", "plan_id", "product_id", "member_id")
+      VALUES (${event}, ${opts.planId ?? null}, ${opts.productId ?? null}, ${opts.memberId ?? null})
     `
   } catch {
     // Deliberately swallowed. See the note at the top of the file.
@@ -112,6 +115,24 @@ export async function purgeOldEvents(retentionDays: number): Promise<number> {
  * adding one entry to it would force a core release for what is module-local
  * work. Contact-form counts its own rows for the same reason.
  */
+/**
+ * How many of these this MEMBER has run inside the window.
+ *
+ * Counted off the member rather than off their current plan ids, which is what
+ * countRecentEvents below does and why it is no longer what the rate limits
+ * call: an orphaned event counts for nothing, so deleting the plans handed the
+ * allowance straight back. Migration 004 fixed the render limit the same way,
+ * by counting a table that knows whose job it was.
+ */
+export async function countRecentEventsForMember(event: SplEventName, memberId: string, windowMinutes: number): Promise<number> {
+  const cutoff = new Date(Date.now() - windowMinutes * 60 * 1000)
+  const rows = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM "spl_events"
+    WHERE "event" = ${event} AND "created_at" > ${cutoff} AND "member_id" = ${memberId}
+  `
+  return Number(rows[0]?.count ?? 0)
+}
+
 export async function countRecentEvents(event: SplEventName, planIds: string[], windowMinutes: number): Promise<number> {
   if (planIds.length === 0) return 0
   const cutoff = new Date(Date.now() - windowMinutes * 60 * 1000)

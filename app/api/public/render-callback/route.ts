@@ -39,6 +39,13 @@ export async function POST(request: NextRequest) {
 
   const expected = await getRenderCallbackToken(parsed.data.jobId)
   if (!expected || !constantTimeEqual(expected, parsed.data.token)) {
+    // Also where a plan deleted mid-render lands: the job row goes with it, so
+    // there is no token left to check and the worker's upload is left in the
+    // bucket with no library row pointing at it. Deliberately still a 403 -
+    // filing media for a job that cannot be authenticated is the one thing this
+    // check exists to prevent, and the cost of the alternative is a few stray
+    // megabytes on a rare race. The machine is still cleaned up: it is destroyed
+    // by its own deadline and by the sweep, neither of which needs this reply.
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
@@ -47,14 +54,25 @@ export async function POST(request: NextRequest) {
   // for no reason.
   const job = await getRenderJob(parsed.data.jobId)
 
+  // A job that has already been settled is answered here, before anything is
+  // written. Delivery is at-least-once and the token outlives the job, so a
+  // retried callback used to reach register() and file a SECOND library row
+  // against the same stored object - a row nothing references, which is exactly
+  // what the library's unused-media sweep deletes, taking the shared object and
+  // the real picture with it. The machine is still destroyed below: the second
+  // destroy is free, and a machine left standing is not.
+  const settled = Boolean(job && job.status !== 'QUEUED' && job.status !== 'RUNNING')
+
   let result: { mediaId?: string | null; url?: string; error?: string }
-  if (parsed.data.error) {
+  if (settled) {
+    result = {}
+  } else if (parsed.data.error) {
     result = { error: parsed.data.error }
   } else {
     result = await register(job?.params, parsed.data.sizeBytes)
   }
 
-  const finished = await finishRenderJob(parsed.data.jobId, result)
+  const finished = settled ? null : await finishRenderJob(parsed.data.jobId, result)
 
   // Whatever happened to the picture, the machine is done with. Destroyed even
   // on a duplicate callback: the second one is free, and a machine still

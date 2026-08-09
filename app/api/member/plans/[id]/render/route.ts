@@ -1,19 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
-import { getPlanForMember, listPlansForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { getPlanForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import {
+  countRecentRendersForMember,
   createRenderJob,
+  failStaleRenderJobs,
   finishRenderJob,
   getLiveRenderForPlan,
   getRenderCallbackToken,
   listRendersForPlan,
   markRenderRunning,
+  RenderAlreadyLiveError,
   setRenderMachine,
 } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { getSplConfigCached, renderEnvConfigured, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
-import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
-import { buildRenderJobPayload, RenderStorageError, type RenderJobPayload } from '@/modules/space-planner-for-shop/lib/render-dispatch'
+import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
+import { buildRenderJobPayload, type RenderJobPayload } from '@/modules/space-planner-for-shop/lib/render-dispatch'
 import { payloadTooLarge, readSavedCamera } from '@/modules/space-planner-for-shop/lib/validation'
 import { createRenderMachine, destroyRenderMachine } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
 import { SplFlyError } from '@/modules/space-planner-for-shop/lib/fly/api'
@@ -32,6 +35,36 @@ import { SplFlyError } from '@/modules/space-planner-for-shop/lib/fly/api'
 // own worker and we simply post to it - no machine is created, and none is
 // destroyed, because it is not ours.
 
+/**
+ * What a shopper is told when a picture will not start, whatever went wrong.
+ *
+ * One sentence, on purpose. What the hosting provider actually said - a missing
+ * key, an HTTP 403, an app that would not answer - names somebody else's
+ * plumbing and, in the missing-key case, is an instruction addressed to the site
+ * owner. None of it means anything to a customer.
+ *
+ * The real reason is still written to the job, because the render log in the
+ * admin is where the owner finds out their picture service is broken, and it is
+ * sanitised on the way OUT to a member instead - here and in the poll below.
+ */
+const CANNOT_START_PICTURE = 'We could not start that picture just now. Please try again in a few minutes.'
+
+/**
+ * A stored failure, worded for the shopper.
+ *
+ * The two messages that describe a wait rather than a fault are kept: they end
+ * in "try again in a moment", which is advice a customer can act on. Everything
+ * else becomes the one sentence.
+ */
+function shopperError(stored: string): string {
+  if (!stored) return ''
+  const safe = [
+    'Quite a few pictures are being made at the moment. Give it a minute and ask again.',
+    'The picture machine took too long to start. Please try again in a moment.',
+  ]
+  return safe.includes(stored) ? stored : CANNOT_START_PICTURE
+}
+
 export async function GET(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const gate = await requireMember()
   if (gate.error) return gate.error
@@ -46,7 +79,9 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
       id: job.id,
       status: job.status,
       url: job.resultUrl,
-      error: job.error,
+      // Sanitised here rather than at the point it was stored, so the admin's
+      // render log keeps the real reason.
+      error: shopperError(job.error),
       createdAt: job.createdAt,
       // A render is a photograph of a moment. If the plan has moved on since,
       // the picture is labelled with the date it depicts rather than presented
@@ -76,13 +111,24 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const room = await getRoomForMember(plan.roomId, gate.member.id)
   if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
+  // Age out anything the worker never came back from, before deciding whether a
+  // picture is already on the way. Only the nightly sweep used to do this, and
+  // "one live job per plan" is enforced by a database index now - so a worker
+  // that crashed at nine in the morning locked that layout out of pictures until
+  // twenty past three the next morning, with nothing the owner could do about
+  // it. Bounded, indexed on status, and almost always a no-op.
+  await failStaleRenderJobs()
+
   // One live job per plan. Asking twice returns the job already running rather
   // than starting a second one and paying for both.
   const live = await getLiveRenderForPlan(id)
   if (live) return NextResponse.json({ job: { id: live.id, status: live.status } })
 
-  const mine = await listPlansForMember(gate.member.id)
-  const recent = await countRecentEvents('plan.rendered', mine.map((p) => p.id), config.rateLimitWindowMin)
+  // Counted off the jobs this member owns rather than off the event log, which
+  // carries no member and was therefore counted against their CURRENT plan ids -
+  // so deleting a plan orphaned its events and bought a fresh allowance of
+  // machine time.
+  const recent = await countRecentRendersForMember(gate.member.id, config.rateLimitWindowMin)
   if (recent >= config.maxRendersPerWindow) {
     return NextResponse.json({ error: 'You have asked for a few pictures just now. Give those a moment and try again.' }, { status: 429 })
   }
@@ -94,12 +140,40 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const raw = await request.text()
   const camera = payloadTooLarge(raw) ? null : readSavedCamera((safeJson(raw) as { camera?: unknown } | null)?.camera)
 
-  const job = await createRenderJob({
-    planId: id,
-    memberId: gate.member.id,
-    params: camera ? { view: 'saved-camera', camera } : { view: 'eye-level' },
-    planUpdatedAt: plan.updatedAt,
-  })
+  let job
+  try {
+    job = await createRenderJob({
+      planId: id,
+      memberId: gate.member.id,
+      params: {
+        ...(camera ? { view: 'saved-camera', camera } : { view: 'eye-level' }),
+        // The layout as it is at THIS moment, travelling with the job.
+        //
+        // A render is a photograph of a moment, and `plan_updated_at` above is
+        // the moment it claims. The page the worker photographs used to read the
+        // live rows, so a shopper who pressed the button, was told to close the
+        // dialog, and then dragged a desk while the machine cold-started got a
+        // picture of the layout they had just changed to, stamped with the date
+        // of the one they asked for, described in the email as showing the room
+        // "as it was", and offered a re-render of the picture they were already
+        // looking at. Reshape the room in that window and the photograph is of a
+        // room they never asked to photograph, from a viewpoint chosen for a
+        // different shape.
+        scene: { items: plan.items, productSnapshot: plan.productSnapshot, geometry: room.geometry },
+      },
+      planUpdatedAt: plan.updatedAt,
+    })
+  } catch (error) {
+    // The look-before-you-book above lost a race with another tab or another
+    // tap. The database refused the second job, which is the answer we wanted -
+    // so hand back the one that is already running, exactly as the check does.
+    if (error instanceof RenderAlreadyLiveError) {
+      const running = await getLiveRenderForPlan(id)
+      if (running) return NextResponse.json({ job: { id: running.id, status: running.status } })
+      return NextResponse.json({ error: 'A picture of this layout is already being made.' }, { status: 409 })
+    }
+    throw error
+  }
 
   // Everything from here can fail, and every failure has to close the job before
   // it answers. A job left sitting at QUEUED is a LIVE job, so "one live job per
@@ -115,9 +189,13 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     // that could nominate the key could point that row anywhere.
     await recordUploadKey(job.id, built.key)
   } catch (error) {
-    const message = error instanceof RenderStorageError ? error.message : 'The picture could not be set up.'
-    await finishRenderJob(job.id, { error: message })
-    return NextResponse.json({ error: message }, { status: 503 })
+    console.error('[space-planner] the render job could not be set up', { jobId: job.id, planId: id, error })
+    // The REAL reason is banked on the job. The render log in the admin is the
+    // one place the owner finds out that their picture service is broken, and
+    // filing the customer's sentence there would leave them reading "we could
+    // not start that picture" about their own misconfigured storage.
+    await finishRenderJob(job.id, { error: error instanceof Error ? error.message : String(error) })
+    return NextResponse.json({ error: CANNOT_START_PICTURE }, { status: 503 })
   }
 
   try {
@@ -127,12 +205,15 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       await dispatchToOwnMachine(job.id, payload, config.maxRenderMachines)
     }
   } catch (error) {
-    const message =
-      error instanceof SplFlyError
-        ? error.message
-        : 'The picture service did not answer. Please try again shortly.'
-    await finishRenderJob(job.id, { error: message })
-    return NextResponse.json({ error: message }, { status: 502 })
+    console.error('[space-planner] the render job could not be dispatched', { jobId: job.id, planId: id, error })
+    await finishRenderJob(job.id, { error: error instanceof Error ? error.message : String(error) })
+    // Two of these are worth saying to the shopper in their own words - the
+    // queue is full, or the machine took too long - because they describe a
+    // wait rather than a fault and asking again in a minute genuinely helps.
+    // Anything else names our hosting provider at somebody who came here to buy
+    // a desk.
+    const shopperSafe = error instanceof SplFlyError && error.shopperSafe ? error.message : CANNOT_START_PICTURE
+    return NextResponse.json({ error: shopperSafe }, { status: 502 })
   }
 
   await markRenderRunning(job.id)

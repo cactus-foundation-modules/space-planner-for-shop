@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'crypto'
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type { PlanItems, ProductSnapshot, SplPlan, SplPlanVersion } from '@/modules/space-planner-for-shop/lib/types'
 import { readPlanItems, readProductSnapshot } from '@/modules/space-planner-for-shop/lib/validation'
@@ -122,6 +123,11 @@ export async function updatePlan(
   const current = await getPlanForMember(planId, memberId)
   if (!current) return null
 
+  // Only the columns actually named in the patch are written. It used to write
+  // every column back from the row it had just read, so a small patch carried a
+  // full copy of a snapshot taken moments earlier: asking for a quote (which
+  // patches nothing but quote_id) would put back the furniture as it stood when
+  // the quote route started, quietly undoing a save that landed in between.
   const name = patch.name ?? current.name
   const items = patch.items ?? current.items
   const snapshot = patch.productSnapshot ?? current.productSnapshot
@@ -131,13 +137,13 @@ export async function updatePlan(
 
   const rows = await prisma.$queryRaw<PlanRow[]>`
     UPDATE "spl_plans"
-    SET "name" = ${name},
-        "items" = ${JSON.stringify(items)}::jsonb,
-        "product_snapshot" = ${JSON.stringify(snapshot)}::jsonb,
-        "position" = ${position},
-        "thumbnail_media_id" = ${thumbnail},
-        "quote_id" = ${quoteId},
-        "schema_version" = ${items.version},
+    SET "name" = ${patch.name === undefined ? Prisma.sql`"name"` : Prisma.sql`${name}`},
+        "items" = ${patch.items === undefined ? Prisma.sql`"items"` : Prisma.sql`${JSON.stringify(items)}::jsonb`},
+        "product_snapshot" = ${patch.productSnapshot === undefined ? Prisma.sql`"product_snapshot"` : Prisma.sql`${JSON.stringify(snapshot)}::jsonb`},
+        "position" = ${patch.position === undefined ? Prisma.sql`"position"` : Prisma.sql`${position}`},
+        "thumbnail_media_id" = ${patch.thumbnailMediaId === undefined ? Prisma.sql`"thumbnail_media_id"` : Prisma.sql`${thumbnail}`},
+        "quote_id" = ${patch.quoteId === undefined ? Prisma.sql`"quote_id"` : Prisma.sql`${quoteId}`},
+        "schema_version" = ${patch.items === undefined ? Prisma.sql`"schema_version"` : Prisma.sql`${items.version}`},
         "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${planId} AND "member_id" = ${memberId}
     RETURNING *
@@ -243,6 +249,12 @@ export async function getPlanVersion(planId: string, version: number): Promise<S
  * restore archives what it replaced automatically - core's Layout history works
  * exactly this way, and the reason is the same: "restoring a published layout IS
  * publishing".
+ *
+ * The version number is worked out inside the INSERT, so two saves landing
+ * together both choose the same one and the loser hits the unique key. That is
+ * dropped rather than raised: both were archiving the identical state, so the
+ * archive is already correct - and a five hundred over an unwanted duplicate
+ * copy would fail a member's save for no reason they could act on.
  */
 export async function archivePlanVersion(plan: SplPlan, cap: number, label?: string): Promise<void> {
   await prisma.$executeRaw`
@@ -254,6 +266,7 @@ export async function archivePlanVersion(plan: SplPlan, cap: number, label?: str
       ${JSON.stringify(plan.productSnapshot)}::jsonb,
       ${label ?? null}
     )
+    ON CONFLICT ("plan_id", "version") DO NOTHING
   `
   // Keep the last N, plus anything the member has labelled. A labelled version is
   // one somebody deliberately kept, so the cap does not get to decide about it.
@@ -293,7 +306,11 @@ export async function listPlansForAdmin(opts: { page?: number; perPage?: number;
   const perPage = Math.min(100, Math.max(1, Math.floor(Number(opts.perPage)) || 25))
   const offset = (page - 1) * perPage
   const search = (opts.search ?? '').trim()
-  const like = `%${search}%`
+  // The wildcards are ours, so the typed text must not be allowed to add its
+  // own: a search for "50%" matched every plan in the shop, and one for "_"
+  // matched every plan whose name was one character long plus every other plan
+  // as well. Backslash is Postgres's default ILIKE escape, so it goes first.
+  const like = `%${search.replace(/[\\%_]/g, (character) => `\\${character}`)}%`
 
   const rows = search
     ? await prisma.$queryRaw<Array<PlanRow & { room_name: string; username: string | null; email: string | null }>>`

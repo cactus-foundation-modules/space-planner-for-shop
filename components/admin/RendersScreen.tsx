@@ -42,9 +42,13 @@ export function RendersScreen() {
   const [notice, setNotice] = useState<string | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const mounted = useRef(true)
-  useEffect(() => () => { mounted.current = false }, [])
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts: { showSpinner?: boolean } = {}) => {
+    // Only when somebody asked. The five-second poll must not blink the button
+    // out from under a pointer, but pressing Refresh with no spinner, no
+    // disabled state and no "up to date" afterwards looked like a dead control.
+    if (opts.showSpinner && mounted.current) setLoading(true)
     try {
       const [jobsRes, workerRes] = await Promise.all([
         fetch('/api/m/space-planner-for-shop/admin/renders'),
@@ -56,7 +60,10 @@ export function RendersScreen() {
         if (mounted.current) setJobs(data.jobs)
       }
       if (workerRes.ok && mounted.current) setWorker((await workerRes.json()) as WorkerView)
-      if (!jobsRes.ok && !workerRes.ok) setProblem('This screen would not load. Check the connection and refresh.')
+      // Cleared on success, or one blip left a red line up permanently against
+      // a five-second poll that was quietly succeeding behind it.
+      if (jobsRes.ok && workerRes.ok) setProblem('')
+      else setProblem('This screen would not load. Check the connection and refresh.')
     } catch {
       if (mounted.current) setProblem('This screen would not load. Check the connection and refresh.')
     } finally {
@@ -91,7 +98,9 @@ export function RendersScreen() {
       })
       const data = (await response.json().catch(() => null)) as (WorkerView & { error?: string }) | null
       if (!mounted.current) return
-      if (!response.ok) {
+      if (response.status === 403) {
+        setProblem('Your account can look but not set this up - that needs the Space Planner manage permission.')
+      } else if (!response.ok) {
         setProblem(data?.error ?? 'That did not work.')
       } else if (data) {
         setWorker(data)
@@ -114,8 +123,16 @@ export function RendersScreen() {
     setNotice(null)
     try {
       const response = await fetch('/api/m/space-planner-for-shop/admin/render-worker', { method: 'DELETE' })
-      const data = (await response.json().catch(() => null)) as (WorkerView & { warning?: string }) | null
+      const data = (await response.json().catch(() => null)) as (WorkerView & { warning?: string; error?: string }) | null
       if (!mounted.current) return
+      if (response.status === 403) {
+        setProblem('Your account can look but not take the picture service down - that needs the Space Planner manage permission.')
+        return
+      }
+      if (!response.ok) {
+        setProblem(data?.error ?? 'That did not work.')
+        return
+      }
       if (data) setWorker(data)
       if (data?.warning) setProblem(data.warning)
       else setNotice('Taken down.')
@@ -130,49 +147,54 @@ export function RendersScreen() {
     <div style={{ display: 'grid', gap: '1.25rem' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
         <h1 style={{ margin: 0 }}>Pictures</h1>
-        <button type="button" className="btn" onClick={() => void load()} disabled={loading}>
+        <button type="button" className="btn" onClick={() => void load({ showSpinner: true })} disabled={loading}>
           Refresh
         </button>
       </div>
 
       {worker && <SetUpCard worker={worker} token={token} setToken={setToken} onSetUp={setUp} onTakeDown={takeDown} busy={busy} />}
 
-      {notice && <p style={{ margin: 0, color: 'var(--color-text-muted)' }}>{notice}</p>}
-      {problem && <p style={{ margin: 0, color: 'var(--color-danger, #b3261e)' }}>{problem}</p>}
+      {notice && <p style={{ margin: 0, color: 'var(--color-text-secondary)' }}>{notice}</p>}
+      {problem && <p style={{ margin: 0, color: 'var(--color-danger)' }}>{problem}</p>}
 
       {loading ? (
-        <p style={{ color: 'var(--color-text-muted)' }}>Loading…</p>
+        <p style={{ color: 'var(--color-text-secondary)' }}>Loading…</p>
       ) : jobs.length === 0 ? (
-        <p style={{ color: 'var(--color-text-muted)' }}>Nobody has asked for one yet.</p>
+        // Not while the list is the one that failed to load: printing "nobody
+        // has asked for one yet" underneath "this screen would not load" states
+        // as fact the very thing that could not be read.
+        problem ? null : <p style={{ color: 'var(--color-text-secondary)' }}>Nobody has asked for one yet.</p>
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              <th align="left" style={cell}>Layout</th>
-              <th align="left" style={cell}>Asked for</th>
-              <th align="left" style={cell}>How it went</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.map((job) => (
-              <tr key={job.id}>
-                <td style={cell}>{job.planName}</td>
-                <td style={cell}>{new Date(job.createdAt).toLocaleString('en-GB')}</td>
-                <td style={cell}>
-                  {job.status === 'DONE' && job.resultUrl ? (
-                    <a href={job.resultUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
-                      Have a look
-                    </a>
-                  ) : job.status === 'FAILED' ? (
-                    <span style={{ color: 'var(--color-danger, #b3261e)' }}>{job.error || 'Failed'}</span>
-                  ) : (
-                    job.status.toLowerCase()
-                  )}
-                </td>
+        <div className="table-wrapper">
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                <th scope="col" align="left" style={cell}>Layout</th>
+                <th scope="col" align="left" style={cell}>Asked for</th>
+                <th scope="col" align="left" style={cell}>How it went</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {jobs.map((job) => (
+                <tr key={job.id}>
+                  <td style={cell}>{job.planName}</td>
+                  <td style={cell}>{new Date(job.createdAt).toLocaleString('en-GB')}</td>
+                  <td style={cell}>
+                    {job.status === 'DONE' && job.resultUrl ? (
+                      <a href={job.resultUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
+                        Have a look
+                      </a>
+                    ) : job.status === 'FAILED' ? (
+                      <span style={{ color: 'var(--color-danger)' }}>{job.error || 'Failed'}</span>
+                    ) : (
+                      job.status.toLowerCase()
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
@@ -211,7 +233,7 @@ function SetUpCard(props: {
             ? 'Nothing is running at the moment, which is exactly right - a machine is made when somebody asks for a picture and puts itself away as soon as it is done.'
             : `${worker.liveMachines} ${worker.liveMachines === 1 ? 'picture is' : 'pictures are'} being made right now.`}
         </span>
-        {worker.error && <span style={{ color: 'var(--color-danger, #b3261e)' }}>{worker.error}</span>}
+        {worker.error && <span style={{ color: 'var(--color-danger)' }}>{worker.error}</span>}
         <div>
           <button type="button" className="btn btn-secondary" onClick={props.onTakeDown} disabled={props.busy}>
             {props.busy ? 'Working…' : 'Take it down'}
@@ -242,24 +264,17 @@ function SetUpCard(props: {
             Pictures are made on a machine that only exists while it is drawing one. To build it we need a Fly.io key with
             permission to make apps - an organisation key, from the Tokens page of your Fly.io dashboard.
           </span>
-          <label htmlFor="spl-fly-token" style={{ fontSize: 'var(--text-sm, 0.875rem)', fontWeight: 600 }}>
-            Fly.io API key
-          </label>
-          <input
-            id="spl-fly-token"
-            type="password"
-            value={props.token}
-            onChange={(event) => props.setToken(event.target.value)}
-            placeholder="Paste a Fly.io organisation key"
-            autoComplete="off"
-            style={{
-              padding: '0.5rem 0.6rem',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-sm, 6px)',
-              background: 'var(--color-surface)',
-              color: 'var(--color-text)',
-            }}
-          />
+          <div className="field" style={{ margin: 0 }}>
+            <label htmlFor="spl-fly-token">Fly.io API key</label>
+            <input
+              id="spl-fly-token"
+              type="password"
+              value={props.token}
+              onChange={(event) => props.setToken(event.target.value)}
+              placeholder="Paste a Fly.io organisation key"
+              autoComplete="off"
+            />
+          </div>
         </>
       )}
 
@@ -278,4 +293,4 @@ function SetUpCard(props: {
 }
 
 const cell: React.CSSProperties = { padding: '0.4rem 0.5rem', borderBottom: '1px solid var(--color-border)' }
-const muted: React.CSSProperties = { color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)' }
+const muted: React.CSSProperties = { color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }

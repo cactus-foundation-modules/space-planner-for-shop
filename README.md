@@ -121,12 +121,21 @@ Strictly in this order, cached in `spl_dimension_cache`, and never guessed:
    back in batches (`/admin/dimensions/measure`). It cannot happen in a request: a
    route has sixty seconds and a model averages four megabytes. Doing it in the
    browser is not a compromise - it means the number banked is the extent of the
-   mesh the planner actually puts in the room.
+   mesh the planner actually puts in the room. The posts are sliced to the 200 a
+   batch the route accepts: measurements are pushed one per PRODUCT and a single
+   file can answer for hundreds of them, so a whole file group used to arrive as
+   one oversized body, 400, and be counted as lost on every run for ever.
 2. **Parsed from the spec sheet** - Overall Width/Depth/Height, read as free text.
    A variation inherits its listing's values for any axis it does not state
    itself, which is what it takes to size a range that lists its dimensions once
    and its colours twelve times.
-3. **A category default**, for the axes still missing. Badged "approx." in the UI.
+3. **A category default**, for the axes still missing. Badged "approx." in the UI,
+   and only when the category actually supplied a measurement - a default row
+   that exists but says nothing leaves the badge at "no idea", because the block
+   underneath is still the thing doing the work. The category a product is sized
+   from is ONE category: `getPrimaryCategoryForProducts` (lowest id), with a
+   variation child inheriting its listing's. Anything that reports on these gaps
+   has to count the same way or it recommends work that changes nothing.
 4. **Typed in by hand** by the shopper. Nothing overwrites this, including a
    measurement.
 5. **A labelled block**, so adding something to a plan is never blocked.
@@ -443,6 +452,16 @@ the worker token all live in `spl_render_worker`.
 `spl_settings`, `spl_rooms`, `spl_room_views`, `spl_plans`, `spl_plan_versions`,
 `spl_model_meta`, `spl_category_defaults`, `spl_dimension_cache`,
 `spl_backfill_jobs`, `spl_render_jobs`, `spl_render_worker`, `spl_events`.
+
+Four migrations. `004` adds indexes only - no tables, no columns, nothing new for
+the backup serialiser to learn - but one of them is load-bearing behaviour rather
+than performance: a partial unique index on `spl_render_jobs (plan_id) WHERE
+status IN ('QUEUED','RUNNING')` is what actually enforces one picture at a time
+per layout. The route's own check is a courtesy that two taps in the same second
+both pass. `createRenderJob` therefore uses `ON CONFLICT ... DO NOTHING` and
+treats "no row returned" as the refusal; catching the error instead does not work,
+because Prisma reports a raw query's SQLSTATE as `P2010` with the real code buried
+in the message.
 
 Uninstalling with data removes all of them - and unlike an order or a review, the
 customer has no copy of a plan anywhere else, so `code_only` (core's default, and

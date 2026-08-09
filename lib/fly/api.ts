@@ -19,10 +19,21 @@ const GRAPHQL_API = 'https://api.fly.io/graphql'
  * error, which arrives as a 200 with regrets inside. */
 export class SplFlyError extends Error {
   readonly status: number
-  constructor(message: string, status = 0) {
+  /**
+   * Whether this message may be shown to a shopper.
+   *
+   * Most of these name our hosting provider, quote its API back, or instruct the
+   * site owner to paste in a key - none of which means anything to somebody who
+   * came here to buy a desk, and all of which reads as the shop being broken.
+   * A couple describe a WAIT rather than a fault ("give it a minute"), and those
+   * are worth saying in their own words because asking again genuinely works.
+   */
+  readonly shopperSafe: boolean
+  constructor(message: string, status = 0, opts: { shopperSafe?: boolean } = {}) {
     super(message)
     this.name = 'SplFlyError'
     this.status = status
+    this.shopperSafe = opts.shopperSafe ?? false
   }
 }
 
@@ -33,7 +44,7 @@ export type FlyMachine = {
   region: string
 }
 
-async function rest<T>(token: string, method: string, path: string, body?: unknown): Promise<T> {
+async function rest<T>(token: string, method: string, path: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
   let res: Response
   try {
     res = await fetch(`${MACHINES_API}${path}`, {
@@ -43,7 +54,7 @@ async function rest<T>(token: string, method: string, path: string, body?: unkno
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (error) {
     throw new SplFlyError(`Fly.io could not be reached: ${error instanceof Error ? error.message : String(error)}`)
@@ -146,6 +157,11 @@ export async function waitForMachine(
       token,
       'GET',
       `/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/wait?state=${state}&timeout=${Math.max(1, Math.floor(timeoutSeconds))}`,
+      undefined,
+      // The local abort must outlast the wait Fly itself is asked to hold, or a
+      // merely slow (not stuck) start races its own client timeout and throws
+      // here instead of returning false for the caller's friendly-message path.
+      (timeoutSeconds + 10) * 1000,
     )
     return true
   } catch (error) {

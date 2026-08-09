@@ -6,8 +6,7 @@ import { getPlanForMember, setPlanShare, updatePlan } from '@/modules/space-plan
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { createQuoteFromPlan } from '@/modules/space-planner-for-shop/lib/quote'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
-import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
-import { listPlansForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { countRecentEventsForMember, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { verifyTurnstile } from '@/lib/auth/turnstile'
 
 // "Request a quote for this plan."
@@ -52,8 +51,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const room = await getRoomForMember(plan.roomId, gate.member.id)
   if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  const mine = await listPlansForMember(gate.member.id)
-  const recent = await countRecentEvents('plan.quoted', mine.map((p) => p.id), config.rateLimitWindowMin)
+  const recent = await countRecentEventsForMember('plan.quoted', gate.member.id, config.rateLimitWindowMin)
   if (recent >= config.maxQuotesPerWindow) {
     return NextResponse.json({ error: 'You have sent us a few of these just now. Give us a chance to read them and try again shortly.' }, { status: 429 })
   }
@@ -79,7 +77,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 409 })
 
   await updatePlan(id, gate.member.id, { quoteId: result.quoteId })
-  await recordEvent('plan.quoted', { planId: id })
+  await recordEvent('plan.quoted', { planId: id, memberId: gate.member.id })
   await recordMemberActivity(gate.member.id, 'space-planner.plan-quoted', {
     source: 'space-planner-for-shop',
     metadata: { planId: id, quoteNumber: result.quoteNumber },

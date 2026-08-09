@@ -159,6 +159,10 @@ export async function resolveFlyToken(): Promise<{ token: string | null; source:
  */
 export async function provisionRenderWorker(opts: { token?: string; region?: string; image?: string } = {}): Promise<void> {
   const existing = await getRenderWorker()
+  // Idempotent, not an error: a retry from the admin UI (or two tabs both
+  // pressing the button) must not orphan the app already running - nothing
+  // ever tears down an appName this site has stopped pointing at.
+  if (existing.appName && existing.selfProvisioned) return
   const resolved = opts.token ? { token: opts.token, source: 'own' as const } : await resolveFlyToken()
   if (!resolved.token) {
     throw new SplFlyError('There is no Fly.io key on this site yet. Paste one in and try again.')
@@ -267,7 +271,7 @@ export async function createRenderMachine(jobId: string, ceiling: number): Promi
       (m) => m.state !== 'destroyed' && m.state !== 'destroying',
     ).length
     if (live >= ceiling) {
-      throw new SplFlyError('Quite a few pictures are being made at the moment. Give it a minute and ask again.')
+      throw new SplFlyError('Quite a few pictures are being made at the moment. Give it a minute and ask again.', 0, { shopperSafe: true })
     }
   }
 
@@ -291,7 +295,7 @@ export async function createRenderMachine(jobId: string, ceiling: number): Promi
   const started = await waitForMachine(token, worker.appName, machine.id, 'started', 30)
   if (!started) {
     await destroyMachine(token, worker.appName, machine.id).catch(() => {})
-    throw new SplFlyError('The picture machine took too long to start. Please try again in a moment.')
+    throw new SplFlyError('The picture machine took too long to start. Please try again in a moment.', 0, { shopperSafe: true })
   }
 
   return {

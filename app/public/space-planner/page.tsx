@@ -12,6 +12,7 @@ import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import type { OpenPlan, SavedRoomLink } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
+import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 
 export const metadata = { title: 'Plan your space' }
 
@@ -96,6 +97,25 @@ export default async function SpacePlannerPage({
   const [config, member, shopConfig] = await Promise.all([getSplConfigCached(), getMemberFromCookie(), getShopConfigCached()])
   const signInHref = `/${getMemberAreaPath()}/login`
 
+  // Somebody opened the planner, and where they came from.
+  //
+  // Three event names have been declared since the first release and NONE of
+  // them was ever recorded, so "Opened this week" on the Plans screen and on the
+  // admin dashboard tile read nought for ever - on a module in daily use. The
+  // owner's read of that is "nobody is using this", which is the opposite of
+  // what the data would have said.
+  //
+  // Fire-and-forget, like every other event in this module: a usage counter is
+  // never a reason to fail a page, and recordEvent swallows its own errors.
+  void recordEvent(
+    params.from === 'cart'
+      ? 'planner.opened-from-cart'
+      : params.product || params.productSlug
+        ? 'planner.opened-from-product'
+        : 'planner.opened',
+    { memberId: member?.id ?? null },
+  )
+
   const productSlug = typeof params.productSlug === 'string' ? params.productSlug : null
   const staged = productSlug ? await getProductBySlug(productSlug) : null
 
@@ -136,11 +156,13 @@ export default async function SpacePlannerPage({
           textureMaxPx: config.textureMaxPx,
           decimationEnabled: config.decimationEnabled,
         }}
+        maxItemsPerPlan={config.maxItemsPerPlan}
         guidance={{
           walkwayClearanceMm: config.walkwayClearanceMm,
           disclaimer: config.guidanceDisclaimer,
           enabled: config.clearanceWarningsEnabled,
         }}
+        priceDisclaimer={config.bomDisclaimer}
         currencySymbol={shopConfig.currencySymbol}
         rendersAvailable={rendersAvailable}
         openPlan={openPlan}

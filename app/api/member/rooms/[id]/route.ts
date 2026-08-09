@@ -3,7 +3,7 @@ import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
 import { deleteRoom, getRoomForMember, updateRoom } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { archivePlanVersion, listPlansForRoom, updatePlan } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { RoomWriteSchema, payloadTooLarge } from '@/modules/space-planner-for-shop/lib/validation'
-import { displacedItems, normaliseOrigin, normaliseWinding, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
+import { displacedItems, normaliseGeometryWinding, normaliseOrigin, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
 import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 
@@ -48,7 +48,12 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   if (payloadTooLarge(raw)) {
     return NextResponse.json({ error: 'That room is bigger than we can store. Simplify the outline and try again.' }, { status: 413 })
   }
-  const parsed = RoomWriteSchema.partial({ notes: true }).safeParse(safeJson(raw))
+  // Geometry is optional as well as notes. Renaming a room is not a change to
+  // its shape, and requiring one meant the rename button had to send whatever
+  // the browser happened to be holding - so a wall dragged and not yet saved was
+  // committed by typing a new name, and every OTHER layout in the room had its
+  // furniture staged against an outline the member had not agreed to.
+  const parsed = RoomWriteSchema.partial({ notes: true, geometry: true }).safeParse(safeJson(raw))
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error?.issues[0]?.message ?? 'That room did not look right.' }, { status: 400 })
   }
@@ -56,20 +61,26 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   const existing = await getRoomForMember(id, gate.member.id)
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  const geometry = {
-    ...parsed.data.geometry,
-    vertices: normaliseOrigin(normaliseWinding(parsed.data.geometry.vertices)),
-  }
-  const issues = validateRoomGeometry(geometry)
-  if (issues.length > 0) {
-    return NextResponse.json({ error: issues[0]?.message ?? 'That room did not look right.', issues }, { status: 400 })
+  // Wound through the geometry-level version, which renumbers the doors and
+  // windows along with the walls they hang on.
+  const reshaping = parsed.data.geometry !== undefined
+  const rewound = normaliseGeometryWinding(parsed.data.geometry ?? existing.geometry)
+  const geometry = { ...rewound, vertices: normaliseOrigin(rewound.vertices) }
+  if (reshaping) {
+    const issues = validateRoomGeometry(geometry)
+    if (issues.length > 0) {
+      return NextResponse.json({ error: issues[0]?.message ?? 'That room did not look right.', issues }, { status: 400 })
+    }
   }
 
   const config = await getSplConfigCached()
   const plans = await listPlansForRoom(id, gate.member.id)
   const affected: Array<{ planId: string; planName: string; displaced: string[] }> = []
 
-  for (const plan of plans) {
+  // Only when the shape actually changed. A rename cannot displace anything, and
+  // running the pass anyway meant typing a new name restaged furniture in every
+  // layout in the room and archived a version of each for the privilege.
+  for (const plan of reshaping ? plans : []) {
     const displaced = displacedItems(plan.items.items, geometry)
     if (displaced.length === 0) continue
 
@@ -94,7 +105,8 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   const room = await updateRoom(id, gate.member.id, {
     name: parsed.data.name,
     notes: parsed.data.notes,
-    geometry,
+    // Left alone entirely on a rename, rather than written back unchanged.
+    ...(reshaping ? { geometry } : {}),
   })
   if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 

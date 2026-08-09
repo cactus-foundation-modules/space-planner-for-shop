@@ -8,6 +8,7 @@ import { buildScene, type ResolvedModel } from '@/modules/space-planner-for-shop
 import { verifyRenderPageToken } from '@/modules/space-planner-for-shop/lib/render-dispatch'
 import { readSavedCamera } from '@/modules/space-planner-for-shop/lib/validation'
 import { RenderFrame } from '@/modules/space-planner-for-shop/components/public/RenderFrame'
+import type { PlanItems, ProductSnapshot, RoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
 
 // The page the picture is a photograph OF.
 //
@@ -65,6 +66,27 @@ export function generateMetadata() {
   return { title: 'Rendering', robots: { index: false, follow: false } }
 }
 
+type JobScene = { items: PlanItems; productSnapshot: ProductSnapshot; geometry: RoomGeometry }
+
+/**
+ * The layout banked with the job, or null to fall back to the live rows.
+ *
+ * Checked structurally rather than trusted, because jsonb hands back whatever
+ * was written and this decides what gets photographed. Anything that does not
+ * have a room to draw and a list of things to put in it is treated as absent -
+ * a picture of the current layout beats a crash, and the label is then merely
+ * wrong rather than the render being lost along with the machine it paid for.
+ */
+function readJobScene(params: unknown): JobScene | null {
+  if (!params || typeof params !== 'object') return null
+  const scene = (params as { scene?: unknown }).scene
+  if (!scene || typeof scene !== 'object') return null
+  const { items, productSnapshot, geometry } = scene as Partial<JobScene>
+  if (!items || !Array.isArray(items.items)) return null
+  if (!geometry || !Array.isArray(geometry.vertices) || geometry.vertices.length < 3) return null
+  return { items, productSnapshot: productSnapshot ?? {}, geometry }
+}
+
 export default async function RenderPage({
   params,
   searchParams,
@@ -87,8 +109,22 @@ export default async function RenderPage({
   const room = await getRoomForAdmin(plan.roomId)
   if (!room) notFound()
 
+  // What the plan looked like when the picture was ASKED for, not what it looks
+  // like by the time the machine got round to taking it. Those are the same
+  // thing almost always and half a minute apart when they are not - the shopper
+  // is told to close the dialog and come back, so editing in that window is
+  // normal use, not an edge case. Banked into the job's params at enqueue.
+  //
+  // A job queued before this landed has no `scene`, so it falls back to the live
+  // rows exactly as before: a job outlives its own staleness by minutes, so the
+  // fallback is only ever taken by jobs already in flight during a deploy.
+  const scene = readJobScene(job.params)
+  const items = scene?.items ?? plan.items
+  const productSnapshot = scene?.productSnapshot ?? plan.productSnapshot
+  const geometry = scene?.geometry ?? room.geometry
+
   const config = await getSplConfigCached()
-  const placed = plan.items.items.filter((item) => !item.staged)
+  const placed = items.items.filter((item) => !item.staged)
   const productIds = [...new Set(placed.map((item) => item.productId))]
   // Combined models for items saved with an add-on combination, so a render of
   // the plan shows the desk WITH its screens exactly as the planner did.
@@ -118,10 +154,15 @@ export default async function RenderPage({
       fabricKey: model.fabricKey,
     })
   }
-  const description = buildScene(room.geometry, plan.items, plan.productSnapshot, resolved)
+  const description = buildScene(geometry, items, productSnapshot, resolved)
 
   const sources = [...models.values()].map((model) => ({
     productId: model.productId,
+    // '' for a base entry, the add-on tag for a combined-model variant - see
+    // PlannerModel.context. RenderFrame needs this to key its own models map the
+    // same way this map is already keyed, or a product placed both plain and
+    // combined has its two sources collide on productId alone.
+    context: model.context,
     url: model.fetchUrl,
     cacheKey: model.plainUrl,
     format: model.format,

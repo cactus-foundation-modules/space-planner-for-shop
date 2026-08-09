@@ -3,8 +3,10 @@ import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { formatMoney } from '@/modules/shop/lib/money'
 import { effectivePrice } from '@/modules/shop/lib/pricing'
 import { makeDisplayAdjuster, resolveTaxDisplay } from '@/modules/shop/lib/tax-display'
+import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
 import type { PlanItems, ProductSnapshot } from '@/modules/space-planner-for-shop/lib/types'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
+import { countPlanProducts } from '@/modules/space-planner-for-shop/lib/plan-counts'
 
 // The item list - the thing a buyer actually takes away.
 //
@@ -46,6 +48,16 @@ export type Bom = {
   disclaimer: string
   /** Products in the plan that no longer exist, named so the banner can list them. */
   missing: string[]
+  /**
+   * Whether this shop shows prices at all.
+   *
+   * Answered here, once, because every priced surface in the module consumes a
+   * Bom: the item list, the PDF, the plan email, the shared page and the quote.
+   * Only the PDF and the quote used to ask, so a shop set to quote-only with
+   * prices hidden went on publishing its list prices on the share link - a page
+   * anybody holding the url can open - and in the emailed plan.
+   */
+  pricesHidden: boolean
 }
 
 /**
@@ -60,9 +72,15 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
   const counts = new Map<string, number>()
   const sizes = new Map<string, { widthMm: number; depthMm: number; heightMm: number; approximate: boolean }>()
 
+  // Counted through the shared rule, so this and the running total the shopper
+  // watched while choosing cannot disagree. It includes the companions bought
+  // with an item - the screens riding inside a combined desk model - which are
+  // drawn in the room and go back to the basket with it, and whose absence
+  // priced a desk-with-screens as a bare desk on every document this makes.
+  for (const [productId, quantity] of countPlanProducts(plan.items)) counts.set(productId, quantity)
+
   for (const item of plan.items) {
     if (item.staged) continue
-    counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1)
     if (!sizes.has(item.productId)) {
       sizes.set(item.productId, {
         widthMm: item.widthMm,
@@ -74,14 +92,21 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
   }
 
   const productIds = [...counts.keys()]
-  const [products, shopConfig, taxDisplay, splConfig] = await Promise.all([
+  const [products, shopConfig, taxDisplay, splConfig, quoteConfig] = await Promise.all([
     getProductsByIds(productIds),
     getShopConfigCached(),
     resolveTaxDisplay(),
     getSplConfigCached(),
+    getQuoteConfigCached(),
   ])
 
   const symbol = shopConfig.currencySymbol
+  // One answer for every surface that prints one of these. Formatted money is
+  // replaced with the shop's own wording rather than blanked, so a list still
+  // reads as a list; the numbers stay on the object for the quote flow, which
+  // needs them to raise the quote itself.
+  const hidePrices = pricesHidden(quoteConfig)
+  const money = (amount: number): string => (hidePrices ? quoteConfig.hiddenPriceLabel : formatMoney(amount, symbol))
   const lines: BomLine[] = []
   const missing: string[] = []
   let total = 0
@@ -100,7 +125,14 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
     let image: string | null
     let fromSnapshot = false
 
-    if (product) {
+    // ACTIVE, not merely present. `getProductsByIds` is a plain fetch by id, so
+    // a product the owner has archived or put back to draft still resolves - and
+    // this list would then quote its CURRENT, unreleased price for something
+    // shop's own checkout refuses to sell. The browser drops non-ACTIVE products
+    // already (see the public products route), so without this the same plan
+    // priced one way on screen and another on the PDF, the email and the quote.
+    // The snapshot branch below is the right answer for exactly this case.
+    if (product && product.status === 'ACTIVE') {
       name = product.name
       sku = product.sku ?? ''
       slug = product.slug
@@ -117,7 +149,10 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
       taxClassId = saved.taxClassId
       image = saved.image
       fromSnapshot = true
-      missing.push(saved.name)
+      // By name rather than by id, and deduplicated: two retired variants of one
+      // range share a name, and the banner naming it twice reads as a fault in
+      // the banner.
+      if (!missing.includes(saved.name)) missing.push(saved.name)
     } else {
       continue
     }
@@ -134,9 +169,9 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
       slug,
       quantity,
       unitPrice,
-      unitPriceFormatted: formatMoney(unitPrice, symbol),
+      unitPriceFormatted: money(unitPrice),
       lineTotal,
-      lineTotalFormatted: formatMoney(lineTotal, symbol),
+      lineTotalFormatted: money(lineTotal),
       sizeLabel: size ? `${Math.round(size.widthMm)} × ${Math.round(size.depthMm)} × ${Math.round(size.heightMm)} mm` : '',
       approximate: size?.approximate ?? false,
       fromSnapshot,
@@ -150,11 +185,12 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
     lines,
     itemCount: lines.reduce((sum, line) => sum + line.quantity, 0),
     total,
-    totalFormatted: formatMoney(total, symbol),
+    totalFormatted: money(total),
     currencySymbol: symbol,
     taxSuffix: taxDisplay.display.suffix,
     disclaimer: splConfig.bomDisclaimer,
     missing,
+    pricesHidden: hidePrices,
   }
 }
 
@@ -167,12 +203,9 @@ export async function buildBom(plan: PlanItems, snapshot: ProductSnapshot): Prom
  * kind of defect that surfaces as "the planner lost my basket" a fortnight later.
  */
 export function planToCartLines(plan: PlanItems): Array<{ productId: string; quantity: number }> {
-  const counts = new Map<string, number>()
-  for (const item of plan.items) {
-    if (item.staged) continue
-    counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1)
-  }
-  return [...counts.entries()].map(([productId, quantity]) => ({ productId, quantity }))
+  // Same rule as the item list and the running total: companions bought with an
+  // item count too, or a quote asks for the desk without its screens.
+  return [...countPlanProducts(plan.items).entries()].map(([productId, quantity]) => ({ productId, quantity }))
 }
 
 /** shop's own server-side cap on a member cart. Checked before writing, not after a 400. */

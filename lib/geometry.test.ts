@@ -11,6 +11,7 @@ import {
   itemInsideRoom,
   itemsFight,
   nearestItemGapMm,
+  normaliseGeometryWinding,
   normaliseOrigin,
   normaliseWinding,
   offsetAlongWall,
@@ -73,6 +74,87 @@ describe('polygon basics', () => {
     const fixed = normaliseWinding(reversed)
     expect(polygonSignedArea(fixed)).toBeGreaterThan(0)
     expect(polygonAreaM2(fixed)).toBeCloseTo(12)
+  })
+
+  it('carries doors and windows through a winding flip', () => {
+    // Wall 1 of the reversed outline is the 3000 mm side, running top to
+    // bottom. Wound the right way round it is still wall 1 and still that
+    // side, but running bottom to top - so a door 500 mm from the old start
+    // measures 3000 - 500 - 900 = 1600 mm from the new one.
+    const geometry: RoomGeometry = {
+      ...defaultRoomGeometry(),
+      vertices: [...RECT].reverse(),
+      openings: [{ id: 'o1', kind: 'door', wallIndex: 1, offsetMm: 500, widthMm: 900, sillMm: 0, heightMm: 2040 }],
+    }
+    const fixed = normaliseGeometryWinding(geometry)
+
+    expect(polygonSignedArea(fixed.vertices)).toBeGreaterThan(0)
+    const door = fixed.openings[0]
+    expect(door?.wallIndex).toBe(1)
+    expect(door?.offsetMm).toBe(1600)
+
+    // And the door still stands on the same physical wall: same two endpoints,
+    // whichever way round they are listed.
+    const before = walls(geometry.vertices)[1]
+    const after = walls(fixed.vertices)[door?.wallIndex ?? 0]
+    expect(new Set([after?.a.x, after?.b.x])).toEqual(new Set([before?.a.x, before?.b.x]))
+    expect(new Set([after?.a.y, after?.b.y])).toEqual(new Set([before?.a.y, before?.b.y]))
+  })
+
+  it('leaves an already-correct room entirely alone', () => {
+    const geometry: RoomGeometry = {
+      ...defaultRoomGeometry(),
+      vertices: RECT,
+      openings: [{ id: 'o1', kind: 'door', wallIndex: 1, offsetMm: 500, widthMm: 900, sillMm: 0, heightMm: 2040 }],
+    }
+    expect(normaliseGeometryWinding(geometry)).toBe(geometry)
+  })
+
+  it('clamps back into an L-shaped room whichever way it is wound', () => {
+    // A room can be held reversed while a corner is mid-drag, and that state is
+    // written to the browser's scratch copy - so the clamp meets it. Both
+    // windings have to work, and the item has to end up genuinely inside rather
+    // than merely centred on a point that is: an interior point a few
+    // centimetres from a wall has no room for a desk around it.
+    const L: Vertex[] = [
+      { x: 0, y: 0 },
+      { x: 6000, y: 0 },
+      { x: 6000, y: 2000 },
+      { x: 2000, y: 2000 },
+      { x: 2000, y: 6000 },
+      { x: 0, y: 6000 },
+    ]
+    expect(pointInPolygon({ x: 3000, y: 3000 }, L)).toBe(false)
+
+    for (const vertices of [L, [...L].reverse()]) {
+      const geometry: RoomGeometry = { ...defaultRoomGeometry(), vertices }
+      for (const strayed of [item({ x: 9000, y: 9000 }), item({ x: -4000, y: 3000 }), item({ x: 3000, y: -5000 })]) {
+        expect(itemInsideRoom(clampItemIntoRoom(strayed, geometry), geometry)).toBe(true)
+      }
+    }
+  })
+
+  it('clamps back into an L-shaped room rather than into its notch', () => {
+    // The narrow leg matters. With a 2000 mm upright the bounding box's centre
+    // falls in the cut-out, so the old code - which walked towards that centre -
+    // had no position along the way that was inside the room, gave up, and
+    // "clamped" the item into the notch. A wider L would pass against the old
+    // code too, which is no test at all.
+    const L: Vertex[] = [
+      { x: 0, y: 0 },
+      { x: 7000, y: 0 },
+      { x: 7000, y: 2000 },
+      { x: 2000, y: 2000 },
+      { x: 2000, y: 5500 },
+      { x: 0, y: 5500 },
+    ]
+    const centre = { x: 3500, y: 2750 }
+    expect(pointInPolygon(centre, L)).toBe(false)
+
+    const geometry: RoomGeometry = { ...defaultRoomGeometry(), vertices: L }
+    const clamped = clampItemIntoRoom(item({ x: 9000, y: 4500, widthMm: 800, depthMm: 600 }), geometry)
+
+    expect(itemInsideRoom(clamped, geometry)).toBe(true)
   })
 
   it('moves the outline to the origin', () => {

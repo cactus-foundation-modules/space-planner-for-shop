@@ -238,9 +238,14 @@ CREATE TABLE IF NOT EXISTS "spl_dimension_cache" (
     "depth_mm" INTEGER,
     "height_mm" INTEGER,
     "source" TEXT NOT NULL DEFAULT 'category_default',
-    -- The raw attribute text a parsed figure came out of, kept so the junk tail
-    -- in the admin can show the owner what it choked on rather than a count.
+    -- The raw attribute text a parsed figure came out of, so the admin can show
+    -- the owner what a size was READ from rather than just asserting it.
     "parsed_from" TEXT NOT NULL DEFAULT '',
+    -- And the text it could not read, which is a different column because it is
+    -- a different fact: a product can state a perfectly good width and an
+    -- unreadable height, and the junk tail exists for exactly that half. See
+    -- 005_dimension_junk_text.sql for what sharing one column cost.
+    "junk_text" TEXT NOT NULL DEFAULT '',
     -- Set when a model bounding box and the spec attributes disagree by more
     -- than the tolerance. One of the two is wrong, and that is exactly the class
     -- of defect that otherwise ships silently.
@@ -355,6 +360,9 @@ CREATE TABLE IF NOT EXISTS "spl_events" (
     "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
     "event" TEXT NOT NULL,
     "plan_id" TEXT,
+    -- Who did it. Rate limits count per MEMBER, because counting per plan means
+    -- deleting the plans hands the allowance back - see 006_events_member.sql.
+    "member_id" TEXT,
     "product_id" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -364,3 +372,5 @@ CREATE TABLE IF NOT EXISTS "spl_events" (
 CREATE INDEX IF NOT EXISTS "spl_events_created_at_idx" ON "spl_events" ("created_at" DESC);
 CREATE INDEX IF NOT EXISTS "spl_events_event_idx" ON "spl_events" ("event");
 CREATE INDEX IF NOT EXISTS "spl_events_product_id_idx" ON "spl_events" ("product_id");
+CREATE INDEX IF NOT EXISTS "spl_events_member_window_idx"
+    ON "spl_events" ("member_id", "event", "created_at" DESC) WHERE "member_id" IS NOT NULL;

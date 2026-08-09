@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   isOptionVisible,
   isValueAvailable,
@@ -46,6 +46,9 @@ type Loaded = {
   payload: VariantSelectorPayload
   currencySymbol: string
   modelled: Set<string>
+  /** Whether this shop shows prices at all, and what it says instead. */
+  pricesHidden: boolean
+  hiddenPriceLabel: string
 }
 
 /** What the products route answers with, narrowed to what this needs. */
@@ -56,7 +59,18 @@ export function VariationPicker(props: VariationPickerProps) {
   // not on "any prop changed", which for a panel that re-renders as the shopper
   // types would mean fetching the option list over and over. The panel keeps
   // both stable - see its useCallback.
-  const { productId, onNothingToChoose } = props
+  const { productId } = props
+  // Read through a ref rather than as an effect dependency. The panel one level
+  // up cannot actually hold this callback stable across every render - it
+  // closes over the room's own placeProduct, which changes identity on every
+  // furniture edit - so depending on it directly re-ran the load below (and
+  // wiped whatever the shopper had already picked) on every drag anywhere in
+  // the room while this panel happened to be open. The ref reads the latest
+  // version without the effect caring that it changed.
+  const onNothingToChooseRef = useRef(props.onNothingToChoose)
+  useEffect(() => {
+    onNothingToChooseRef.current = props.onNothingToChoose
+  })
   const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [selection, setSelection] = useState<OptionSelection>({})
   const [error, setError] = useState('')
@@ -80,17 +94,29 @@ export function VariationPicker(props: VariationPickerProps) {
           body: JSON.stringify({ productId }),
         })
         if (response.status === 404) {
-          if (!cancelled) onNothingToChoose()
+          if (!cancelled) onNothingToChooseRef.current()
           return
         }
         if (!response.ok) throw new Error('no options')
-        const data = (await response.json()) as { payload: VariantSelectorPayload; currencySymbol: string; modelled: string[] }
+        const data = (await response.json()) as {
+          payload: VariantSelectorPayload
+          currencySymbol: string
+          modelled: string[]
+          pricesHidden?: boolean
+          hiddenPriceLabel?: string
+        }
         if (cancelled) return
         if (data.payload.options.length === 0) {
-          onNothingToChoose()
+          onNothingToChooseRef.current()
           return
         }
-        setLoaded({ payload: data.payload, currencySymbol: data.currencySymbol, modelled: new Set(data.modelled) })
+        setLoaded({
+          payload: data.payload,
+          currencySymbol: data.currencySymbol,
+          modelled: new Set(data.modelled),
+          pricesHidden: Boolean(data.pricesHidden),
+          hiddenPriceLabel: data.hiddenPriceLabel ?? 'Price on application',
+        })
         // An option with one value is not a question. Answering it for the
         // shopper is what stops a range with a single frame colour asking about
         // the frame colour.
@@ -102,7 +128,7 @@ export function VariationPicker(props: VariationPickerProps) {
     return () => {
       cancelled = true
     }
-  }, [productId, onNothingToChoose])
+  }, [productId])
 
   const variant = useMemo(
     () => (loaded ? resolveVariant(loaded.payload, selection) : null),
@@ -175,8 +201,13 @@ export function VariationPicker(props: VariationPickerProps) {
         // count picks it up even on this fallback path.
         parentId: props.productId,
         // Formatted here only because the sized answer never came; everywhere else
-        // the money is formatted server-side, tax display and all.
-        priceFormatted: `${loaded?.currencySymbol ?? ''}${variant.price.toFixed(2)}`,
+        // the money is formatted server-side, tax display and all. On a shop that
+        // hides prices the route sends zeroes, so formatting them would print
+        // "£0.00" on the one path that does its own arithmetic - the shop's own
+        // wording goes here instead.
+        priceFormatted: loaded?.pricesHidden
+          ? loaded.hiddenPriceLabel
+          : `${loaded?.currencySymbol ?? ''}${variant.price.toFixed(2)}`,
         price: variant.price,
         widthMm: 800,
         depthMm: 600,
@@ -188,7 +219,10 @@ export function VariationPicker(props: VariationPickerProps) {
       },
       quantity,
     )
-  }, [variant, chosen, props, loaded?.currencySymbol, quantity])
+    // `loaded` whole rather than the three fields read off it: the compiler
+    // infers the object and refuses to preserve a narrower list. It changes
+    // once per fetch, so there is nothing to save by being precise.
+  }, [variant, chosen, props, loaded, quantity])
 
   if (error) {
     return (

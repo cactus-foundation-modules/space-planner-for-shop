@@ -27,7 +27,14 @@ export type PlannerLaunchButtonProps = {
 }
 
 export function PlannerLaunchButton(props: PlannerLaunchButtonProps) {
-  const [empty, setEmpty] = useState(false)
+  // Assumed empty until the basket has actually been read.
+  //
+  // Starting at `false` put the button in the server HTML every time, so on an
+  // empty basket it appeared and then vanished a moment after hydration - a
+  // flash in the cart header, beside Checkout, on the narrowest screen there is.
+  // The basket lives in the browser, so the server cannot know; the honest
+  // default is the one that does not flicker.
+  const [empty, setEmpty] = useState(true)
   const router = useRouter()
 
   useEffect(() => {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { SplConfig } from '@/modules/space-planner-for-shop/lib/config'
 
 // The module's settings, hosted inside Shop settings (manifest settingsTabs >
@@ -15,7 +15,7 @@ export function SpacePlannerSettingsPanel() {
   const [failed, setFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   const mounted = useRef(true)
-  useEffect(() => () => { mounted.current = false }, [])
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
   useEffect(() => {
     void (async () => {
@@ -35,7 +35,7 @@ export function SpacePlannerSettingsPanel() {
   }, [])
 
   if (failed) return <p style={{ color: 'var(--color-danger)' }}>The settings would not load. Check the connection and refresh the page.</p>
-  if (!config) return <p style={{ color: 'var(--color-text-muted)' }}>Loading…</p>
+  if (!config) return <p style={{ color: 'var(--color-text-secondary)' }}>Loading…</p>
 
   const patch = (fields: Partial<SplConfig>) => setConfig({ ...config, ...fields })
 
@@ -51,7 +51,16 @@ export function SpacePlannerSettingsPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       })
-      if (mounted.current) setStatus(response.ok ? 'Saved.' : 'That did not save. Try again.')
+      if (response.ok) {
+        if (mounted.current) setStatus('Saved.')
+      } else if (response.status === 403) {
+        // The panel opens for anyone who can see Space Planner, so a refusal
+        // here is about the account rather than about anything typed into it.
+        if (mounted.current) setStatus('Your account can look but not change these settings - that needs the Space Planner manage permission.')
+      } else {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null
+        if (mounted.current) setStatus(data?.error ?? 'That did not save. Try again.')
+      }
     } catch {
       if (mounted.current) setStatus('That did not save. Check the connection and try again.')
     } finally {
@@ -68,7 +77,7 @@ export function SpacePlannerSettingsPanel() {
           checked={config.adminOnly}
           onChange={(value) => patch({ adminOnly: value })}
         />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
           On, and the planner vanishes from your shop entirely - no buttons, no links, and its own address says the page does
           not exist. Anyone signed in to this admin with Space Planner access carries on using it as normal, so you can live
           with it on your real catalogue before anybody else meets it. Plans you have already shared by link keep working, since
@@ -79,7 +88,7 @@ export function SpacePlannerSettingsPanel() {
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Where it shows up</h3>
         {config.adminOnly && (
-          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
             None of this reaches customers while the planner is staff only.
           </p>
         )}
@@ -108,7 +117,7 @@ export function SpacePlannerSettingsPanel() {
           checked={config.glbExportEnabled}
           onChange={(value) => patch({ glbExportEnabled: value })}
         />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
           Off by default. With it on, anyone can save your suppliers&apos; 3D models to their own computer. The floor plan, the
           item list and the pictures all work either way.
         </p>
@@ -117,24 +126,24 @@ export function SpacePlannerSettingsPanel() {
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Spacing guidance</h3>
         <Toggle label="Warn about tight walkways" checked={config.clearanceWarningsEnabled} onChange={(value) => patch({ clearanceWarningsEnabled: value })} />
-        <NumberField label="Walkway (mm)" value={config.walkwayClearanceMm} onChange={(value) => patch({ walkwayClearanceMm: value })} />
-        <NumberField label="Room behind a desk for a chair (mm)" value={config.deskChairClearanceMm} onChange={(value) => patch({ deskChairClearanceMm: value })} />
+        <NumberField label="Walkway (mm)" value={config.walkwayClearanceMm} min={0} max={5000} onChange={(value) => patch({ walkwayClearanceMm: value })} />
+        <NumberField label="Room behind a desk for a chair (mm)" value={config.deskChairClearanceMm} min={0} max={5000} onChange={(value) => patch({ deskChairClearanceMm: value })} />
         <Textarea label="Wording shown with every warning and on every printout" value={config.guidanceDisclaimer} onChange={(value) => patch({ guidanceDisclaimer: value })} />
       </section>
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Limits</h3>
-        <NumberField label="Spaces per customer" value={config.maxRoomsPerMember} onChange={(value) => patch({ maxRoomsPerMember: value })} />
-        <NumberField label="Layouts per space" value={config.maxPlansPerRoom} onChange={(value) => patch({ maxPlansPerRoom: value })} />
-        <NumberField label="Things in one layout" value={config.maxItemsPerPlan} onChange={(value) => patch({ maxItemsPerPlan: value })} />
-        <NumberField label="Different 3D models on screen at once" value={config.maxUniqueModels} onChange={(value) => patch({ maxUniqueModels: value })} />
+        <NumberField label="Spaces per customer" value={config.maxRoomsPerMember} min={1} max={500} onChange={(value) => patch({ maxRoomsPerMember: value })} />
+        <NumberField label="Layouts per space" value={config.maxPlansPerRoom} min={1} max={200} onChange={(value) => patch({ maxPlansPerRoom: value })} />
+        <NumberField label="Things in one layout" value={config.maxItemsPerPlan} min={10} max={400} onChange={(value) => patch({ maxItemsPerPlan: value })} />
+        <NumberField label="Different 3D models on screen at once" value={config.maxUniqueModels} min={2} max={64} onChange={(value) => patch({ maxUniqueModels: value })} />
       </section>
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Housekeeping</h3>
-        <NumberField label="Flag spaces untouched for this many months" value={config.roomIdleFlagMonths} onChange={(value) => patch({ roomIdleFlagMonths: value })} />
-        <NumberField label="Keep usage counts for this many days" value={config.eventRetentionDays} onChange={(value) => patch({ eventRetentionDays: value })} />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+        <NumberField label="Flag spaces untouched for this many months" value={config.roomIdleFlagMonths} min={0} max={120} onChange={(value) => patch({ roomIdleFlagMonths: value })} />
+        <NumberField label="Keep usage counts for this many days" value={config.eventRetentionDays} min={0} max={3650} onChange={(value) => patch({ eventRetentionDays: value })} />
+        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
           Idle spaces are only flagged, never deleted - somebody spent an afternoon on those.
         </p>
       </section>
@@ -143,7 +152,7 @@ export function SpacePlannerSettingsPanel() {
         <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving}>
           {saving ? 'Saving…' : 'Save settings'}
         </button>
-        {status && <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }} role="status">{status}</span>}
+        {status && <span style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }} role="status">{status}</span>}
       </div>
     </div>
   )
@@ -159,39 +168,74 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
 }
 
 function Text(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const id = useId()
   return (
-    <label style={{ display: 'grid', gap: '0.25rem' }}>
-      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>{props.label}</span>
-      <input className="form-input" value={props.value} onChange={(event) => props.onChange(event.target.value)} />
-    </label>
+    <div className="field" style={{ margin: 0 }}>
+      <label htmlFor={id}>{props.label}</label>
+      <input id={id} value={props.value} onChange={(event) => props.onChange(event.target.value)} />
+    </div>
   )
 }
 
 function Textarea(props: { label: string; value: string; onChange: (value: string) => void }) {
+  const id = useId()
   return (
-    <label style={{ display: 'grid', gap: '0.25rem' }}>
-      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>{props.label}</span>
-      <textarea className="form-input" rows={3} value={props.value} onChange={(event) => props.onChange(event.target.value)} />
-    </label>
+    <div className="field" style={{ margin: 0 }}>
+      <label htmlFor={id}>{props.label}</label>
+      <textarea id={id} rows={3} value={props.value} onChange={(event) => props.onChange(event.target.value)} />
+    </div>
   )
 }
 
-function NumberField(props: { label: string; value: number; onChange: (value: number) => void }) {
+/**
+ * A number the owner can actually type.
+ *
+ * The floor used to be enforced on every keystroke against the CONTROLLED
+ * value, which makes some numbers unreachable: selecting "200" and typing
+ * "150" starts with "1", which is under a minimum of 10, so the change was
+ * rejected and the box snapped straight back to 200. With a minimum of 2 no
+ * number beginning with 1 could be typed at all. Clearing the box was worse
+ * where the floor is zero - `Number('')` is 0, so emptying "keep usage counts
+ * for this many days" silently set it to nought, which the sweep reads as
+ * "keep for ever": the exact opposite of what the label says.
+ *
+ * So the box holds text while it is being typed, and the floor is applied when
+ * the owner leaves it. The server still enforces the same range, and now says
+ * so in the hint rather than only in a rejection.
+ */
+function NumberField(props: { label: string; value: number; onChange: (value: number) => void; min?: number; max?: number }) {
+  const min = props.min ?? 0
+  const max = props.max
+  const id = useId()
+  // Null while nobody is typing, so the box simply shows the saved value and
+  // there is no effect syncing one piece of state to another.
+  const [draft, setDraft] = useState<string | null>(null)
+  const text = draft ?? String(props.value)
+
+  const settle = () => {
+    const value = Number(text)
+    setDraft(null)
+    if (!Number.isFinite(value) || text.trim() === '') return
+    const whole = Math.round(Math.max(min, max === undefined ? value : Math.min(max, value)))
+    if (whole !== props.value) props.onChange(whole)
+  }
+
   return (
-    <label style={{ display: 'grid', gap: '0.25rem' }}>
-      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>{props.label}</span>
+    <div className="field" style={{ margin: 0 }}>
+      <label htmlFor={id}>{props.label}</label>
       <input
-        className="form-input"
+        id={id}
         type="number"
-        min={0}
-        value={props.value}
-        onChange={(event) => {
-          const value = Number(event.target.value)
-          // Every number on this panel is a count or a millimetre figure, and
-          // a negative one of either is a typo the server would only bounce.
-          if (Number.isFinite(value) && value >= 0) props.onChange(value)
-        }}
+        min={min}
+        {...(max === undefined ? {} : { max })}
+        value={text}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={settle}
+        aria-describedby={`${id}-range`}
       />
-    </label>
+      <p id={`${id}-range`} className="field-hint" style={{ color: 'var(--color-text-secondary)' }}>
+        {max === undefined ? `${min} or more` : `Between ${min} and ${max}`}
+      </p>
+    </div>
   )
 }

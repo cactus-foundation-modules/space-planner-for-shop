@@ -43,6 +43,15 @@ export type SceneNode = {
   productId: string
   /** Null means a placeholder box with the product photo on the front. */
   model: ResolvedModel | null
+  /**
+   * The add-on combination this item is showing, mirrored from
+   * `item.modelContext.context` ('' when it is just the base product). `model`
+   * above already carries the exact-or-base file; this is ADDITIONALLY needed by
+   * the three.js layer, which resolves `realMetres` from its own models map keyed
+   * `${productId}@@${context}` (see model-resolver's plannerModelKey) and cannot
+   * get that key from `model` alone once it is only a plain url and fix-ups.
+   */
+  context: string
   /** Metres, y-up, floor at y = 0. */
   position: { x: number; y: number; z: number }
   /** Radians about the world Y axis. */
@@ -53,6 +62,13 @@ export type SceneNode = {
   imageUrl: string | null
   /** True when the size came off a category default rather than the product. */
   approximate: boolean
+  /**
+   * True when even that much is invented - the ladder's last rung, a plain
+   * block. Kept apart from `approximate` because a category default is a
+   * statement about this sort of product and the marker is a statement about
+   * nothing, and only one of the two is worth measuring a mesh against.
+   */
+  generic: boolean
   mount: PlanItem['mount']
 }
 
@@ -163,6 +179,7 @@ export function buildScene(
       itemId: item.id,
       productId: item.productId,
       model,
+      context: item.modelContext?.context ?? '',
       position: { x: world.x, y: item.z / MM, z: world.z },
       // Plan yaw runs clockwise looking down at the floor; a positive rotation
       // about world +Y runs the other way. One negation, stated once, here.
@@ -171,6 +188,7 @@ export function buildScene(
       label: entry?.name ?? 'Item',
       imageUrl: entry?.image ?? null,
       approximate: item.sizeSource === 'category_default' || item.sizeSource === 'marker',
+      generic: item.sizeSource === 'marker',
       mount: item.mount,
     }
   })

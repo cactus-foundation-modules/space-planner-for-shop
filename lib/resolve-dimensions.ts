@@ -34,7 +34,12 @@ import type { MountType, SizeSource, SplDimensions } from '@/modules/space-plann
 //   2. Parsed spec attributes - Overall Width/Depth/Height, read as text.
 //   3. Category defaults - for the axes still missing. The item is badged
 //      "approx. size" in the planner; never a silent guess.
-//   4. Manual entry - whatever the shopper typed, which nothing here overwrites.
+//   4. Manual entry - a size somebody typed, which nothing here overwrites.
+//      Nothing WRITES it either: a shopper's typed size lives on the plan item
+//      itself (PlanItem.manualSize) and never reaches this cache, so no row has
+//      ever carried source 'manual'. The guards below still honour it, because
+//      the day an admin screen offers to correct a size is the day they matter
+//      and a rung that is enforced-but-unused costs nothing until then.
 //   5. Generic marker - a labelled block, so adding something to a plan is never
 //      blocked by our not knowing how big it is.
 //
@@ -151,7 +156,14 @@ export async function resolveDimensions(productIds: string[], opts: { force?: bo
       mountOverride: productMeta.get(id)?.mountType ?? null,
     })
 
-    toSave.push(resolved)
+    // Answered, but only BANKED for a product that actually exists. An id with
+    // no product row can never satisfy the freshness test above (there is no
+    // updatedAt to match), so it resolved and saved on every single call - and
+    // this route takes up to four hundred caller-chosen ids, so invented ones
+    // wrote junk rows that inflated every figure in the admin size report until
+    // the nightly sweep removed them, whereupon the next request wrote them
+    // again. applyMeasurements has guarded the same case from the start.
+    if (updatedAtById.has(id)) toSave.push(resolved)
     out.set(id, { ...resolved, underTop: underTopFrom(values) })
   }
 
@@ -205,32 +217,37 @@ export function resolveOne(input: ResolveInput): SplDimensions {
     depthMm = null
     heightMm = null
     source = 'marker'
-    parsedFrom = attribute.junk
+    parsedFrom = ''
   }
 
   // Rung 3 fills the axes still missing, whatever answered the others. Seven
   // products in ten have no depth and no height, so without this the ladder
   // would fall past a perfectly good width straight to a generic marker.
-  let usedDefault = false
+  let usedCategoryDefault = false
   if (categoryDefault) {
-    if (widthMm === null && categoryDefault.widthMm !== null) { widthMm = categoryDefault.widthMm; usedDefault = true }
-    if (depthMm === null && categoryDefault.depthMm !== null) { depthMm = categoryDefault.depthMm; usedDefault = true }
-    if (heightMm === null && categoryDefault.heightMm !== null) { heightMm = categoryDefault.heightMm; usedDefault = true }
+    if (widthMm === null && categoryDefault.widthMm !== null) { widthMm = categoryDefault.widthMm; usedCategoryDefault = true }
+    if (depthMm === null && categoryDefault.depthMm !== null) { depthMm = categoryDefault.depthMm; usedCategoryDefault = true }
+    if (heightMm === null && categoryDefault.heightMm !== null) { heightMm = categoryDefault.heightMm; usedCategoryDefault = true }
   }
 
   // Rung 5. Something has to be placeable, so the last resort is a labelled
   // block of an ordinary size rather than a refusal.
-  if (widthMm === null) { widthMm = DEFAULT_FALLBACK.widthMm; usedDefault = true }
-  if (depthMm === null) { depthMm = DEFAULT_FALLBACK.depthMm; usedDefault = true }
-  if (heightMm === null) { heightMm = DEFAULT_FALLBACK.heightMm; usedDefault = true }
+  let usedGenericBlock = false
+  if (widthMm === null) { widthMm = DEFAULT_FALLBACK.widthMm; usedGenericBlock = true }
+  if (depthMm === null) { depthMm = DEFAULT_FALLBACK.depthMm; usedGenericBlock = true }
+  if (heightMm === null) { heightMm = DEFAULT_FALLBACK.heightMm; usedGenericBlock = true }
 
   // Any axis that came off a fallback makes the whole size approximate, and the
   // planner says so - "never a silent guess" is the rule the whole ladder is
-  // built around. This line used to assign 'attribute' to 'attribute', which is
-  // nothing at all: a desk with a real width and a guessed depth was badged as
-  // measured, on both the browse card and the item list.
-  if (source === 'attribute' && usedDefault) source = 'category_default'
-  if (source === 'marker' && usedDefault) source = categoryDefault ? 'category_default' : 'marker'
+  // built around. WHICH fallback answered decides the badge, and only a category
+  // that actually supplied a measurement earns "typical for its category":
+  // testing the row rather than what it supplied meant a default saved with all
+  // three sizes blank re-badged every product under it as though somebody had
+  // measured the category, when the generic block was still doing all the work.
+  if (source === 'attribute' || source === 'marker') {
+    if (usedCategoryDefault) source = 'category_default'
+    else if (usedGenericBlock) source = 'marker'
+  }
 
   const conflictNote = measured && measured.source === 'glb'
     ? dimensionsConflict(
@@ -249,6 +266,11 @@ export function resolveOne(input: ResolveInput): SplDimensions {
     heightMm: Math.round(heightMm),
     source,
     parsedFrom,
+    // Recorded whatever else answered. A product can state a readable width and
+    // an unreadable height, and that height is the whole reason the junk tail
+    // exists - it used to be computed and dropped on the floor unless NOTHING
+    // parsed, which is the one case that never has any text to show.
+    junkText: attribute.junk,
     conflict: conflictNote !== '',
     conflictNote,
     mountType,
@@ -340,6 +362,7 @@ export async function applyMeasurements(measurements: Measurement[]): Promise<Me
       heightMm: Math.round(entry.heightMm),
       source: 'glb',
       parsedFrom: attribute.parsedFrom,
+      junkText: attribute.junk,
       conflict: note !== '',
       conflictNote: note,
       mountType: productMeta.get(entry.productId)?.mountType ?? categoryDefault?.mountType ?? 'floor',
@@ -367,27 +390,46 @@ export function readAttributeDimensions(values: Array<{ attribute: string; label
   const used: string[] = []
   const junk: string[] = []
 
-  for (const value of values) {
-    const axes: Array<[string[], 'widthMm' | 'depthMm' | 'heightMm']> = [
-      [WIDTH_ATTRIBUTES, 'widthMm'],
-      [DEPTH_ATTRIBUTES, 'depthMm'],
-      [HEIGHT_ATTRIBUTES, 'heightMm'],
-    ]
-    let handled = false
-    for (const [names, axis] of axes) {
-      if (!matchesAttribute(value.attribute, names)) continue
-      handled = true
+  // Preference order is walked per AXIS, not per value.
+  //
+  // The other way round - which is what this did - never reads the position of
+  // a name in its list, so a product carrying both "Overall Height (Spec)" and
+  // "Overall Height" gets whichever the database happened to hand back first.
+  // That is heap order: no ORDER BY reaches these rows, and on Deskwell it
+  // split 168 products to the preferred name and 126 to the second, with 294
+  // of them publishing genuinely different figures (a Chiro task chair says
+  // 108 cm one way and 110.4 cm the other). Worse, it is not even stable - a
+  // bulk update or a table rewrite reshuffles the heap and flips the answer for
+  // a different subset, silently, on the next rebuild.
+  //
+  // A name that is present but unparseable does not block the rest of its list:
+  // "Overall Height (Spec): please enquire" falls through to "Overall Height",
+  // which is the behaviour a shopper would expect and the old loop happened to
+  // have as well.
+  const axes: Array<[string[], 'widthMm' | 'depthMm' | 'heightMm']> = [
+    [WIDTH_ATTRIBUTES, 'widthMm'],
+    [DEPTH_ATTRIBUTES, 'depthMm'],
+    [HEIGHT_ATTRIBUTES, 'heightMm'],
+  ]
+  for (const [names, axis] of axes) {
+    for (const name of names) {
       if (result[axis] !== null) break
-      const parsed = parseDimensionValue(value.label)
-      if (parsed.ok) {
-        result[axis] = parsed.mm
-        used.push(`${value.attribute}: ${value.label}`)
-      } else {
+      for (const value of values) {
+        if (value.attribute.trim().toLowerCase() !== name) continue
+        const parsed = parseDimensionValue(value.label)
+        if (parsed.ok) {
+          result[axis] = parsed.mm
+          used.push(`${value.attribute}: ${value.label}`)
+          break
+        }
         junk.push(`${value.attribute}: ${value.label}`)
       }
-      break
     }
-    if (handled) continue
+  }
+
+  const axisNames = new Set([...WIDTH_ATTRIBUTES, ...DEPTH_ATTRIBUTES, ...HEIGHT_ATTRIBUTES])
+  for (const value of values) {
+    if (axisNames.has(value.attribute.trim().toLowerCase())) continue
 
     if (matchesAttribute(value.attribute, COMBINED_ATTRIBUTES)) {
       const triple = parseDimensionTriple(value.label)

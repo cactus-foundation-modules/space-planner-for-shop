@@ -136,8 +136,21 @@ export type ProductSnapshotEntry = {
   price: number
   taxClassId: string | null
   image: string | null
+  /**
+   * Reserved, and always null today - see optionSummary below.
+   */
   parentId: string | null
-  /** Human option summary for a variant child ("Oak / Black frame"). */
+  /**
+   * Reserved, and always '' today.
+   *
+   * Both this and `parentId` were meant to carry a variant's identity into the
+   * snapshot ("Oak / Black frame", and the listing behind it), and neither is
+   * ever written: the builder hardcodes null and carries forward an empty
+   * string. They are described here as what they are rather than what they were
+   * going to be, because a field documented as populated is one somebody
+   * eventually reads - and these are in saved plans going back to the first
+   * release, so every one of them is empty for good.
+   */
   optionSummary: string
 }
 
@@ -239,7 +252,18 @@ export type SplDimensions = {
   depthMm: number | null
   heightMm: number | null
   source: SizeSource
+  /** The attribute text a size was successfully read out of. */
   parsedFrom: string
+  /**
+   * The attribute text that could NOT be read - "Overall Height: please
+   * enquire" and its relatives.
+   *
+   * Its own field rather than a second meaning for `parsedFrom`, because a
+   * product can perfectly well state a readable width and an unreadable height,
+   * and the admin's junk tail is about that half. Sharing one column made the
+   * card list only products whose text was fine.
+   */
+  junkText: string
   conflict: boolean
   conflictNote: string
   mountType: MountType

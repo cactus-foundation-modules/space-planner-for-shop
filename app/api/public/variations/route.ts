@@ -6,6 +6,7 @@ import { getProductsByIds } from '@/modules/shop/lib/db/products'
 import { getVariantSelectorPayload } from '@/modules/shop-variations/lib/variants-service'
 import { getModelsForProducts } from '@/modules/product-3d-views-for-shop/lib/db/models'
 import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
+import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
 
 // Which member of a family the shopper is putting in the room.
 //
@@ -51,15 +52,29 @@ export async function POST(request: NextRequest) {
   const models = await getModelsForProducts(childIds)
   const modelled = [...new Set(models.map((model) => model.productId))]
 
-  const config = await getShopConfigCached()
+  const [config, quoteConfig] = await Promise.all([getShopConfigCached(), getQuoteConfigCached()])
+  const hidePrices = pricesHidden(quoteConfig)
+
+  // Every per-variant figure zeroed on a shop that has agreed not to show
+  // prices. This route asked nothing at all: it returned the product page's own
+  // payload, which carries a `price` and a `salePrice` per variant, unchanged
+  // and unauthenticated - so the one screen in the module that lists a whole
+  // range's prices side by side was also the one that never checked. The
+  // picker formats these itself on its fallback path, so masking the string
+  // alone would not have been enough.
+  const variants = hidePrices
+    ? payload.variants.map((variant) => ({ ...variant, price: 0, salePrice: null }))
+    : payload.variants
 
   return NextResponse.json({
     // Trimmed on the way out: the picker paints option controls and nothing
     // else, and a chair range's gallery is a lot of bytes to send to a panel
     // that never shows it. The shape is kept so shop-variations' own selection
     // maths reads it unchanged.
-    payload: { ...payload, addons: [], baseImages: [] },
+    payload: { ...payload, variants, addons: [], baseImages: [] },
     currencySymbol: config.currencySymbol,
+    pricesHidden: hidePrices,
+    hiddenPriceLabel: quoteConfig.hiddenPriceLabel,
     modelled,
   })
 }

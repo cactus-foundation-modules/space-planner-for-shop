@@ -7,6 +7,7 @@ import { getPrimaryProductImages, listProducts } from '@/modules/shop/lib/db/pro
 import type { ListProductsFilter } from '@/modules/shop/lib/db/products'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 import { listCategories } from '@/modules/shop/lib/db/catalogue'
+import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
 import { getModelsForProducts, getVariationChildrenForProducts } from '@/modules/product-3d-views-for-shop/lib/db/models'
 import { getSpecValues, isMadeToOrder } from '@/modules/space-planner-for-shop/lib/spec-attributes'
 import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-dimensions'
@@ -126,7 +127,7 @@ export async function browseCatalogue(
   }
 
   const ids = products.map((p) => p.id)
-  const [images, models, children, specValues, dimensions, fromPrices] = await Promise.all([
+  const [images, models, children, specValues, dimensions, fromPrices, quoteConfig] = await Promise.all([
     getPrimaryProductImages(ids),
     getModelsForProducts(ids),
     getVariationChildrenForProducts(ids),
@@ -138,7 +139,12 @@ export async function browseCatalogue(
     // grid on the site uses, so the planner can never disagree with the shop
     // about what a thing costs.
     resolveCardFromPrices(ids),
+    // ...including about whether to name one at all. The browse panel is a
+    // storefront surface like any other, and shop hides prices on every one of
+    // its own when the shop is set to quote only.
+    getQuoteConfigCached(),
   ])
+  const hidePrices = pricesHidden(quoteConfig)
 
   // A listing counts as modelled when it, or any of its variant children, has a
   // model row. Both lookups are set-wide, so this costs two queries for the page
@@ -159,7 +165,9 @@ export async function browseCatalogue(
     // has one price, and prefixing it just makes the shopper hunt for the catch.
     const net = from ? Number(from.price) : own
     const price = adjust ? adjust(net) : net
-    const priceFormatted = `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`
+    const priceFormatted = hidePrices
+      ? quoteConfig.hiddenPriceLabel
+      : `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`
     const stock = stockState(product)
     const size = dimensions.get(product.id)
     const kids = children.get(product.id) ?? []
@@ -169,7 +177,11 @@ export async function browseCatalogue(
       name: product.name,
       slug: product.slug,
       sku: product.sku ?? '',
-      price,
+      // Zero where the shop hides prices, like the products route beside it:
+      // the formatted string was masked here and the raw number was not, and
+      // this one is served unauthenticated by /api/public/catalogue. A hidden
+      // price nobody prints is still a hidden price anybody can read.
+      price: hidePrices ? 0 : price,
       priceFormatted,
       image: images[product.id] ?? null,
       hasModel: modelled.has(product.id) || kids.some((childId) => modelledChildren.has(childId)),

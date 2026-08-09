@@ -42,6 +42,41 @@ describe('readAttributeDimensions', () => {
     expect(result.widthMm).toBeNull()
     expect(result.junk).toContain('please enquire')
   })
+
+  // The rows arrive with no ORDER BY, so both orders are things the database
+  // really does hand over - and 294 Deskwell products publish two different
+  // heights. Whichever way round they turn up, the preferred name has to win.
+  it('prefers the earlier attribute name whichever order the rows arrive in', () => {
+    const specFirst = readAttributeDimensions([
+      { attribute: 'Overall Height (Spec)', label: '108cm' },
+      { attribute: 'Overall Height', label: '110.4cm' },
+    ])
+    const specLast = readAttributeDimensions([
+      { attribute: 'Overall Height', label: '110.4cm' },
+      { attribute: 'Overall Height (Spec)', label: '108cm' },
+    ])
+    expect(specFirst.heightMm).toBe(1080)
+    expect(specLast.heightMm).toBe(1080)
+    expect(specLast.parsedFrom).toContain('108cm')
+    expect(specLast.parsedFrom).not.toContain('110.4cm')
+  })
+
+  it('falls past a preferred name it cannot read rather than giving up on the axis', () => {
+    const result = readAttributeDimensions([
+      { attribute: 'Overall Width', label: 'please enquire' },
+      { attribute: 'Width', label: '1600mm' },
+    ])
+    expect(result.widthMm).toBe(1600)
+    expect(result.junk).toContain('please enquire')
+  })
+
+  it('still reads a combined column when a named axis sits beside it', () => {
+    const result = readAttributeDimensions([
+      { attribute: 'Overall Width', label: '1600mm' },
+      { attribute: 'Dimensions', label: 'W1800 x D800 x H730mm' },
+    ])
+    expect(result).toMatchObject({ widthMm: 1600, depthMm: 800, heightMm: 730 })
+  })
 })
 
 describe('underTopFrom', () => {
@@ -85,6 +120,26 @@ describe('resolveOne', () => {
     expect(result.source).toBe('category_default')
   })
 
+  // The junk tail's whole contract: a product that reads a good width and a bad
+  // height belongs on the "could not read" card, and its own good text does not.
+  it('records unreadable text even when another axis read perfectly well', () => {
+    const result = resolveOne(base({
+      values: [
+        { attribute: 'Overall Width', label: '1600mm' },
+        { attribute: 'Overall Height', label: 'please enquire' },
+      ],
+    }))
+    expect(result.widthMm).toBe(1600)
+    expect(result.junkText).toContain('please enquire')
+    // And the successful text stays where it belongs, out of the junk.
+    expect(result.junkText).not.toContain('1600mm')
+    expect(result.parsedFrom).toContain('1600mm')
+  })
+
+  it('leaves the junk empty for a product with nothing to choke on', () => {
+    expect(resolveOne(base()).junkText).toBe('')
+  })
+
   it('never blocks a placement, even with nothing to go on', () => {
     const result = resolveOne(base())
     expect(result.source).toBe('marker')
@@ -100,6 +155,7 @@ describe('resolveOne', () => {
       heightMm: 731,
       source: 'glb',
       parsedFrom: '',
+      junkText: '',
       conflict: false,
       conflictNote: '',
       mountType: 'floor',
@@ -122,6 +178,7 @@ describe('resolveOne', () => {
       heightMm: 730,
       source: 'glb',
       parsedFrom: '',
+      junkText: '',
       conflict: false,
       conflictNote: '',
       mountType: 'floor',
@@ -149,6 +206,7 @@ describe('resolveOne', () => {
       heightMm: 700,
       source: 'manual',
       parsedFrom: '',
+      junkText: '',
       conflict: false,
       conflictNote: '',
       mountType: 'floor',
@@ -164,5 +222,79 @@ describe('resolveOne', () => {
     const defaults = new Map([['cat', { widthMm: 400, depthMm: 400, heightMm: 400, mountType: 'floor' as MountType }]])
     const result = resolveOne(base({ categoryId: 'cat', categoryDefaults: defaults, mountOverride: 'desk-surface' }))
     expect(result.mountType).toBe('desk-surface')
+  })
+
+  // Which fallback answered decides the badge, and the badge is the whole of the
+  // ladder's promise that a guess is never dressed up as a measurement.
+  describe('what the size is badged as', () => {
+    const sizedCategory = (mount: MountType = 'floor') =>
+      new Map([['cat', { widthMm: 700, depthMm: 700, heightMm: 700, mountType: mount }]])
+    /** A category somebody saved with only a mount type - no measurements at all. */
+    const emptyCategory = (mount: MountType = 'floor') =>
+      new Map([['cat', { widthMm: null, depthMm: null, heightMm: null, mountType: mount }]])
+
+    it('says "typical for its category" when the category actually supplied a size', () => {
+      const result = resolveOne(base({ categoryId: 'cat', categoryDefaults: sizedCategory() }))
+      expect(result.source).toBe('category_default')
+      expect(result.widthMm).toBe(700)
+    })
+
+    it('still says "no idea" when the category default is blank', () => {
+      // The defect this pins: the badge tested whether a category default ROW
+      // existed rather than whether it supplied anything, so saving one with all
+      // three boxes empty re-badged every product under it as measured while the
+      // generic block was still doing all the work.
+      const result = resolveOne(base({ categoryId: 'cat', categoryDefaults: emptyCategory() }))
+      expect(result.source).toBe('marker')
+      expect(result.widthMm).toBe(800)
+    })
+
+    it('does not claim a category answered when there is no category at all', () => {
+      const result = resolveOne(base())
+      expect(result.source).toBe('marker')
+    })
+
+    it('leaves a fully specified spec sheet alone', () => {
+      const result = resolveOne(base({
+        categoryId: 'cat',
+        categoryDefaults: sizedCategory(),
+        values: [
+          { attribute: 'Overall Width', label: '1600mm' },
+          { attribute: 'Overall Depth', label: '800mm' },
+          { attribute: 'Overall Height', label: '730mm' },
+        ],
+      }))
+      expect(result.source).toBe('attribute')
+      expect(result.widthMm).toBe(1600)
+    })
+
+    it('drops to the category badge when the spec sheet only half answers', () => {
+      const result = resolveOne(base({
+        categoryId: 'cat',
+        categoryDefaults: sizedCategory(),
+        values: [{ attribute: 'Overall Width', label: '1600mm' }],
+      }))
+      expect(result.source).toBe('category_default')
+      expect(result.widthMm).toBe(1600)
+      expect(result.depthMm).toBe(700)
+    })
+
+    it('marks a half-answered spec sheet as a guess when the category is blank', () => {
+      const result = resolveOne(base({
+        categoryId: 'cat',
+        categoryDefaults: emptyCategory(),
+        values: [{ attribute: 'Overall Width', label: '1600mm' }],
+      }))
+      expect(result.source).toBe('marker')
+      expect(result.widthMm).toBe(1600)
+      expect(result.depthMm).toBe(600)
+    })
+
+    it('takes the mount type from a blank category even so', () => {
+      // Blank of measurements is not blank of meaning: somebody may have opened
+      // that dialog purely to say these things sit on a desk.
+      const result = resolveOne(base({ categoryId: 'cat', categoryDefaults: emptyCategory('desk-surface') }))
+      expect(result.mountType).toBe('desk-surface')
+    })
   })
 })

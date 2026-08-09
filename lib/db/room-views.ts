@@ -73,20 +73,27 @@ export async function countViewsForRoom(roomId: string): Promise<number> {
  * would be survivable - but it would also be the kind of thing nobody ever finds
  * time to explain.
  */
-export async function createView(input: { roomId: string; name: string; camera: SavedCamera }): Promise<SplRoomView> {
+/**
+ * Save a viewpoint, refusing to go past the cap.
+ *
+ * The cap is checked in the INSERT itself rather than only in the route, so two
+ * requests arriving together cannot both read "eleven saved" and both write a
+ * twelfth. Nothing dreadful happens when they do - it is a list of camera angles
+ * - but it is the one quota in the module that had no backstop at all, and the
+ * check costs a WHERE clause.
+ */
+export async function createView(input: { roomId: string; name: string; camera: SavedCamera; max: number }): Promise<SplRoomView | null> {
   const rows = await prisma.$queryRaw<ViewRow[]>`
     INSERT INTO "spl_room_views" ("room_id", "name", "camera", "position")
-    VALUES (
+    SELECT
       ${input.roomId},
       ${input.name},
       ${JSON.stringify(input.camera)}::jsonb,
       COALESCE((SELECT MAX("position") + 1 FROM "spl_room_views" WHERE "room_id" = ${input.roomId}), 0)
-    )
+    WHERE (SELECT COUNT(*) FROM "spl_room_views" WHERE "room_id" = ${input.roomId}) < ${input.max}
     RETURNING *
   `
-  const view = rows[0] ? toView(rows[0]) : null
-  if (!view) throw new Error('Could not save that view.')
-  return view
+  return rows[0] ? toView(rows[0]) : null
 }
 
 export async function updateView(

@@ -47,7 +47,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   if (quota) return NextResponse.json({ error: quota }, { status: 409 })
 
   const items = parsed.data.items as PlanItems
-  const itemQuota = await itemQuotaExceeded(items.items.length)
+  const itemQuota = await itemQuotaExceeded(items.items)
   if (itemQuota) return NextResponse.json({ error: itemQuota }, { status: 409 })
 
   // The snapshot is taken here, on the server, from the live catalogue - never

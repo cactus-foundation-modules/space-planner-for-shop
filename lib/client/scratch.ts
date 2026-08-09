@@ -18,6 +18,17 @@ export type Scratch = {
   version: number
   geometry: RoomGeometry
   items: PlanItem[]
+  /**
+   * What they called the room.
+   *
+   * Kept with the rest of it because the commonest way to leave this page is the
+   * sign-in wall, and a name is exactly the sort of thing somebody types just
+   * before pressing Save. Coming back to the room and the furniture but not to
+   * "Ground floor, east wing" reads as the name having been rejected.
+   *
+   * Optional: a scratch written before this existed is still perfectly good.
+   */
+  roomName?: string
   savedAt: number
 }
 
@@ -36,10 +47,13 @@ export function readScratch(): Scratch | null {
   }
 }
 
-export function writeScratch(geometry: RoomGeometry, items: PlanItem[]): void {
+export function writeScratch(geometry: RoomGeometry, items: PlanItem[], roomName?: string): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(KEY, JSON.stringify({ version: VERSION, geometry, items, savedAt: Date.now() } satisfies Scratch))
+    window.localStorage.setItem(
+      KEY,
+      JSON.stringify({ version: VERSION, geometry, items, roomName, savedAt: Date.now() } satisfies Scratch),
+    )
   } catch {
     // Quota exceeded is cache-off, never an error the shopper sees.
   }

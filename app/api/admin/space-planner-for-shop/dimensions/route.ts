@@ -4,6 +4,7 @@ import { requireSplUser } from '@/modules/space-planner-for-shop/lib/access'
 import {
   deleteCategoryDefault,
   getDimensionReport,
+  listCategoriesWithoutDefaults,
   listCategoryDefaults,
   listConflicts,
   listJunkTail,
@@ -24,16 +25,17 @@ export async function GET() {
   const gate = await requireSplUser('space-planner.access', { allowAccess: true })
   if (gate.error) return gate.error
 
-  const [report, junk, conflicts, defaults, active, latest] = await Promise.all([
+  const [report, junk, conflicts, defaults, missingDefaults, active, latest] = await Promise.all([
     getDimensionReport(),
     listJunkTail(),
     listConflicts(),
     listCategoryDefaults(),
+    listCategoriesWithoutDefaults(),
     getActiveBackfill(),
     getLatestBackfill(),
   ])
 
-  return NextResponse.json({ report, junk, conflicts, defaults, job: active ?? latest })
+  return NextResponse.json({ report, junk, conflicts, defaults, missingDefaults, job: active ?? latest })
 }
 
 const DefaultSchema = z.object({

@@ -12,10 +12,18 @@ import { MOUNT_TYPES } from '@/modules/space-planner-for-shop/lib/types'
 // is pointed at the twelve models customers actually use, and worth nothing at
 // all as a list of two hundred and fifty in name order.
 
-export async function GET() {
+/** How many rows the screen gets. The screen says so rather than implying the
+ * list is everything, so this number and its copy have to agree. */
+const MODEL_LIST_LIMIT = 50
+
+export async function GET(request: NextRequest) {
   const gate = await requireSplUser('space-planner.access', { allowAccess: true })
   if (gate.error) return gate.error
-  return NextResponse.json({ models: await listUnreviewedModels() })
+  // Checked models are hidden by default - the point of the list is the ones
+  // nobody has looked at - but they have to be reachable, or a correction made
+  // in error can never be undone from here.
+  const includeReviewed = request.nextUrl.searchParams.get('includeReviewed') === '1'
+  return NextResponse.json({ models: await listUnreviewedModels(MODEL_LIST_LIMIT, { includeReviewed }) })
 }
 
 const FileSchema = z.object({
@@ -56,7 +64,7 @@ export async function PUT(request: NextRequest) {
   const product = ProductSchema.safeParse(body)
   if (product.success) {
     await upsertProductMeta(product.data.productId, {
-      mountType: (product.data.mountType ?? null) as (typeof MOUNT_TYPES)[number] | null,
+      mountType: product.data.mountType as (typeof MOUNT_TYPES)[number] | null,
       notes: product.data.notes,
       reviewed: product.data.reviewed,
     })

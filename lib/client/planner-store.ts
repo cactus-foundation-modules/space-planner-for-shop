@@ -1,6 +1,7 @@
 import {
   boundingBox,
   clampItemIntoRoom,
+  displacedItems,
   footprintsOverlap,
   itemCorners,
   OPENING_DEFAULTS,
@@ -10,8 +11,9 @@ import {
   itemsFight,
   nearestItemGapMm,
   nearestWall,
+  normaliseGeometryWinding,
   normaliseOrigin,
-  normaliseWinding,
+  normaliseYaw,
   pointInPolygon,
   rotatePoint,
   setWallLength,
@@ -65,6 +67,14 @@ export type ProductInfo = ProductSize & {
   image: string | null
   priceFormatted: string
   price: number
+  /**
+   * The price is a "from" - a listing whose variations are priced separately.
+   *
+   * It exists so nothing multiplies it into a definite total: "From £199" times
+   * three was printed as a flat "£597", which is a number this shop has not
+   * agreed to.
+   */
+  priceVaries?: boolean
   /** The listing behind a variant child, so counts roll up to the card browsed. */
   parentId?: string | null
 }
@@ -90,6 +100,16 @@ export type PlannerAction =
   | { type: 'rotate-items'; ids: string[]; deltaDeg: number; snap: boolean }
   | { type: 'set-item'; id: string; patch: Partial<PlanItem> }
   | { type: 'delete-items'; ids: string[] }
+  /**
+   * Empty the waiting list, whatever is on it when this lands.
+   *
+   * `basketOnly` keeps anything that did NOT come from a basket line. The tray
+   * holds two quite different things: what the shopper brought over from their
+   * basket, and what a redrawn room could no longer hold - and the second is the
+   * module's promise that reshaping a room never deletes anybody's work.
+   * Re-reading the basket must not take that away with it.
+   */
+  | { type: 'clear-staged'; basketOnly?: boolean }
   | { type: 'duplicate-items'; ids: string[]; offsetMm: number; newIds: string[] }
   | { type: 'array-item'; id: string; count: number; spacingMm: number; alongYaw: number; newIds: string[] }
   | { type: 'replace-product'; ids: string[]; product: ProductSize }
@@ -107,7 +127,16 @@ export type PlannerAction =
   /** Resizing keeps the centre still; anything else would slide a column along
    * the wall while its width was being typed. */
   | { type: 'set-obstruction'; id: string; patch: { label?: string; heightMm?: number; widthMm?: number; depthMm?: number } }
-  | { type: 'move-obstruction'; id: string; dx: number; dy: number }
+  /**
+   * Slide a column.
+   *
+   * `settle` marks the end of the gesture, and only then is the furniture
+   * judged. A drag arrives as a stream of pointer moves, so staging on every one
+   * of them meant dragging a column across the room swept every desk it passed
+   * over onto the waiting list - and dragging it back did not bring them home.
+   * The room's own outline has worked this way from the start; see set-shape.
+   */
+  | { type: 'move-obstruction'; id: string; dx: number; dy: number; settle?: boolean }
   | { type: 'delete-obstruction'; id: string }
   | { type: 'select'; ids: string[] }
   | { type: 'load'; snapshot: PlannerSnapshot }
@@ -136,24 +165,112 @@ function applyShape(
     return bump({ ...state, geometry: { ...state.geometry, vertices } })
   }
 
-  const wound = normaliseWinding(vertices)
+  // Wound through the geometry-level version so the doors and windows are
+  // renumbered along with the walls they hang on - see normaliseGeometryWinding.
+  const rewound = normaliseGeometryWinding({ ...state.geometry, vertices })
+  const wound = rewound.vertices
   const moved = normaliseOrigin(wound)
   const first = wound[0]
   const shifted = moved[0]
   const dx = first && shifted ? shifted.x - first.x : 0
   const dy = first && shifted ? shifted.y - first.y : 0
-  const geometry = withFittedOpenings({ ...state.geometry, vertices: moved })
-
-  const items = state.items.map((item) => {
-    if (item.staged) return item
-    const followed = { ...item, x: item.x + dx, y: item.y + dy }
-    // Anything the new outline no longer contains goes to the tray. Deleting it
-    // would throw away a choice somebody made; leaving it outside the walls would
-    // quietly put it in the car park.
-    return itemInsideRoom(followed, geometry) ? followed : { ...followed, staged: true, parentId: null }
+  // The columns move with the outline, not just the furniture. They are stored
+  // in the same plan coordinates the walls are, so an origin shift that left
+  // them behind put every pillar where the room used to be - and now that the
+  // displacement test reads them, that meant staging desks for standing in a
+  // column that is somewhere else entirely.
+  const geometry = withFittedOpenings({
+    ...rewound,
+    vertices: moved,
+    obstructions: rewound.obstructions.map((obstruction) => ({
+      ...obstruction,
+      vertices: obstruction.vertices.map((vertex) => ({ x: vertex.x + dx, y: vertex.y + dy })),
+    })),
   })
 
-  return bump({ ...state, geometry, items })
+  // Everything follows the origin shift first, then the outline decides what it
+  // can still hold. Deleting what it cannot would throw away a choice somebody
+  // made; leaving it outside the walls would quietly put it in the car park.
+  const followed = state.items.map((item) => (item.staged ? item : { ...item, x: item.x + dx, y: item.y + dy }))
+
+  return bump({ ...state, geometry, items: withDisplacedStaged(followed, geometry) })
+}
+
+/**
+ * A new set of columns, with anything this edit puts out of the room moved to
+ * the waiting list.
+ *
+ * Dropping a column on a desk is a geometry edit like any other, and it was the
+ * one that skipped this. The consequence was not the obvious one: the desk
+ * stayed put on screen, but saving PUTs the room first, the room route runs the
+ * same displacement rule over EVERY layout in that room, and so Options B and C
+ * - which the shopper was not looking at - had their furniture moved to their
+ * trays while the layout on screen kept its desk inside the pillar. The wrong
+ * way round in both directions.
+ */
+function withObstructions(
+  state: PlannerState,
+  obstructions: RoomGeometry['obstructions'],
+  touchedId: string,
+  bump: (next: Omit<PlannerState, 'revision'>) => PlannerState,
+): PlannerState {
+  const geometry = { ...state.geometry, obstructions }
+  // Only what THIS column is responsible for. Standing a desk in a column is a
+  // legal state the planner warns about rather than prevents, so an item may
+  // already be in one when another is renamed or dropped in a far corner - and
+  // staging everything currently displaced meant an edit over here quietly took
+  // furniture out of the room over there.
+  //
+  // The baseline is the room WITHOUT the column being edited, rather than the
+  // room as it stood a moment ago: a drag has already moved the column by the
+  // time it settles, so "as it stood a moment ago" would excuse the very thing
+  // the shopper just did.
+  const withoutTouched = { ...geometry, obstructions: obstructions.filter((entry) => entry.id !== touchedId) }
+  const already = new Set(displacedItems(state.items, withoutTouched).map((item) => item.id))
+  return bump({ ...state, geometry, items: withDisplacedStaged(state.items, geometry, already) })
+}
+
+/**
+ * Everything the new geometry can no longer hold, put back on the waiting list.
+ *
+ * Through geometry's own displacedItems so this side and the server side agree
+ * about what "no longer fits" means. They did not: this file tested only whether
+ * the item was still inside the walls, while the room route also stages anything
+ * standing in a column and takes an item's children with it. So a save wrote the
+ * client's answer over the server's, and a desk left standing inside a pillar
+ * came back looking perfectly fine - the one plan where the promise did not hold
+ * being the one on screen.
+ *
+ * `exempt` names items that were ALREADY displaced before this edit, for callers
+ * that must only act on what they themselves changed.
+ */
+function withDisplacedStaged(items: PlanItem[], geometry: RoomGeometry, exempt?: Set<string>): PlanItem[] {
+  const displaced = new Set(
+    displacedItems(items, geometry)
+      .map((item) => item.id)
+      .filter((id) => !exempt?.has(id)),
+  )
+
+  // displacedItems judges a child by its parent and never on its own, because
+  // for the ordinary case - the parent moves, the child goes with it - that is
+  // right. A room being RESHAPED is the case it is wrong for: pull a wall in far
+  // enough and the desk still fits while the monitor arm behind it does not, and
+  // nothing was then staging the arm. It stayed placed, outside the walls, still
+  // attached to something inside them.
+  const strandedChildren = items.filter(
+    (item) => !item.staged && item.parentId !== null && !displaced.has(item.id) && !itemInsideRoom(item, geometry),
+  )
+  for (const child of strandedChildren) displaced.add(child.id)
+
+  if (displaced.size === 0) return items
+  return items.map((item) => {
+    if (item.staged) return item
+    // A child follows its parent onto the list, exactly as it follows it round
+    // the room - a monitor arm left placed over a desk that has gone is not a
+    // thing anybody meant.
+    const goes = displaced.has(item.id) || (item.parentId !== null && displaced.has(item.parentId))
+    return goes ? { ...item, staged: true, parentId: null } : item
+  })
 }
 
 /**
@@ -274,15 +391,13 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       return { ...state, selection: action.ids }
 
     case 'set-geometry': {
-      const geometry = withFittedOpenings({ ...action.geometry, vertices: normaliseOrigin(normaliseWinding(action.geometry.vertices)) })
+      const rewound = normaliseGeometryWinding(action.geometry)
+      const geometry = withFittedOpenings({ ...rewound, vertices: normaliseOrigin(rewound.vertices) })
       // A wholesale replacement can be a much smaller room - "start the room
-      // again" is exactly that - so anything the new outline no longer contains
+      // again" is exactly that - so anything the new outline no longer holds
       // goes to the tray. Deleting somebody's choices because they redrew the
       // walls would be unforgivable; leaving them outside is merely baffling.
-      const items = state.items.map((item) =>
-        item.staged || itemInsideRoom(item, geometry) ? item : { ...item, staged: true, parentId: null },
-      )
-      return bump({ ...state, geometry, items })
+      return bump({ ...state, geometry, items: withDisplacedStaged(state.items, geometry) })
     }
 
     case 'set-wall-length':
@@ -302,20 +417,60 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       // Anything mounted on or tucked under a moving item comes with it. That is
       // what makes a desk a desk rather than a desk and four things that happen
       // to be near it.
-      for (const item of state.items) {
-        if (item.parentId && moving.has(item.parentId)) moving.add(item.id)
+      // Walked to a fixed point rather than in one pass. `attach` refuses to
+      // build a chain deeper than one level, but a plan saved before it did can
+      // still hold one, and a single forward pass only picks a grandchild up
+      // when the array happens to list it after its parent - so whether an item
+      // came along depended on storage order.
+      for (let added = true; added; ) {
+        added = false
+        for (const item of state.items) {
+          if (item.parentId && moving.has(item.parentId) && !moving.has(item.id)) {
+            moving.add(item.id)
+            added = true
+          }
+        }
       }
       const neighbours = snapNeighbours(state.items, moving)
-      const items = state.items.map((item) => {
-        if (!moving.has(item.id) || item.staged) return item
-        const moved = { ...item, x: Math.round(item.x + action.dx), y: Math.round(item.y + action.dy) }
-        // A child follows its parent and is not snapped on its own: a monitor
-        // arm that clicked onto the nearest wall halfway through moving the desk
-        // would be a poltergeist.
-        const snapped = action.snap && !item.parentId
-          ? snapPlacement(moved, item, neighbours, state.geometry)
-          : moved
-        return clampItemIntoRoom(snapped, state.geometry)
+
+      // The parents move first, and what they ACTUALLY did is banked. Snapping
+      // can add a quarter-metre of wall pull and rewrite the yaw, and the
+      // children were being handed the raw drag instead - so a desk that
+      // snapped flush to a wall left the monitor arm mounted on it hanging
+      // wherever the finger had been. rotate-items has always worked this way;
+      // this is the same fix on the other axis.
+      const applied = new Map<string, { dx: number; dy: number; dYaw: number }>()
+      const moved = state.items.map((item) => {
+        if (!moving.has(item.id) || item.staged || item.parentId) return item
+        const shifted = { ...item, x: Math.round(item.x + action.dx), y: Math.round(item.y + action.dy) }
+        const snapped = action.snap ? snapPlacement(shifted, item, neighbours, state.geometry) : shifted
+        const placed = clampItemIntoRoom(snapped, state.geometry)
+        applied.set(item.id, { dx: placed.x - item.x, dy: placed.y - item.y, dYaw: placed.yaw - item.yaw })
+        return placed
+      })
+
+      const items = moved.map((item) => {
+        if (!moving.has(item.id) || item.staged || !item.parentId) return item
+        // A child is never snapped on its own - a monitor arm that clicked onto
+        // the nearest wall halfway through moving the desk would be a
+        // poltergeist. It follows exactly what the parent did, orbiting the
+        // parent's centre when the parent turned.
+        const parentMove = applied.get(item.parentId)
+        if (!parentMove) {
+          return clampItemIntoRoom({ ...item, x: Math.round(item.x + action.dx), y: Math.round(item.y + action.dy) }, state.geometry)
+        }
+        const parentBefore = state.items.find((candidate) => candidate.id === item.parentId)
+        const shifted = { ...item, x: item.x + parentMove.dx, y: item.y + parentMove.dy, yaw: item.yaw + parentMove.dYaw }
+        if (parentBefore && parentMove.dYaw !== 0) {
+          // rotatePoint turns about the origin, so the offset from the parent is
+          // what gets turned and the parent's new centre is added back.
+          const pivotX = parentBefore.x + parentMove.dx
+          const pivotY = parentBefore.y + parentMove.dy
+          const orbited = rotatePoint(shifted.x - pivotX, shifted.y - pivotY, parentMove.dYaw)
+          shifted.x = pivotX + orbited.x
+          shifted.y = pivotY + orbited.y
+        }
+        return clampItemIntoRoom({ ...shifted, x: Math.round(shifted.x), y: Math.round(shifted.y) }, state.geometry)
       })
       return bump({ ...state, items })
     }
@@ -342,7 +497,13 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       const applied = new Map<string, number>()
       const turned = state.items.map((item) => {
         if (!rotating.has(item.id)) return item
-        const yaw = action.snap ? snapYaw(item.yaw + action.deltaDeg) : item.yaw + action.deltaDeg
+        const raw = action.snap ? snapYaw(item.yaw + action.deltaDeg) : item.yaw + action.deltaDeg
+        // Wrapped, because nothing else wraps it and the angle only ever grows.
+        // The server's schema tops out at 3600 degrees, so forty-one presses of
+        // "Turn 90" - or one typed 99999 - made EVERY later save fail validation
+        // with a message about a number, and the bad value was in the browser's
+        // scratch copy too, so reloading did not clear it.
+        const yaw = normaliseYaw(raw)
         applied.set(item.id, yaw - item.yaw)
         return { ...item, yaw }
       })
@@ -358,7 +519,16 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
         const parent = before.get(item.parentId)
         if (delta === undefined || !parent) return item
         const orbit = rotatePoint(item.x - parent.x, item.y - parent.y, delta)
-        return { ...item, x: Math.round(parent.x + orbit.x), y: Math.round(parent.y + orbit.y), yaw: item.yaw + delta }
+        // Wrapped like the parent's. The delta is the parent's WRAPPED turn, so
+        // a desk crossing 360 hands its arm a delta of -340 rather than +20 -
+        // which lands the arm in exactly the right place and then shows -340 in
+        // the properties panel's "Turn" box.
+        return {
+          ...item,
+          x: Math.round(parent.x + orbit.x),
+          y: Math.round(parent.y + orbit.y),
+          yaw: normaliseYaw(item.yaw + delta),
+        }
       })
       return bump({ ...state, items })
     }
@@ -367,9 +537,30 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
       const items = state.items.map((item) => {
         if (item.id !== action.id) return item
         const next = { ...item, ...action.patch }
+        // The properties panel lets an angle be typed, and 99999 is a perfectly
+        // ordinary thing to type into a box marked "Turn". Wrapped rather than
+        // refused: every angle means something, just not the number they typed.
+        if (action.patch.yaw !== undefined) next.yaw = normaliseYaw(next.yaw)
         return next.staged ? next : clampItemIntoRoom(next, state.geometry)
       })
       return bump({ ...state, items })
+    }
+
+    case 'clear-staged': {
+      // Resolved here rather than by the caller, because the caller cannot know
+      // which items are waiting by the time this lands. "Refresh from basket"
+      // reads the basket over the network first, and a tray item the shopper
+      // placed while that request was in flight was still marked waiting in the
+      // list the caller had - so refreshing took it back out of the room.
+      //
+      // basketOnly spares anything the tray is holding for the OTHER reason: a
+      // redrawn room could no longer fit it. Those carry no basket line, and
+      // taking them out on a basket refresh would be this module deleting work
+      // it had just promised to keep - under a tab whose only two buttons are
+      // "Refresh from basket" and "Clear the list".
+      const items = state.items.filter((item) => !item.staged || (action.basketOnly && !item.basketLine))
+      if (items.length === state.items.length) return state
+      return bump({ ...state, items, selection: state.selection.filter((id) => items.some((item) => item.id === id)) })
     }
 
     case 'delete-items': {
@@ -491,7 +682,7 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
         vertices: rectVertices(action.x, action.y, action.widthMm, action.depthMm),
         heightMm: Math.round(action.heightMm),
       }
-      return bump({ ...state, geometry: { ...state.geometry, obstructions: [...state.geometry.obstructions, obstruction] } })
+      return withObstructions(state, [...state.geometry.obstructions, obstruction], obstruction.id, bump)
     }
 
     case 'set-obstruction': {
@@ -511,7 +702,15 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
         }
         return next
       })
-      return bump({ ...state, geometry: { ...state.geometry, obstructions } })
+      // Only a change of SHAPE can put furniture out of the room. Renaming a
+      // column or changing how tall it is leaves its footprint exactly where it
+      // was, so running the displacement rule on those meant typing a better
+      // name for a pillar took a desk standing in it out of the room - with no
+      // message, and nothing to connect the two.
+      const reshaped = action.patch.widthMm !== undefined || action.patch.depthMm !== undefined
+      return reshaped
+        ? withObstructions(state, obstructions, action.id, bump)
+        : bump({ ...state, geometry: { ...state.geometry, obstructions } })
     }
 
     case 'move-obstruction': {
@@ -526,7 +725,12 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
             }
           : obstruction,
       )
-      return bump({ ...state, geometry: { ...state.geometry, obstructions } })
+      // Mid-drag the column simply moves; the furniture is judged when the
+      // finger comes up. See the action's own note for what judging every step
+      // did to a column dragged across a room.
+      return action.settle
+        ? withObstructions(state, obstructions, action.id, bump)
+        : bump({ ...state, geometry: { ...state.geometry, obstructions } })
     }
 
     case 'delete-obstruction': {
@@ -537,9 +741,18 @@ export function plannerReducer(state: PlannerState, action: PlannerAction): Plan
     case 'attach': {
       // One level only. Accessory-on-accessory stacking is deliberately out of
       // scope, and a cycle would be a hang rather than a feature.
+      //
+      // Guarded from BOTH ends. Refusing a parent that is itself attached is
+      // half the invariant: without also refusing a child that already has
+      // children of its own, arm-to-desk followed by desk-to-bench built the
+      // two-level chain anyway - and move-items resolves parents in one pass, so
+      // whether a grandchild came along at all depended on the order the items
+      // happened to be stored in.
+      const hasChildren = state.items.some((candidate) => candidate.parentId === action.childId)
       const items = state.items.map((item) => {
         if (item.id !== action.childId) return item
         if (action.parentId === action.childId) return item
+        if (action.parentId && hasChildren) return item
         const parent = state.items.find((candidate) => candidate.id === action.parentId)
         if (action.parentId && (!parent || parent.parentId)) return item
         return { ...item, parentId: action.parentId }
@@ -583,11 +796,20 @@ export function findClashes(items: PlanItem[], underTop: UnderTopSizes = {}, geo
   // is also a heads-up about what saving will do.
   if (geometry) {
     for (const item of placed) {
-      if (itemHitsObstruction(item, geometry)) out.push({ a: item.id, b: 'obstruction' })
+      if (itemHitsObstruction(item, geometry)) out.push({ a: item.id, b: CLASH_WITH_OBSTRUCTION })
     }
   }
   return out
 }
+
+/**
+ * What stands in for the second party when the first is standing in a column.
+ *
+ * A sentinel rather than an id, so anything counting or selecting the items in
+ * a clash has to say so explicitly - one desk in a pillar reading as "2 things
+ * are overlapping" is what happens when it does not.
+ */
+export const CLASH_WITH_OBSTRUCTION = 'obstruction'
 
 /**
  * Somewhere to put the next thing.

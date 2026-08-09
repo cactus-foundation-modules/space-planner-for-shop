@@ -38,7 +38,11 @@ export function CataloguePanel(props: CataloguePanelProps) {
   const [categories, setCategories] = useState<Category[]>([])
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [loading, setLoading] = useState(false)
+  // True from the off. The first fetch sits behind a 250ms debounce, so an
+  // empty list at first paint is "we have not looked yet" rather than "nothing
+  // matches" - which is what every visit used to be told for a quarter of a
+  // second, against a search box nobody had typed in.
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [choosing, setChoosing] = useState<CatalogueCard | null>(null)
 
@@ -49,6 +53,8 @@ export function CataloguePanel(props: CataloguePanelProps) {
   // write - and it doubles as the unmount guard, since the cleanup bumps it.
   const requestSeq = useRef(0)
   useEffect(() => () => { requestSeq.current += 1 }, [])
+  /** The panel's own root, used to find the scroll box it sits in. */
+  const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(
     async (nextPage: number, term: string, categorySlug: string, modelled: boolean) => {
@@ -130,6 +136,22 @@ export function CataloguePanel(props: CataloguePanelProps) {
     setChoosing(null)
   }, [choosing, onPlace])
 
+  /**
+   * Turn to a page, and go back to the top of the list.
+   *
+   * The panel scrolls itself, so without the scroll the next page arrived with
+   * the shopper still parked at the bottom of it - which on a phone, where the
+   * panel is half the screen, reads as the button having done nothing.
+   */
+  const turnTo = useCallback(
+    (nextPage: number) => {
+      setPage(nextPage)
+      void load(nextPage, search, category, modelledOnly)
+      scrollRef.current?.closest('.spl-side-scroll')?.scrollTo({ top: 0 })
+    },
+    [load, search, category, modelledOnly],
+  )
+
   // The panel becomes the picker rather than opening a dialog over it. On a
   // phone the panel IS the screen, and a modal on top of it is one more thing to
   // dismiss; the way back is a plain button at the top, where the browser's own
@@ -153,9 +175,14 @@ export function CataloguePanel(props: CataloguePanelProps) {
 
   const shownFrom = total === 0 ? 0 : (page - 1) * PER_PAGE + 1
   const shownTo = Math.min(total, (page - 1) * PER_PAGE + cards.length)
+  // Said on every search, not only when there is a second page. The count used
+  // to live inside the pager, which appears at twenty-five results and up, so
+  // anybody whose search actually narrowed things down was told nothing.
+  const countLine =
+    total > cards.length ? `Showing ${shownFrom}–${shownTo} of ${total}` : `${total} ${total === 1 ? 'match' : 'matches'}`
 
   return (
-    <div className="spl-stack">
+    <div className="spl-stack" ref={scrollRef}>
       {/* Sticky within the panel's own scroll, so page two of the catalogue is
           never a long scroll away from the search box that produced it. On a
           phone the two fields share a row and the labels go visually quiet -
@@ -214,8 +241,41 @@ export function CataloguePanel(props: CataloguePanelProps) {
         </label>
       </div>
 
-      {error && <p className="spl-alert spl-alert-error">{error}</p>}
-      {loading && <p className="spl-note">Looking…</p>}
+      {/* How the search went, in one place that is mounted from the start and
+          never unmounted - a live region that appears along with its message is
+          not reliably read out, so somebody using a screen reader typed "desk"
+          and was told nothing at all: not the count, not that it had failed. */}
+      <div aria-live="polite">
+        {error ? (
+          // With a way back. Nothing else re-runs the fetch: the debounced
+          // effect only fires on a changed search, and the pager only exists
+          // above twenty-four results - which a failed load never has. One
+          // dropped request used to leave the panel dead until a page reload.
+          <p className="spl-alert spl-alert-error">
+            <span className="spl-alert-text">{error}</span>
+            <button type="button" className="spl-btn spl-btn-sm" onClick={() => void load(page, search, category, modelledOnly)}>
+              Try again
+            </button>
+          </p>
+        ) : loading ? (
+          <p className="spl-note">Looking…</p>
+        ) : cards.length === 0 ? (
+          <p className="spl-note">
+            {/* "Try a shorter word" was shown on a first visit with an empty
+                search box and no category chosen - i.e. when the panel can see
+                nothing in the shop at all - and there is nothing to shorten. */}
+            {search.trim() || category
+              ? modelledOnly
+                ? 'Nothing with a 3D model matches that. Untick the box to see everything.'
+                : 'Nothing matches that. Try a shorter word.'
+              : modelledOnly
+                ? 'Nothing in the shop has a 3D model yet. Untick the box to place anything at its right size.'
+                : 'There is nothing to show from the shop just now.'}
+          </p>
+        ) : (
+          <p className="spl-note">{countLine}</p>
+        )}
+      </div>
 
       <ul className="spl-list">
         {cards.map((card) => {
@@ -262,21 +322,12 @@ export function CataloguePanel(props: CataloguePanelProps) {
         })}
       </ul>
 
-      {cards.length === 0 && !loading && (
-        <p className="spl-note">
-          {modelledOnly ? 'Nothing with a 3D model matches that. Untick the box to see everything.' : 'Nothing matches that. Try a shorter word.'}
-        </p>
-      )}
-
       {total > PER_PAGE && (
         <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'space-between', alignItems: 'center' }}>
-          <button type="button" className="spl-btn" disabled={page <= 1} onClick={() => { const next = page - 1; setPage(next); void load(next, search, category, modelledOnly) }}>
+          <button type="button" className="spl-btn" disabled={page <= 1} onClick={() => turnTo(page - 1)}>
             Back
           </button>
-          <span className="spl-note">
-            {shownFrom}–{shownTo} of {total}
-          </span>
-          <button type="button" className="spl-btn" disabled={page * PER_PAGE >= total} onClick={() => { const next = page + 1; setPage(next); void load(next, search, category, modelledOnly) }}>
+          <button type="button" className="spl-btn" disabled={page * PER_PAGE >= total} onClick={() => turnTo(page + 1)}>
             More
           </button>
         </div>

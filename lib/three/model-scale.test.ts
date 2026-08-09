@@ -130,3 +130,38 @@ describe('realSizeScale', () => {
     expect(realSizeScale(MESH, { metres: 0.73, axis: 'height' })).toBeCloseTo(1)
   })
 })
+
+describe('modelScaleFor, on the ladder\'s last rung', () => {
+  // The generic block is 800 x 600 x 750 and says nothing about the product.
+  const MARKER = { width: 0.8, depth: 0.6, height: 0.75 }
+  // A five-metre bench desk, exported at its real size.
+  const BENCH = { widthMm: 5000, depthMm: 800, heightMm: 730 }
+
+  it('draws a marker item at the size its file was exported', () => {
+    const scale = modelScaleFor(BENCH, MARKER, true, null, true)
+    expect(scale).toMatchObject({ x: 1, y: 1, z: 1, uniform: true })
+  })
+
+  it('does not shrink it towards the block it was never measured against', () => {
+    // What the median of the surviving ratios would have done: 0.888, which the
+    // flat plan then adopted as a measurement and stripped the approx. badge off.
+    const wrong = modelScaleFor(BENCH, MARKER, true, null, false)
+    expect(wrong.x).toBeLessThan(0.95)
+    expect(modelScaleFor(BENCH, MARKER, true, null, true).x).toBe(1)
+  })
+
+  it('still reconciles against a category default, which is a real statement', () => {
+    // Uniform, because rule 2 will not deform a mesh to an approximate size -
+    // but the median of the ratios, not the 1 the marker rule would force.
+    const stated = { width: 1.6, depth: 0.8, height: 0.8 }
+    const scale = modelScaleFor({ widthMm: 1400, depthMm: 800, heightMm: 730 }, stated, true, null, false)
+    expect(scale.x).toBeCloseTo(800 / 730)
+    expect(scale.uniform).toBe(true)
+  })
+
+  it('lets a recorded real size overrule the marker rule entirely', () => {
+    const scale = modelScaleFor(BENCH, MARKER, true, { metres: 5, axis: 'width' }, true)
+    expect(scale.x).toBeCloseTo(1)
+    expect(modelScaleFor(BENCH, MARKER, true, { metres: 2.5, axis: 'width' }, true).x).toBeCloseTo(0.5)
+  })
+})

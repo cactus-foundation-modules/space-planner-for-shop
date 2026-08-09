@@ -10,6 +10,13 @@ import type { EmailTemplateDef } from '@/lib/email/registry'
 // `items` is a small HTML table the module builds, with its own escaping already
 // applied to every product name in it - hence rawTags. Everything else that
 // could carry typed text is escaped by core on the way in, as normal.
+//
+// Both templates print the plan's address as visible text as well as linking it.
+// Core builds the plain-text alternative by stripping the tags out of the
+// template and only then filling in the values, so a url that lives in an href
+// is stripped along with the tag it sits in - a plain-text reader was getting
+// "Open your plan" with nothing to open. The visible copy survives the strip,
+// which is the only version of this a template can fix from its own side.
 
 export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
   {
@@ -20,6 +27,7 @@ export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
       '<p>Here is the plan you put together at {{siteName}}.</p>' +
       '<p><strong>{{roomName}} - {{planName}}</strong><br>{{itemCount}} items, {{total}}</p>' +
       '<p><a href="{{planUrl}}">Open your plan</a></p>' +
+      '<p style="color:#666;font-size:13px">Or paste this into your browser: {{planUrl}}</p>' +
       '{{items}}' +
       '<p style="color:#666;font-size:13px">{{disclaimer}}</p>',
     mergeTags: ['siteName', 'roomName', 'planName', 'itemCount', 'total', 'planUrl', 'items', 'disclaimer'],
@@ -36,6 +44,7 @@ export const spacePlannerEmailTemplates: EmailTemplateDef[] = [
     bodyHtml:
       '<p>The picture of your plan has finished.</p>' +
       '<p><a href="{{planUrl}}">Have a look</a></p>' +
+      '<p style="color:#666;font-size:13px">Or paste this into your browser: {{planUrl}}</p>' +
       '{{#if stale}}<p>You have moved things around since you asked for it, so it shows the room as it was on {{renderedFor}}.</p>{{/if}}',
     // `stale` is a flag rather than wording, but it still has to be declared or
     // the editor does not offer it and the preview cannot exercise the branch.

@@ -112,6 +112,30 @@ export async function cancelBackfill(id: string): Promise<void> {
   `
 }
 
+/**
+ * Put the most recently stopped rebuild back in the queue at the cursor it
+ * stopped on.
+ *
+ * Stopping is a pause, not an abandonment - that is what the button promises,
+ * and over twenty thousand products a fresh job at cursor zero throws away
+ * however long the last pass ran for. Cancelled rows are invisible to
+ * getActiveBackfill on purpose (they are not live), so the resume is claimed
+ * here, in one statement, rather than by reading a row and then writing it.
+ */
+export async function resumeStoppedBackfill(): Promise<SplBackfillJob | null> {
+  const rows = await prisma.$queryRaw<BackfillRow[]>`
+    UPDATE "spl_backfill_jobs"
+    SET "status" = 'QUEUED', "finished_at" = NULL, "error" = '', "updated_at" = CURRENT_TIMESTAMP
+    WHERE "id" = (
+      SELECT "id" FROM "spl_backfill_jobs"
+      WHERE "status" = 'CANCELLED' AND "cursor" < "total"
+      ORDER BY "created_at" DESC LIMIT 1
+    )
+    RETURNING *
+  `
+  return rows[0] ? toBackfill(rows[0]) : null
+}
+
 // ---------------------------------------------------------------------------
 // Renders
 // ---------------------------------------------------------------------------
@@ -174,6 +198,22 @@ export async function getRenderJob(id: string): Promise<SplRenderJob | null> {
   return rows[0] ? toRender(rows[0]) : null
 }
 
+/**
+ * Thrown when this plan already has a picture on the way.
+ *
+ * The route looks before it books, but two taps inside the same second both
+ * looked and both found nothing - and a picture is the one thing in this module
+ * with a meter running on it. The partial unique index added in migration 004 is
+ * what actually decides, and this is that refusal in a form the route can answer
+ * politely rather than as a five hundred.
+ */
+export class RenderAlreadyLiveError extends Error {
+  constructor() {
+    super('A picture of this layout is already being made.')
+    this.name = 'RenderAlreadyLiveError'
+  }
+}
+
 export async function createRenderJob(input: {
   planId: string
   memberId: string | null
@@ -181,14 +221,39 @@ export async function createRenderJob(input: {
   planUpdatedAt: Date
 }): Promise<SplRenderJob> {
   const token = randomBytes(24).toString('base64url')
+  // The conflict is handled by the INSERT rather than by catching the error it
+  // would otherwise raise. Prisma does not pass a raw query's SQLSTATE through
+  // as `error.code` - that reads 'P2010', with the 23505 buried in the message -
+  // so a catch written against 23505 never fires, and the second of two taps
+  // would answer a five hundred instead of the picture already being made.
   const rows = await prisma.$queryRaw<RenderRow[]>`
     INSERT INTO "spl_render_jobs" ("plan_id", "member_id", "params", "plan_updated_at", "callback_token")
     VALUES (${input.planId}, ${input.memberId}, ${JSON.stringify(input.params)}::jsonb, ${input.planUpdatedAt}, ${token})
+    ON CONFLICT ("plan_id") WHERE "status" IN ('QUEUED', 'RUNNING') DO NOTHING
     RETURNING *
   `
   const row = rows[0]
-  if (!row) throw new Error('Could not queue that picture.')
+  if (!row) throw new RenderAlreadyLiveError()
   return toRender(row)
+}
+
+/**
+ * How many pictures this member has asked for lately.
+ *
+ * Counted off the jobs themselves rather than off the event log. The log carries
+ * no member column, so the limit used to be counted against the member's CURRENT
+ * plan ids - and deleting a plan orphaned its events and handed back a full
+ * allowance. A member may delete their own plans whenever they like; they should
+ * not be able to buy machine time by doing it.
+ */
+export async function countRecentRendersForMember(memberId: string, windowMinutes: number): Promise<number> {
+  const rows = await prisma.$queryRaw<{ count: bigint }[]>`
+    SELECT COUNT(*)::bigint AS count FROM "spl_render_jobs"
+    WHERE "member_id" = ${memberId}
+      AND "started_at" IS NOT NULL
+      AND "created_at" > CURRENT_TIMESTAMP - (${windowMinutes} * INTERVAL '1 minute')
+  `
+  return Number(rows[0]?.count ?? 0)
 }
 
 /** The per-job secret the worker echoes back, so a finished-job POST cannot be forged. */

@@ -11,6 +11,7 @@ import { resolveDimensions } from '@/modules/space-planner-for-shop/lib/resolve-
 import { resolveModelsForProducts, toClientModels } from '@/modules/space-planner-for-shop/lib/model-resolver'
 import { getVariationParents } from '@/modules/space-planner-for-shop/lib/spec-attributes'
 import { plannerHiddenResponse } from '@/modules/space-planner-for-shop/lib/visibility'
+import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
 
 // Everything the planner needs to put a specific set of products in a room:
 // sizes off the ladder, a freshly signed model url where there is a model, the
@@ -45,7 +46,7 @@ export async function POST(request: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: 'Bad request' }, { status: 400 })
 
   const ids = [...new Set(parsed.data.productIds)]
-  const [products, images, dimensions, models, shopConfig, taxDisplay, fromPrices, parentOf] = await Promise.all([
+  const [products, images, dimensions, models, shopConfig, taxDisplay, fromPrices, parentOf, quoteConfig] = await Promise.all([
     getProductsByIds(ids),
     getPrimaryProductImages(ids),
     resolveDimensions(ids),
@@ -58,7 +59,15 @@ export async function POST(request: NextRequest) {
     // The listing behind a variant child, so the panel can say "2 in the room"
     // on the family card the shopper actually browses by.
     getVariationParents(ids),
+    // Whether this shop shows prices at all. A PUBLIC route, so getting this
+    // wrong hands a quote-only shop's list prices to anybody who asks - and the
+    // planner's own item list and running total are built from what this
+    // returns, which is why they went on printing money while the PDF, the
+    // email and the share page all said "price on application".
+    getQuoteConfigCached(),
   ])
+
+  const hidePrices = pricesHidden(quoteConfig)
 
   const items = ids
     .map((id) => {
@@ -86,8 +95,17 @@ export async function POST(request: NextRequest) {
         slug: product.slug,
         image: images[id] ?? null,
         parentId: parentOf.get(id) ?? null,
-        price,
-        priceFormatted: `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`,
+        // Zero where the shop hides its prices, so nothing downstream can add a
+        // figure up: the planner's running total and item list are computed in
+        // the browser from exactly this, and would otherwise print money the
+        // rest of the module has agreed not to show.
+        price: hidePrices ? 0 : price,
+        priceFormatted: hidePrices
+          ? quoteConfig.hiddenPriceLabel
+          : `${from?.varies ? 'From ' : ''}${formatMoney(price, shopConfig.currencySymbol)}`,
+        // Said as a flag as well as in the wording, so the item list can decline
+        // to multiply a "from" into a definite line total.
+        priceVaries: !hidePrices && Boolean(from?.varies),
         widthMm: size?.widthMm ?? 800,
         depthMm: size?.depthMm ?? 600,
         heightMm: size?.heightMm ?? 750,
@@ -99,5 +117,13 @@ export async function POST(request: NextRequest) {
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
 
-  return NextResponse.json({ items, models: toClientModels(models) })
+  // The models get the same status filter the items above get, and for exactly
+  // the same reason. Without it the status check was decorative: a guessed id
+  // for a DRAFT product was refused a name and a price and then handed a freshly
+  // signed url to its geometry, its fabrics and its real dimensions - which is
+  // rather more of an unreleased product than its name would have been.
+  const allowed = new Set(items.map((item) => item.id))
+  const visibleModels = toClientModels(models).filter((model) => allowed.has(model.productId))
+
+  return NextResponse.json({ items, models: visibleModels })
 }

@@ -3,12 +3,12 @@ import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
 import { verifyTurnstile } from '@/lib/auth/turnstile'
 import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
-import { getPlanForMember, listPlansForMember, setPlanShare } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { getPlanForMember, setPlanShare } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { buildBom } from '@/modules/space-planner-for-shop/lib/bom'
 import { sendPlanEmail } from '@/modules/space-planner-for-shop/lib/email'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
-import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
+import { countRecentEventsForMember, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 
 // "Email me my plan."
 //
@@ -44,8 +44,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const room = await getRoomForMember(plan.roomId, gate.member.id)
   if (!room) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  const mine = await listPlansForMember(gate.member.id)
-  const recent = await countRecentEvents('plan.emailed', mine.map((p) => p.id), config.rateLimitWindowMin)
+  const recent = await countRecentEventsForMember('plan.emailed', gate.member.id, config.rateLimitWindowMin)
   if (recent >= config.maxPlanEmailsPerWindow) {
     return NextResponse.json({ error: 'That is a lot of emails in a short while. Try again a bit later.' }, { status: 429 })
   }
@@ -67,6 +66,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     return NextResponse.json({ error: 'We could not send that just now. Please try again shortly.' }, { status: 502 })
   }
 
-  await recordEvent('plan.emailed', { planId: id })
+  await recordEvent('plan.emailed', { planId: id, memberId: gate.member.id })
   return NextResponse.json({ ok: true })
 }

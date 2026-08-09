@@ -34,7 +34,7 @@ export async function PlannerAccountSection() {
         </Link>
       </div>
 
-      <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+      <p style={{ margin: 0, color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }}>
         {rooms.length === 1 ? 'One space' : `${rooms.length} spaces`}, {totalPlans === 1 ? 'one layout' : `${totalPlans} layouts`}.
         {latest && ` Last worked on: ${latest.room.name}.`}
       </p>

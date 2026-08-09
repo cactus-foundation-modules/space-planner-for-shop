@@ -78,6 +78,38 @@ export function normaliseWinding(vertices: Vertex[]): Vertex[] {
   return polygonSignedArea(vertices) < 0 ? [...vertices].reverse() : [...vertices]
 }
 
+/**
+ * The whole room wound the right way round, doors and windows included.
+ *
+ * Reversing the vertices renumbers every wall, and an opening names its wall by
+ * index. Nothing carried the openings through the reversal, so a corner dragged
+ * across the room in one gesture - which can leave the outline simple but
+ * reversed - renumbered the walls and left the front door hanging on whichever
+ * wall had inherited its number. Usually the opposite one.
+ *
+ * Reversal maps the wall starting at vertex m to the wall starting at n-2-m, and
+ * turns it end for end - so an offset measured from the old start becomes the
+ * distance from the new one, which is the far side of the opening.
+ */
+export function normaliseGeometryWinding(geometry: RoomGeometry): RoomGeometry {
+  const vertices = geometry.vertices
+  if (polygonSignedArea(vertices) >= 0) return geometry
+
+  const count = vertices.length
+  const wallLengths = walls(vertices).map((wall) => wall.lengthMm)
+  const openings = geometry.openings.map((opening) => {
+    const length = wallLengths[opening.wallIndex]
+    if (length === undefined) return opening
+    return {
+      ...opening,
+      wallIndex: ((count - 2 - opening.wallIndex) % count + count) % count,
+      offsetMm: Math.max(0, Math.round(length - opening.offsetMm - opening.widthMm)),
+    }
+  })
+
+  return { ...geometry, vertices: [...vertices].reverse(), openings }
+}
+
 export function boundingBox(vertices: Vertex[]): { minX: number; minY: number; maxX: number; maxY: number } {
   if (vertices.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -227,7 +259,7 @@ export function isSelfIntersecting(vertices: Vertex[]): boolean {
 // ---------------------------------------------------------------------------
 
 export type GeometryIssue = {
-  code: 'too-few-walls' | 'self-intersecting' | 'wall-too-short' | 'opening-too-wide' | 'opening-off-wall' | 'ceiling-out-of-range' | 'obstruction-outside' | 'room-too-large'
+  code: 'too-few-walls' | 'self-intersecting' | 'wall-too-short' | 'opening-too-wide' | 'opening-off-wall' | 'ceiling-out-of-range' | 'obstruction-outside' | 'room-too-large' | 'not-a-number'
   message: string
   wallIndex?: number
   openingId?: string
@@ -251,6 +283,16 @@ export function validateRoomGeometry(geometry: RoomGeometry): GeometryIssue[] {
 
   if (vertices.length < 3) {
     issues.push({ code: 'too-few-walls', message: 'A room needs at least three walls.' })
+    return issues
+  }
+
+  // Before anything else, because every rule below compares with < or >, and
+  // every comparison against NaN is false - so a corner that had gone to NaN
+  // passed the whole validator without a single issue and was written into the
+  // plan. The server's own schema does reject it, but it rejects the entire
+  // save, which loses the furniture along with the bad corner.
+  if (vertices.some((vertex) => !Number.isFinite(vertex.x) || !Number.isFinite(vertex.y))) {
+    issues.push({ code: 'not-a-number', message: 'One of the corners has no position. Undo the last change to the shape.' })
     return issues
   }
 
@@ -562,6 +604,48 @@ export function itemHitsObstruction(
 }
 
 /**
+ * Points that are definitely inside the outline, to walk an item towards.
+ *
+ * Several, not one, and that is the whole point. The bounding box's centre is
+ * the obvious candidate and the wrong one on its own: in an L-shaped room it can
+ * sit squarely in the cut-out, so the clamp below walked towards a spot outside
+ * the walls and "clamped" the item into the notch. But the first replacement
+ * that is merely INSIDE is not enough either - a point a few centimetres in from
+ * a wall is inside the room and still has no space around it for an eight
+ * hundred millimetre desk, so the clamp arrived there and left the item poking
+ * through the wall behind it.
+ *
+ * So: the box centre first (exactly right for a rectangle), then each wall's
+ * midpoint walked inwards, deepest first, and the caller tries them in turn
+ * until the item actually fits at one.
+ */
+function interiorPoints(vertices: Vertex[]): Vertex[] {
+  const out: Vertex[] = []
+  const box = boundingBox(vertices)
+  const centre = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }
+  if (pointInPolygon(centre, vertices)) out.push(centre)
+
+  const span = Math.max(box.maxX - box.minX, box.maxY - box.minY)
+  for (const wall of walls(vertices)) {
+    if (wall.lengthMm < EPSILON) continue
+    const mid = { x: (wall.a.x + wall.b.x) / 2, y: (wall.a.y + wall.b.y) / 2 }
+    // walls() has already worked out which way is into the room, checking the
+    // winding rather than assuming it. Recomputing the normal here assumed the
+    // canonical one, so on a reversed outline - which a half-finished corner
+    // drag writes to the browser's scratch copy - every probe went the wrong
+    // way and nothing was ever inside.
+    //
+    // Deepest first: a probe far from its wall has room around it, and room is
+    // what the item being clamped actually needs.
+    for (const step of [0.4, 0.25, 0.08, 0.02]) {
+      const probe = { x: mid.x + wall.inwardX * span * step, y: mid.y + wall.inwardY * span * step }
+      if (pointInPolygon(probe, vertices)) out.push(probe)
+    }
+  }
+  return out
+}
+
+/**
  * Nudge an item back inside the room instead of losing it.
  *
  * Dragging something through a wall is a thing everybody does within the first
@@ -572,35 +656,54 @@ export function itemHitsObstruction(
 export function clampItemIntoRoom(item: PlanItem, geometry: RoomGeometry): PlanItem {
   if (itemInsideRoom(item, geometry)) return item
 
-  const box = boundingBox(geometry.vertices)
-  const centre = { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 }
+  // Each candidate in turn, because a point being inside the room does not mean
+  // the ITEM fits when centred there. Walking towards a spot a few centimetres
+  // in from a wall put a desk's far edge back through that wall, and the old
+  // code returned it anyway - "clamped", and still outside the building.
+  let fallback: PlanItem | null = null
+  for (const centre of interiorPoints(geometry.vertices)) {
+    const place = (t: number): PlanItem => ({
+      ...item,
+      x: Math.round(item.x + (centre.x - item.x) * t),
+      y: Math.round(item.y + (centre.y - item.y) * t),
+    })
 
-  const place = (t: number): PlanItem => ({
-    ...item,
-    x: Math.round(item.x + (centre.x - item.x) * t),
-    y: Math.round(item.y + (centre.y - item.y) * t),
-  })
+    // Walk towards it in shrinking steps. Twenty iterations resolves a 200 m
+    // room to under a fifth of a millimetre, which is far below anything a
+    // person can see or a tape measure can find.
+    let low = 0
+    let high = 1
+    for (let i = 0; i < 20; i++) {
+      const mid = (low + high) / 2
+      if (itemInsideRoom(place(mid), geometry)) high = mid
+      else low = mid
+    }
 
-  // Walk towards the middle of the room in shrinking steps. Twenty iterations
-  // resolves a 200 m room to under a fifth of a millimetre, which is far below
-  // anything a person can see or a tape measure can find.
-  let low = 0
-  let high = 1
-  for (let i = 0; i < 20; i++) {
-    const mid = (low + high) / 2
-    if (itemInsideRoom(place(mid), geometry)) high = mid
-    else low = mid
+    // The search converges ON the wall, and a corner sitting exactly on the
+    // outline is neither in nor out - which is how a clamp that "worked" still
+    // reported the item as outside. Step a shade further in and take the first
+    // position that is unambiguously inside.
+    //
+    // In millimetres, not in fractions of the way to the middle. As a fraction
+    // the nudge grew with the room: a desk snapped flush sat 3 mm off the wall
+    // in a small office and 20 mm off it in a warehouse, and by different
+    // amounts on facing walls - so a bank of desks along two walls did not line
+    // up.
+    const reach = Math.hypot(centre.x - item.x, centre.y - item.y) || 1
+    for (const bias of [1, 5, 25, 100, reach]) {
+      const candidate = place(Math.min(1, high + bias / reach))
+      if (itemInsideRoom(candidate, geometry)) return candidate
+    }
+    fallback ??= place(1)
   }
 
-  // The search converges ON the wall, and a corner sitting exactly on the
-  // outline is neither in nor out - which is how a clamp that "worked" still
-  // reported the item as outside. Step a shade further in and take the first
-  // position that is unambiguously inside.
-  for (const bias of [0.002, 0.01, 0.05, 0.2, 1]) {
-    const candidate = place(Math.min(1, high + bias))
-    if (itemInsideRoom(candidate, geometry)) return candidate
-  }
-  return place(1)
+  // Nowhere along any of those rays could hold it, which for a three-metre
+  // table in a small office is simply true. It goes to the middle of the room
+  // rather than staying where the drag left it: an item that does not fit is a
+  // thing the shopper needs to SEE not fitting, and one abandoned out in the
+  // void beyond the walls is one they cannot get hold of again. The clash
+  // warning and the displacement rule take it from there.
+  return fallback ?? item
 }
 
 /**
@@ -701,6 +804,21 @@ export function snapToWall(item: PlanItem, geometry: RoomGeometry, toleranceMm =
 export function snapYaw(yaw: number, stepDeg = 15): number {
   if (stepDeg <= 0) return yaw
   return Math.round(yaw / stepDeg) * stepDeg
+}
+
+/**
+ * An angle brought back into 0-359, the way every angle should be stored.
+ *
+ * Turning is applied as a delta and nothing wrapped it, so the number only ever
+ * grew: forty-one presses of "Turn 90°" put it past the 3600 the save schema
+ * allows, and from then on every save was refused with a message about a number
+ * - with the offending value sitting in the browser's scratch copy, so reloading
+ * did not clear it either. A non-finite angle reads as no rotation rather than
+ * poisoning the item.
+ */
+export function normaliseYaw(yaw: number): number {
+  if (!Number.isFinite(yaw)) return 0
+  return ((yaw % 360) + 360) % 360
 }
 
 // ---------------------------------------------------------------------------
@@ -896,19 +1014,31 @@ export function clearanceAround(item: PlanItem, others: PlanItem[], geometry: Ro
     if (other.parentId === item.id || item.parentId === other.id) continue
     if (!heightBandsClash(item, other)) continue
     const otherCorners = itemCorners(other)
-    for (const corner of corners) {
-      for (let i = 0; i < otherCorners.length; i++) {
-        const a = at(otherCorners, i)
-        const b = at(otherCorners, i + 1)
-        const dx = b.x - a.x
-        const dy = b.y - a.y
-        const lenSq = dx * dx + dy * dy || 1
-        const t = Math.max(0, Math.min(1, ((corner.x - a.x) * dx + (corner.y - a.y) * dy) / lenSq))
-        const d = Math.hypot(corner.x - (a.x + t * dx), corner.y - (a.y + t * dy))
-        if (d < smallest) smallest = d
-      }
-    }
+    // Measured BOTH ways round. Corners against the other's edges alone misses
+    // the commonest close pass there is - a neighbour's corner sitting against
+    // the middle of this item's long edge - and the gap reported was several
+    // times the real one, which for a walkway warning is worse than none.
+    const gap = Math.min(cornersToEdges(corners, otherCorners), cornersToEdges(otherCorners, corners))
+    if (gap < smallest) smallest = gap
   }
 
   return Number.isFinite(smallest) ? Math.round(smallest) : 0
+}
+
+/** The shortest distance from any of these points to any of that outline's edges. */
+function cornersToEdges(points: Vertex[], outline: Vertex[]): number {
+  let smallest = Infinity
+  for (const point of points) {
+    for (let i = 0; i < outline.length; i++) {
+      const a = at(outline, i)
+      const b = at(outline, i + 1)
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const lenSq = dx * dx + dy * dy || 1
+      const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lenSq))
+      const d = Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy))
+      if (d < smallest) smallest = d
+    }
+  }
+  return smallest
 }

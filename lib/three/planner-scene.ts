@@ -359,6 +359,12 @@ export function buildPlaceholder(node: SceneNode): Object3D {
     loader.load(
       node.imageUrl,
       (texture) => {
+        // The room this was for has already been thrown away. Free the texture
+        // rather than hanging it on a group nobody will dispose again.
+        if (group.userData[DISPOSED]) {
+          texture.dispose()
+          return
+        }
         texture.colorSpace = SRGBColorSpace
         const decal = new Mesh(
           new BoxGeometry(node.size.width * 0.86, node.size.height * 0.86, 0.002),
@@ -501,6 +507,19 @@ export type SceneModelSource = {
 const SHARED_MODEL = 'sharedModel'
 
 /**
+ * Set on a group the moment it is disposed.
+ *
+ * A placeholder's product photo is fetched asynchronously, and disposeGroup can
+ * only free what is attached when it runs - so a decal whose image was still in
+ * flight was added to an already-disposed group afterwards, taking a live
+ * Texture, a BoxGeometry and a material with it that nothing would ever free
+ * again. That is the same leak the comment on disposeGroup describes, arriving
+ * by the one door it cannot watch, and two builds landing closer together than
+ * an image load is ordinary rather than rare.
+ */
+const DISPOSED = 'splDisposed'
+
+/**
  * Everything in the room.
  *
  * Instancing is the budget model: each distinct model file is prepared once and
@@ -580,11 +599,18 @@ export async function buildItems(
       // source, because `bySource` is keyed by file plus paints: two seat heights
       // of one chair in one fabric share an entry there and would otherwise share
       // a height, which is the exact thing this is here to stop.
-      const placedSource = models.get(node.productId)
+      //
+      // Composite first, bare product as fallback - the same exact-or-base order
+      // scene-plan's buildScene used to resolve `node.model` itself. A combined
+      // desk+screens model is its OWN entry in `models` (keyed `${productId}@@
+      // ${context}`, see plannerModelKey) with its own realMetres; reading only
+      // the bare productId entry here scaled the taller combined mesh down to the
+      // bare desk's recorded height.
+      const placedSource = (node.context ? models.get(`${node.productId}@@${node.context}`) : undefined) ?? models.get(node.productId)
       const real = placedSource?.realMetres
         ? { metres: placedSource.realMetres, axis: placedSource.realAxis ?? 'height' }
         : null
-      const scale = modelScaleFor(ready, node.size, node.approximate, real)
+      const scale = modelScaleFor(ready, node.size, node.approximate, real, node.generic)
       holder.scale.set(scale.x, scale.y, scale.z)
       holder.userData[SHARED_MODEL] = true
       object = holder
@@ -880,7 +906,7 @@ export function dressForRender(opts: {
 /**
  * Give back what this group owns, and nothing that it merely borrows.
  *
- * Two things in here are shared and must survive:
+ * Three things in here are shared and must survive:
  *
  *   - A cloned catalogue model. `Object3D.clone` copies geometry and material BY
  *     REFERENCE, so every clone of a chair shares one geometry with the prepared
@@ -891,18 +917,29 @@ export function dressForRender(opts: {
  *     anything moves, which looks nothing like its cause.
  *   - Sprite geometry, which three shares across every sprite it has ever made.
  *     Disposing it takes every future label with it.
+ *   - A label sprite's texture, which is the LRU-cached canvas from labelTexture()
+ *     above - reused across rebuilds and freed only by its own eviction. A
+ *     placeholder's photo decal is the opposite: TextureLoader().load() runs fresh
+ *     per node with THREE.Cache off, so nothing else ever holds or frees that one,
+ *     and leaving it undisposed is the module's GPU memory leak on every nudge.
  *
  * Walked by hand rather than with traverse() so a shared subtree can be skipped
  * whole; traverse offers no way to stop going down.
  */
 export function disposeGroup(object: Object3D): void {
   if (object.userData[SHARED_MODEL]) return
+  object.userData[DISPOSED] = true
 
+  const isSprite = (object as unknown as { isSprite?: boolean }).isSprite === true
   const mesh = object as Mesh
-  if (mesh.geometry && !(object as unknown as { isSprite?: boolean }).isSprite) mesh.geometry.dispose()
+  if (mesh.geometry && !isSprite) mesh.geometry.dispose()
   const material = (mesh as unknown as { material?: MeshStandardMaterial | MeshStandardMaterial[] }).material
   if (material) {
-    for (const entry of Array.isArray(material) ? material : [material]) entry.dispose()
+    for (const entry of Array.isArray(material) ? material : [material]) {
+      // Not for a sprite: see the shared-label case above.
+      if (!isSprite) entry.map?.dispose()
+      entry.dispose()
+    }
   }
 
   for (const child of [...object.children]) disposeGroup(child)

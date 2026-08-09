@@ -50,11 +50,22 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     )
   }
 
+  // The cap is checked again inside the INSERT, so two requests arriving
+  // together cannot both pass the count above. A null answer means the other one
+  // got there first, which reads to the member exactly like being at the cap -
+  // because they are.
   const view = await createView({
     roomId: id,
     name: parsed.data.name,
     camera: parsed.data.camera as SavedCamera,
+    max: MAX_VIEWS_PER_ROOM,
   })
+  if (!view) {
+    return NextResponse.json(
+      { error: `You have ${MAX_VIEWS_PER_ROOM} views saved for this space, which is as many as we keep. Delete one you have finished with.` },
+      { status: 409 },
+    )
+  }
   return NextResponse.json({ view })
 }
 

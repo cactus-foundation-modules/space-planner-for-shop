@@ -72,9 +72,29 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
     }
   }
 
+  // What the basket already holds, so this TOPS UP rather than adds a second
+  // copy of everything.
+  //
+  // shop's addToCart is `existing.quantity += quantity`, and a line staged from
+  // the basket carries the basket's own lineId back with it - so the module's
+  // headline journey (basket → "plan your space" → put all four in the room →
+  // Add to basket) left a basket of eight desks, under a message saying four
+  // had been added. Plain lines doubled too: with no lineId, addToCart matches
+  // on product id and increments that instead.
+  //
+  // Written as a shortfall rather than as an assignment, deliberately. Placing
+  // eight of something the basket has four of still takes it to eight, which is
+  // the room being the thing the shopper means. Placing only two of the four
+  // leaves all four alone: this button says "add to basket", and quietly
+  // removing things somebody has already chosen is not a reading of that.
   const existing = readCart()
-  const existingKeys = new Set(existing.map((line) => cartLineKey(line)))
-  const newLines = writes.filter((w) => !existingKeys.has(w.lineId ?? w.productId)).length
+  const held = new Map(existing.map((line) => [cartLineKey(line), line.quantity]))
+  const shortfalls = writes
+    .map((write) => ({ ...write, quantity: write.quantity - (held.get(write.lineId ?? write.productId) ?? 0) }))
+    .filter((write) => write.quantity > 0)
+
+  const existingKeys = new Set(held.keys())
+  const newLines = shortfalls.filter((w) => !existingKeys.has(w.lineId ?? w.productId)).length
 
   if (existing.length + newLines > MEMBER_CART_MAX_LINES) {
     return {
@@ -83,10 +103,13 @@ export function addPlanToCart(lines: PlanCartLine[]): AddPlanResult {
     }
   }
 
-  for (const write of writes) {
+  for (const write of shortfalls) {
     addToCart(write.productId, write.quantity, write.lineId || write.meta ? { lineId: write.lineId, meta: write.meta } : undefined)
   }
-  return { ok: true, added: writes.length }
+  // `added` counts what genuinely changed, because the message it feeds is read
+  // as a statement about the basket. Zero is the ordinary answer for a plan the
+  // shopper arrived at from the basket and did not change.
+  return { ok: true, added: shortfalls.length }
 }
 
 // The `modelContext` a line's meta may carry - the 3D module's documented

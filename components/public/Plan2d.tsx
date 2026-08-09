@@ -90,7 +90,8 @@ export type Plan2dProps = {
   onAddObstruction?: (x: number, y: number) => void
   onSelectObstruction?: (id: string | null) => void
   /** Dragging one about. Millimetre deltas, like the furniture. */
-  onMoveObstruction?: (id: string, dx: number, dy: number) => void
+  /** `settle` marks the end of the gesture - see the reducer's move-obstruction. */
+  onMoveObstruction?: (id: string, dx: number, dy: number, settle?: boolean) => void
 
   /** Hands the parent a way to photograph the plan, for the PDF export. */
   registerCapture?: (capture: (() => string | null) | null) => void
@@ -172,6 +173,13 @@ export function Plan2d(props: Plan2dProps) {
    * marked the plan dirty for looking at it. */
   const cornerMovedRef = useRef(false)
   const [draft, setDraft] = useState<Vertex[]>([])
+  /** The corners drawn so far, for the keyboard handler to read without
+   * reaching for them from inside a setDraft updater - StrictMode runs those
+   * twice, and finishing the room is not something to do twice. */
+  const draftRef = useRef(draft)
+  useEffect(() => {
+    draftRef.current = draft
+  })
   const [hover, setHover] = useState<Vertex | null>(null)
 
   // Fit the room to the canvas. Recomputed whenever the room or the box changes,
@@ -212,11 +220,21 @@ export function Plan2d(props: Plan2dProps) {
   )
 
   useEffect(() => {
-    // Not while a corner is under the pointer. Re-fitting keys on the room, and
-    // dragging a corner changes the room on every pointer event - so the view
-    // recentred, and the canvas was resized (and so cleared) between every pair
-    // of them. The room crawled out from under the cursor as it was dragged.
-    if (cornerDragRef.current !== null) return
+    // Not while ANY gesture that edits the room is under the pointer.
+    //
+    // Re-fitting keys on the room, and these three change the room on every
+    // pointer event - so the view recentred, and the canvas was resized (and so
+    // cleared) between every pair of them. The room crawled out from under the
+    // cursor as it was dragged.
+    //
+    // Corners were guarded when that was noticed; columns and doors were not,
+    // and they are worse off, because their drag arithmetic is in plan
+    // coordinates read back through the view. Recentring mid-drag discards the
+    // pan, so the NEXT pointer move measured a delta the size of the pan that
+    // had just been thrown away and the column jumped that far in one frame.
+    // Panning the plan to find a column - which on a phone is the only way to
+    // reach one - and then dragging it was therefore reliably wrong.
+    if (cornerDragRef.current !== null || obstructionDragRef.current !== null || openingDragRef.current !== null) return
     fit(false)
   }, [fit])
 
@@ -233,13 +251,25 @@ export function Plan2d(props: Plan2dProps) {
     setHover(null)
   }
 
+  // The observer below is mount-only and must not rebind on every geometry or
+  // mode change, so its callback can only ever close over the `fit` that
+  // existed at mount. Routing the call through a ref refreshed every render is
+  // what lets the subscription stay mount-only while still calling a fit that
+  // matches the room as it is now - a phone rotation or a breakpoint change
+  // right after an edit used to re-fit against the shape or mode that was
+  // current when the component first mounted.
+  const fitRef = useRef(fit)
   useEffect(() => {
-    const observer = new ResizeObserver(() => fit(false))
+    fitRef.current = fit
+  })
+
+  useEffect(() => {
+    const observer = new ResizeObserver(() => fitRef.current(false))
     if (wrapRef.current) observer.observe(wrapRef.current)
     return () => observer.disconnect()
-    // Deliberately not keyed on `fit`: the observer only has to exist, and
-    // re-subscribing on every geometry change costs a disconnect per keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    // Deliberately not keyed on anything: the observer only has to exist once,
+    // and it reaches `fit` through the ref above rather than by closing over
+    // it, so exhaustive-deps has nothing to ask for here.
   }, [])
 
   const removeCorner = useCallback(
@@ -254,18 +284,22 @@ export function Plan2d(props: Plan2dProps) {
   useEffect(() => {
     if (props.mode === 'furnish') return
     const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null
+      const target = event.target instanceof Element ? event.target : null
       if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      // Enter belongs to whatever has the focus. This listener is on the window
+      // and calls preventDefault, so while drawing, Enter on a focused "Back a
+      // corner", "Cancel" or catalogue card closed the room off instead of doing
+      // the thing the button says. Only Enter: Escape and Backspace press
+      // nothing, and they have to keep working wherever the focus happens to be.
+      if (event.key === 'Enter' && target?.closest('button, a, [role="button"]')) return
       if (props.mode === 'draw') {
         if (event.key === 'Backspace') {
           event.preventDefault()
           setDraft((current) => current.slice(0, -1))
         } else if (event.key === 'Enter') {
           event.preventDefault()
-          setDraft((current) => {
-            if (current.length >= 3) props.onDrawDone(current)
-            return current
-          })
+          const drawn = draftRef.current
+          if (drawn.length >= 3) props.onDrawDone(drawn)
         } else if (event.key === 'Escape') {
           props.onDrawCancel()
         }
@@ -601,6 +635,31 @@ export function Plan2d(props: Plan2dProps) {
     [renderScene],
   )
 
+  // A canvas does not inherit a theme; it is painted with whatever the tokens
+  // said at the moment it was painted.
+  //
+  // The repaint above keys on the geometry, the items, the selection and the
+  // view - none of which a theme switch touches. And the switch itself happens
+  // entirely outside React, as a data-theme attribute on <html>, so nothing in
+  // this component had any idea it had happened: the stage around the plan
+  // flipped to dark instantly and the plan kept its light-theme ink, at about
+  // 1.1:1 on the new background, until an unrelated pan or click forced a
+  // redraw. Both signals are watched because the platform has two - the
+  // attribute for an explicit choice, and the media query for "follow the
+  // system".
+  const [themeNonce, setThemeNonce] = useState(0)
+  useEffect(() => {
+    const bump = () => setThemeNonce((value) => value + 1)
+    const observer = new MutationObserver(bump)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class'] })
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    media.addEventListener('change', bump)
+    return () => {
+      observer.disconnect()
+      media.removeEventListener('change', bump)
+    }
+  }, [])
+
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -623,7 +682,7 @@ export function Plan2d(props: Plan2dProps) {
       },
       null,
     )
-  }, [paint])
+  }, [paint, themeNonce])
 
   useEffect(() => {
     const register = props.registerCapture
@@ -698,7 +757,12 @@ export function Plan2d(props: Plan2dProps) {
     // openings mode, a stray column in obstructions mode. Whatever the first
     // finger had started is abandoned; anything it had already moved is closed
     // off properly, so the undo step and the unsaved-work flag are not lost.
-    if (pointersRef.current.size === 2) {
+    // `>= 2`, not `=== 2`: with two fingers already down a third landed
+    // straight through this guard into the mode handlers below and set up a
+    // fresh drag, which on release read as a tap - the exact stray corner, door
+    // or column the guard exists to stop. A palm or a third finger during a
+    // pinch is not a rare way to hold a phone.
+    if (pointersRef.current.size >= 2) {
       const [a, b] = [...pointersRef.current.values()]
       if (a && b) pinchRef.current = { distance: Math.hypot(a.x - b.x, a.y - b.y), zoom: zoomRef.current }
       if (dragRef.current?.kind === 'items' && dragRef.current.moved) props.onDragEnd()
@@ -707,7 +771,10 @@ export function Plan2d(props: Plan2dProps) {
       rotateRef.current = null
       if (openingDragRef.current?.moved) props.onDragEnd()
       openingDragRef.current = null
-      if (obstructionDragRef.current?.moved) props.onDragEnd()
+      if (obstructionDragRef.current?.moved) {
+        props.onMoveObstruction?.(obstructionDragRef.current.id, 0, 0, true)
+        props.onDragEnd()
+      }
       obstructionDragRef.current = null
       if (cornerDragRef.current !== null) {
         cornerDragRef.current = null
@@ -928,7 +995,11 @@ export function Plan2d(props: Plan2dProps) {
     }
 
     const pinch = pinchRef.current
-    if (pinch && pointersRef.current.size === 2) {
+    // Also `>= 2`, to match the guard that armed it: an exact test meant a
+    // third finger froze the zoom until every finger came off. The first two in
+    // the map are the pair being measured, which is the same pair the pinch was
+    // armed from, so it stays steady rather than jumping to a new baseline.
+    if (pinch && pointersRef.current.size >= 2) {
       const [a, b] = [...pointersRef.current.values()]
       if (!a || !b) return
       const distance = Math.hypot(a.x - b.x, a.y - b.y)
@@ -986,9 +1057,17 @@ export function Plan2d(props: Plan2dProps) {
 
     if (obstructionDragRef.current) {
       const carried = obstructionDragRef.current.moved
+      const carriedId = obstructionDragRef.current.id
       obstructionDragRef.current = null
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-      if (carried) props.onDragEnd()
+      if (carried) {
+        // A zero move that settles: the column is already where it was left, and
+        // this is what tells the planner to work out what is now standing in it.
+        // Judging that on every pointer move instead swept every desk the column
+        // passed over onto the waiting list on its way across the room.
+        props.onMoveObstruction?.(carriedId, 0, 0, true)
+        props.onDragEnd()
+      }
       return
     }
 
@@ -1039,6 +1118,14 @@ export function Plan2d(props: Plan2dProps) {
           props.onDrawDone(draft)
           return
         }
+      }
+      const previous = draft[draft.length - 1]
+      if (previous) {
+        const at = toScreen(previous)
+        // A double-tap landing back on the last corner would otherwise close a
+        // zero-length wall, which later fails validation with a message that
+        // only makes sense in shape mode. "Back a corner" is the real undo here.
+        if (Math.hypot(at.x - x, at.y - y) <= CORNER_HIT_PX) return
       }
       setDraft([...draft, point])
       return
@@ -1114,7 +1201,11 @@ export function Plan2d(props: Plan2dProps) {
       {props.mode === 'openings' && (
         <div className="spl-stage-bar">
           <span className="spl-note">
-            Tap a wall to put a {props.openingKind ?? 'door'} in it. Drag one along to move it.
+            {/* The article has to follow the noun: interpolating the kind
+                straight in produced "put a opening in it" for one of the
+                three. */}
+            Tap a wall to put {props.openingKind === 'opening' ? 'an opening' : `a ${props.openingKind ?? 'door'}`} in it.
+            Drag one along to move it.
           </span>
         </div>
       )}

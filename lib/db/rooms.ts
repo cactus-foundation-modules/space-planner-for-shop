@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
 import type { RoomGeometry, SplRoom } from '@/modules/space-planner-for-shop/lib/types'
@@ -126,8 +127,18 @@ export async function updateRoom(
     UPDATE "spl_rooms"
     SET "name" = ${name},
         "notes" = ${notes},
-        "geometry" = ${JSON.stringify(geometry)}::jsonb,
-        "schema_version" = ${geometry.version},
+        -- Left alone when the caller did not send one, the same way updatePlan
+        -- guards every one of its columns.
+        --
+        -- Writing it back "unchanged" is not harmless: what goes back is the
+        -- geometry as READ, and the reader substitutes a plain 4m x 3m box on
+        -- any parse failure. So a rollback after a schema-version bump made
+        -- newer rooms unreadable, and then a customer simply RENAMING one
+        -- overwrote their measured space with the default, permanently. Zod
+        -- also strips keys it does not know, so every rename quietly dropped
+        -- any geometry field the running build had not heard of.
+        "geometry" = ${patch.geometry === undefined ? Prisma.sql`"geometry"` : Prisma.sql`${JSON.stringify(geometry)}::jsonb`},
+        "schema_version" = ${patch.geometry === undefined ? Prisma.sql`"schema_version"` : Prisma.sql`${geometry.version}`},
         "thumbnail_media_id" = ${thumbnail},
         "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${roomId} AND "member_id" = ${memberId}

@@ -52,7 +52,14 @@ declare global {
 
 export type RenderFrameProps = {
   description: SceneDescription
-  sources: Array<SceneModelSource & { productId: string }>
+  /**
+   * `context` is '' or absent for a base model, and the add-on combination tag
+   * (e.g. a desk-with-screens variant) otherwise - see plannerModelKey in
+   * lib/model-resolver. Needed here, and not just on `description`'s own nodes,
+   * because two sources for the SAME product (its base model and a combined
+   * variant) are both real and must not collide on productId alone below.
+   */
+  sources: Array<SceneModelSource & { productId: string; context?: string }>
   options: PrepareOptions & { maxUniqueModels: number }
   /**
    * Where the shopper was standing when they asked for this. Null falls back to
@@ -95,9 +102,25 @@ export function RenderFrame(props: RenderFrameProps) {
       const room = buildRoom(props.description)
       scene.add(room)
 
+      // Installed the moment there is anything to release, and replaced as more
+      // is built. It used to be assigned on the very last line, so every early
+      // return below - a cancelled build, a model that would not load, an
+      // unsupported context - left the renderer and the room group behind. One
+      // page in a throwaway browser, so it cost nothing in production, and two
+      // renderers on every dev mount in Strict Mode.
+      cleanup = () => {
+        disposeGroup(room)
+        renderer.dispose()
+      }
+
       const models = new Map<string, SceneModelSource>()
       for (const source of props.sources) {
-        models.set(source.productId, {
+        // Composite for a combined-model variant, bare id for the base - the same
+        // key SpacePlanner's live view and scene-plan's node lookups use. Keyed on
+        // productId alone, a desk placed both plain and with screens had its two
+        // sources collide here and one silently overwrote the other.
+        const key = source.context ? `${source.productId}@@${source.context}` : source.productId
+        models.set(key, {
           url: source.url,
           cacheKey: source.cacheKey,
           format: source.format,
@@ -121,6 +144,11 @@ export function RenderFrame(props: RenderFrameProps) {
         scene.add(result.group)
         items = result.group
         degraded = result.degraded.length
+        cleanup = () => {
+          disposeGroup(items)
+          disposeGroup(room)
+          renderer.dispose()
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         window.__splRenderFailed = `The room could not be put together: ${message}`
@@ -202,6 +230,7 @@ export function RenderFrame(props: RenderFrameProps) {
       cleanup = () => {
         disposeComposer?.()
         undress()
+        disposeGroup(items)
         disposeGroup(room)
         renderer.dispose()
       }
@@ -219,7 +248,7 @@ export function RenderFrame(props: RenderFrameProps) {
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 2147483647, background: '#000' }}>
       <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
-      {failed && <div data-render-failed>{failed}</div>}
+      {failed && <div data-render-failed style={{ color: '#fff' }}>{failed}</div>}
     </div>
   )
 }

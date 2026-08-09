@@ -23,7 +23,7 @@ export default async function SpacesPage() {
     return (
       <div style={{ maxWidth: '40rem', margin: '0 auto', padding: '3rem 1.5rem', display: 'grid', gap: '0.75rem' }}>
         <h1 style={{ margin: 0 }}>My spaces</h1>
-        <p style={{ color: 'var(--color-text-muted)' }}>
+        <p style={{ color: 'var(--color-text-secondary)' }}>
           Sign in to see the rooms you have saved. Anything you were part-way through is still in this browser.
         </p>
         <Link href={`/${getMemberAreaPath()}/login`} prefetch={false} style={{ color: 'var(--color-primary)' }}>
@@ -54,7 +54,7 @@ export default async function SpacesPage() {
       </div>
 
       {withPlans.length === 0 && (
-        <p style={{ color: 'var(--color-text-muted)' }}>
+        <p style={{ color: 'var(--color-text-secondary)' }}>
           Nothing saved yet. <Link href="/space-planner" style={{ color: 'var(--color-primary)' }}>Draw your first room</Link> - it takes a minute.
         </p>
       )}
@@ -64,7 +64,7 @@ export default async function SpacesPage() {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
             <div>
               <h2 style={{ margin: 0, fontSize: 'var(--text-lg, 1.1rem)' }}>{entry.room.name}</h2>
-              <p style={{ margin: '0.2rem 0 0', color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+              <p style={{ margin: '0.2rem 0 0', color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
                 {polygonAreaM2(entry.room.geometry.vertices).toFixed(1)} m² · {entry.planCount}{' '}
                 {entry.planCount === 1 ? 'layout' : 'layouts'} · last worked on {entry.lastEditedAt.toLocaleDateString('en-GB')}
               </p>
@@ -110,7 +110,7 @@ export default async function SpacesPage() {
                   }}
                 >
                   <span>{plan.name}</span>
-                  <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                  <span style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
                     {plan.items.items.filter((item) => !item.staged).length} items
                     {plan.quoteId && ' · quoted'}
                     {plan.shareToken && ' · shared'}
@@ -121,7 +121,7 @@ export default async function SpacesPage() {
               </li>
             ))}
             {plans.length === 0 && (
-              <li style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+              <li style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
                 No layouts in this one yet.{' '}
                 <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)' }}>
                   Start one

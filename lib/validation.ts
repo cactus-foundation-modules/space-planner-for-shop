@@ -92,7 +92,12 @@ export const PlanItemSchema = z.object({
 
 export const PlanItemsSchema = z.object({
   version: z.number().int().min(1).max(PLAN_SCHEMA_VERSION),
-  items: z.array(PlanItemSchema).max(MAX_ITEMS),
+  // The message matters: a zod default reads "Array must contain at most 400
+  // element(s)", and the routes hand the first issue's message straight to the
+  // shopper - so somebody who arrived from a large basket was told about arrays.
+  items: z.array(PlanItemSchema).max(MAX_ITEMS, {
+    message: `That is more than ${MAX_ITEMS} things in one layout, counting everything still waiting under Cart. Take a few out and try again.`,
+  }),
 })
 
 export const ProductSnapshotEntrySchema = z.object({
@@ -167,7 +172,10 @@ export type PlanWrite = z.infer<typeof PlanWriteSchema>
  * on whatever gets past it.
  */
 export function payloadTooLarge(raw: string): boolean {
-  return raw.length > MAX_PAYLOAD_BYTES
+  // Bytes, not characters. A JavaScript string's length counts UTF-16 units, so
+  // a body of room names in a non-Latin script measured at a third of what it
+  // actually weighed and a cap named in bytes admitted three times as many.
+  return Buffer.byteLength(raw, 'utf8') > MAX_PAYLOAD_BYTES
 }
 
 /**

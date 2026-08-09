@@ -173,7 +173,7 @@ export function plannerCss(): string {
 .spl-tab[aria-selected="true"]:focus {
   background: var(--color-primary);
   border-color: var(--color-primary);
-  color: var(--color-primary-contrast, #fff);
+  color: var(--color-on-primary, #fff);
 }
 .spl-tab:hover:not([aria-selected="true"]) { border-color: var(--color-primary); background: var(--color-surface); color: var(--color-text); }
 .spl-tab:focus-visible, .spl-btn:focus-visible, .spl-input:focus-visible, .spl-select:focus-visible {
@@ -208,7 +208,7 @@ export function plannerCss(): string {
 .spl-btn-primary {
   background: var(--color-primary);
   border-color: var(--color-primary);
-  color: var(--color-primary-contrast, #fff);
+  color: var(--color-on-primary, #fff);
 }
 .spl-btn-danger { color: var(--color-danger, #b3261e); border-color: var(--color-danger, #b3261e); }
 .spl-btn-icon { padding: 0 0.5rem; }
@@ -365,6 +365,11 @@ export function plannerCss(): string {
 }
 .spl-alert-error { border-left-color: var(--color-danger, #b3261e); }
 .spl-alert-text { flex: 1 1 auto; min-width: 0; }
+/* The word in front of a message. An error and a note differ only by the colour
+   of a three-pixel border, which to a colour-blind reader is no difference at
+   all, so each one says which it is. */
+.spl-alert-label { font-weight: 600; flex: none; }
+.spl-alert-error .spl-alert-label { color: var(--color-danger, var(--color-text)); }
 .spl-alert-close {
   appearance: none;
   background: none;
@@ -519,6 +524,14 @@ export function plannerCss(): string {
   flex-direction: column;
   gap: 0.3rem;
 }
+/* Undo and redo, laid over the bottom-left corner of the stage. Phone only -
+   the narrow-screen block below turns it on - because everywhere else the
+   toolbar already carries the pair, and on a phone they are folded behind
+   "More" with no Ctrl+Z to fall back on. Bottom-LEFT because the phone rules
+   move the coaching note to the bottom-right, and a hint that fades in under
+   your thumb while you reach for Undo would cost exactly the tap it coaches. */
+.spl-stage-undo { display: none; position: absolute; left: var(--spl-gap); bottom: var(--spl-gap); gap: 0.3rem; }
+.spl-stage-undo .spl-btn { background: var(--color-surface); box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.1)); }
 /* The strip that appears across the top of the plan while the room itself is
    being drawn or reshaped: what the pointer does now, and the way out. */
 .spl-stage-bar {
@@ -560,7 +573,7 @@ export function plannerCss(): string {
 }
 .spl-eye-label {
   font-size: var(--text-xs, 0.75rem);
-  color: var(--color-text-muted, var(--color-text));
+  color: var(--spl-muted);
   writing-mode: horizontal-tb;
 }
 /* writing-mode is the accessible way to stand a range control up: the browser
@@ -685,13 +698,19 @@ export function plannerCss(): string {
    by the browser, blocked outright in some of them, and looks like the page has
    been hijacked. */
 .spl-dialog-backdrop {
-  position: absolute;
+  /* Fixed unconditionally: a dialog is a modal at every width, and an
+     absolutely-positioned backdrop only ever covered .spl-stage, leaving the
+     toolbar and side panel clickable through an aria-modal="true" dialog. */
+  position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
   background: color-mix(in srgb, var(--color-text) 35%, transparent);
   padding: var(--spl-gap);
-  z-index: 5;
+  /* Over the site's sticky header, which sits at 100. At 5 a desktop window
+     short enough for the centred dialog to reach the top let the header paint
+     over an aria-modal="true" dialog and stay clickable through it. */
+  z-index: 200;
 }
 .spl-dialog {
   background: var(--color-surface);
@@ -800,9 +819,8 @@ export function plannerCss(): string {
   /* Dialogs step out of the stage and take the whole screen. Below this width
      the stage is the top half of a stacked layout, and a photograph shown
      inside half of half a phone screen is a postage stamp with a scrollbar.
-     z-index 200 because the site's sticky header sits at 100 and a backdrop a
-     header floats over is not a backdrop. */
-  .spl-dialog-backdrop { position: fixed; z-index: 200; }
+     Position and stacking are set unconditionally above - they were never
+     phone-specific problems. */
   .spl-dialog { max-height: calc(100vh - (var(--spl-gap) * 2)); max-height: calc(100dvh - (var(--spl-gap) * 2)); overflow: auto; }
 }
 @media (max-width: 640px) {
@@ -843,6 +861,23 @@ export function plannerCss(): string {
   .spl-views { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; }
   .spl-views > * { flex: 0 0 auto; }
   .spl-views .spl-note { flex: 0 1 auto; min-width: 16rem; white-space: normal; }
+  /* overflow-x: auto above also computes this strip's overflow-y to auto (a
+     CSS rule, not a choice made here), which clips a chip's dropdown to the
+     strip's own ~2.2rem height - Rename/Move here/Delete were all unreachable
+     on a phone. Fixed positioning escapes any clipping ancestor and anchors
+     the menu to the viewport instead of to the chip, so the chip no longer
+     needs to be its containing block. */
+  .spl-view-chip { position: static; }
+  .spl-view-menu {
+    position: fixed;
+    top: auto;
+    bottom: 4.5rem;
+    left: auto;
+    right: var(--spl-gap);
+    width: auto;
+    min-width: 10rem;
+    z-index: 210;
+  }
   /* The room is only about two hundred pixels tall on a phone, so a note laid
      over it is held to a line or two: smaller type, less padding, and clear of
      the left-hand corner where the eye-height control stands. */
@@ -856,6 +891,9 @@ export function plannerCss(): string {
   /* Two big targets side by side, or stacked when three will not fit - not a
      cluster of small ones in the corner of a small screen. */
   .spl-dialog .spl-buttons .spl-btn { flex: 1 1 auto; justify-content: center; text-align: center; }
+  /* Undo and redo come out from behind "More" and stand on the room itself -
+     see the declaration above the narrow-screen blocks. */
+  .spl-stage-undo { display: flex; }
 }
 
 /* ---- Touch ---------------------------------------------------------------
@@ -873,10 +911,46 @@ export function plannerCss(): string {
   .spl-input, .spl-select, .spl-view-name { font-size: 1rem; }
   .spl-pick-value { min-height: 2.5rem; padding: 0.35rem 0.7rem; }
   .spl-wait-remove { min-width: 2.75rem; justify-content: center; }
-  .spl-eye-preset { padding: 0.35rem 0.5rem; }
+  /* The zoom and fit buttons on the plan, and the phone-only undo/redo pair.
+     spl-btn-icon is horizontal padding and nothing else, so these shipped at
+     about 24px wide - and the zoom pair is the only pointer-free way to zoom for
+     anybody who cannot pinch. */
+  .spl-btn-icon { min-width: 2.75rem; justify-content: center; }
+  /* The eye-height controls are the smallest things on the 3D view and, by the
+     comment beside them, the phone fallback for a slider that is shrunk there.
+     Padding alone left the presets at about 26px and the slider 22px across. */
+  .spl-eye-preset { padding: 0.35rem 0.5rem; min-height: 2.75rem; }
+  .spl-eye-range { width: 2.75rem; }
   .spl-view-go, .spl-view-more { padding: 0.5rem 0.6rem; }
   .spl-photo-thumb img { width: 5.5rem; height: 3.7rem; }
   .spl-card { padding: 0.55rem; }
+  /* The only way to put a message away, and on a phone the messages lie over
+     the room itself. Centred against the wording rather than pinned to its
+     first line, so a two-line message does not leave the cross stranded. */
+  .spl-alert-close {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    padding: 0;
+  }
+  /* The only way to rename a room. */
+  .spl-name-edit {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  /* The small controls name their own min-height, and they are declared after
+     .spl-btn, so the control height above never reached them - the quantity
+     stepper, the measurement fields in the doors and columns toolbars and the
+     buttons under the views list all stayed thumbnail-sized. Short of the full
+     2.75rem so they still read as the smaller ones. */
+  .spl-btn-sm, .spl-input-sm, .spl-select-sm { min-height: 2.5rem; }
 }
 
 /* ---- Print --------------------------------------------------------------

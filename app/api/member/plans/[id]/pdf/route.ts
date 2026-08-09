@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
-import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
+import { getQuoteConfigCached } from '@/modules/quote-for-shop/lib/config'
 import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
-import { getPlanForMember, listPlansForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { getPlanForMember } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { buildBom } from '@/modules/space-planner-for-shop/lib/bom'
 import { buildPlanExportHtml } from '@/modules/space-planner-for-shop/lib/export-doc'
 import type { QuotePageInput } from '@/modules/space-planner-for-shop/lib/export-doc'
 import { PlanPdfUnavailableError, planPdfFilename, renderPlanPdf, siteUrl } from '@/modules/space-planner-for-shop/lib/pdf'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
-import { countRecentEvents, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
+import { countRecentEventsForMember, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 
 // "Export to PDF."
 //
@@ -67,8 +67,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   // Same shape of limit as renders and plan emails, and for the same reason:
   // this one launches a browser.
   const config = await getSplConfigCached()
-  const mine = await listPlansForMember(gate.member.id)
-  const recent = await countRecentEvents('plan.exported', mine.map((entry) => entry.id), config.rateLimitWindowMin)
+  const recent = await countRecentEventsForMember('plan.exported', gate.member.id, config.rateLimitWindowMin)
   if (recent >= config.maxRendersPerWindow) {
     return NextResponse.json(
       { error: 'You have made a few of these just now. Give those a moment and try again.' },
@@ -86,16 +85,23 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   // heading, its intro, its terms, its validity note and its rule about whether
   // prices are shown at all. The planner does not have opinions about how this
   // shop words a quote, and it is not about to grow any.
+  // Taken from the item list rather than resolved a second time here. Hiding
+  // prices is a decision this shop has made about every price a shopper sees, so
+  // buildBom now answers it once for every surface - and two places asking the
+  // same question separately is how page one came to print full prices inside
+  // the very document whose page two withheld them.
+  const quoteConfig = await getQuoteConfigCached()
+  const hidePrices = bom.pricesHidden
+
   let quote: QuotePageInput | null = null
   if (parsed.data.includeQuote) {
-    const quoteConfig = await getQuoteConfigCached()
     quote = {
       heading: quoteConfig.documentHeading,
       intro: quoteConfig.documentIntro,
       terms: quoteConfig.terms,
       validity: quoteConfig.validityNote,
       reference: plan.quoteId ? await quoteNumberFor(plan.quoteId) : null,
-      pricesHidden: pricesHidden(quoteConfig),
+      pricesHidden: hidePrices,
       hiddenPriceLabel: quoteConfig.hiddenPriceLabel,
     }
   }
@@ -110,6 +116,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     planImage: parsed.data.includePlanView ? parsed.data.planImage ?? null : null,
     viewImage: parsed.data.include3dView ? parsed.data.viewImage ?? null : null,
     savedViews: parsed.data.views,
+    hidePrices,
+    hiddenPriceLabel: quoteConfig.hiddenPriceLabel,
     quote,
     dateLabel: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
     planUrl: plan.shareToken ? siteUrl(`/space-planner/shared/${plan.shareToken}`) : null,
@@ -117,7 +125,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
   try {
     const pdf = await renderPlanPdf(html, { logoDataUrl })
-    await recordEvent('plan.exported', { planId: id })
+    await recordEvent('plan.exported', { planId: id, memberId: gate.member.id })
     return new NextResponse(Buffer.from(pdf), {
       headers: {
         'Content-Type': 'application/pdf',

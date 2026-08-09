@@ -1,5 +1,4 @@
 import Link from 'next/link'
-import { notFound } from 'next/navigation'
 import { getShopGate } from '@/modules/shop/lib/access'
 import { ShopClosedNotice } from '@/modules/shop/components/public/ShopClosedNotice'
 import { getPlanByShareToken } from '@/modules/space-planner-for-shop/lib/db/plans'
@@ -42,7 +41,29 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
 
   const { token } = await params
   const plan = await getPlanByShareToken(token)
-  if (!plan) notFound()
+  // A withdrawn or expired link gets a sentence, not the site's bare 404.
+  //
+  // By this file's own reckoning the person holding this address is whoever
+  // signs the purchase order - somebody who has been sent a link by a customer
+  // and has no idea what this site is. "This page doesn't exist" tells them the
+  // customer sent them a broken address; the truth is that the link was taken
+  // down, and there is a shop at the other end of it.
+  if (!plan) {
+    return (
+      <div style={{ display: 'grid', gap: '0.75rem', maxWidth: '38rem', margin: '0 auto', padding: '2rem 0' }}>
+        <h1 style={{ margin: 0 }}>That plan is no longer shared</h1>
+        <p style={{ margin: 0, color: 'var(--color-text-secondary)' }}>
+          The link has been withdrawn, or the plan it pointed at has been deleted. Whoever sent it to you can share it
+          again from their account.
+        </p>
+        <p style={{ margin: 0 }}>
+          <Link href="/" prefetch={false} style={{ color: 'var(--color-primary)', textDecoration: 'underline' }}>
+            Go to the shop
+          </Link>
+        </p>
+      </div>
+    )
+  }
 
   const [room, bom, config, visible] = await Promise.all([
     getRoomForAdmin(plan.roomId),
@@ -56,7 +77,7 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
     <div style={{ maxWidth: '52rem', margin: '0 auto', padding: '2rem 1.5rem', display: 'grid', gap: '1.5rem' }}>
       <div>
         <h1 style={{ margin: 0, fontSize: 'var(--text-2xl, 1.6rem)' }}>{plan.name}</h1>
-        <p style={{ margin: '0.25rem 0 0', color: 'var(--color-text-muted)' }}>
+        <p style={{ margin: '0.25rem 0 0', color: 'var(--color-text-secondary)' }}>
           {room?.name ?? 'A room'}
           {room && ` · ${polygonAreaM2(room.geometry.vertices).toFixed(1)} m²`} · {placed.length}{' '}
           {placed.length === 1 ? 'item' : 'items'}
@@ -66,7 +87,8 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
       {bom.missing.length > 0 && (
         <p style={{ border: '1px solid var(--color-border)', borderLeft: '3px solid var(--color-warning, #a16207)', borderRadius: 'var(--radius-sm, 6px)', padding: '0.6rem 0.75rem', margin: 0 }}>
           {bom.missing.length === 1 ? 'One thing in this plan is' : `${bom.missing.length} things in this plan are`} no longer
-          in the shop: {bom.missing.join(', ')}. The rest is unchanged.
+          in the shop: {bom.missing.join(', ')}. {bom.missing.length === 1 ? 'It is' : 'They are'} still listed and priced below,
+          at the price when the plan was made, and marked as no longer sold.
         </p>
       )}
 
@@ -83,7 +105,12 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
             <tr key={line.productId}>
               <td style={{ padding: '0.4rem 0.5rem 0.4rem 0', borderBottom: '1px solid var(--color-border)' }}>
                 {line.name}
-                {line.approximate && <span style={{ color: 'var(--color-text-muted)' }}> (approx. size)</span>}
+                {line.approximate && <span style={{ color: 'var(--color-text-secondary)' }}> (approx. size)</span>}
+                {/* The one page a purchase order gets signed off was the one
+                    page with no way to tell which rows had been withdrawn -
+                    they stay in the table and in the total, which is right, but
+                    the admin screen has carried this badge all along. */}
+                {line.fromSnapshot && <span style={{ color: 'var(--color-text-secondary)' }}> (no longer sold)</span>}
               </td>
               <td align="right" style={{ padding: '0.4rem 0.5rem', borderBottom: '1px solid var(--color-border)' }}>{line.quantity}</td>
               <td align="right" style={{ padding: '0.4rem 0 0.4rem 0.5rem', borderBottom: '1px solid var(--color-border)' }}>{line.lineTotalFormatted}</td>
@@ -98,13 +125,16 @@ export default async function SharedPlanPage({ params }: { params: Promise<{ tok
         </tfoot>
       </table>
 
-      <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{bom.disclaimer}</p>
-      <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{config.guidanceDisclaimer}</p>
+      <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{bom.disclaimer}</p>
+      <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)', margin: 0 }}>{config.guidanceDisclaimer}</p>
 
       {visible && (
         <div>
-          <Link href="/space-planner" prefetch={false} style={{ color: 'var(--color-primary)' }}>
-            Copy this into your own planner →
+          {/* It opens an empty planner, and always did: there is no copy
+              parameter anywhere in the module, so "copy this" was a promise
+              nothing kept. Said as what the link does instead. */}
+          <Link href="/space-planner" prefetch={false} style={{ color: 'var(--color-primary)', textDecoration: 'underline' }}>
+            Plan a room of your own →
           </Link>
         </div>
       )}

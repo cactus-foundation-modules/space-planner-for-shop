@@ -3,7 +3,7 @@ import { recordMemberActivity } from '@/lib/members/activity'
 import { requireMember, roomQuotaExceeded } from '@/modules/space-planner-for-shop/lib/member-gate'
 import { createRoom, listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { RoomWriteSchema, payloadTooLarge } from '@/modules/space-planner-for-shop/lib/validation'
-import { normaliseOrigin, normaliseWinding, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
+import { normaliseGeometryWinding, normaliseOrigin, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 
 // GET  - this member's rooms, with their plan counts.
@@ -51,10 +51,10 @@ export async function POST(request: NextRequest) {
   const quota = await roomQuotaExceeded(gate.member.id)
   if (quota) return NextResponse.json({ error: quota }, { status: 409 })
 
-  const geometry = {
-    ...parsed.data.geometry,
-    vertices: normaliseOrigin(normaliseWinding(parsed.data.geometry.vertices)),
-  }
+  // Wound through the geometry-level version, which renumbers the doors and
+  // windows along with the walls they hang on.
+  const rewound = normaliseGeometryWinding(parsed.data.geometry)
+  const geometry = { ...rewound, vertices: normaliseOrigin(rewound.vertices) }
   const issues = validateRoomGeometry(geometry)
   if (issues.length > 0) {
     return NextResponse.json({ error: issues[0]?.message ?? 'That room did not look right.', issues }, { status: 400 })

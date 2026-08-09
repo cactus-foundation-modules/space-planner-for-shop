@@ -11,6 +11,7 @@ import { plannerCss } from '@/modules/space-planner-for-shop/components/public/p
 import { addPlanToCart, cartAsStagedItems, readCart } from '@/modules/space-planner-for-shop/lib/client/cart-bridge'
 import { clearScratch, readScratch, writeScratch } from '@/modules/space-planner-for-shop/lib/client/scratch'
 import {
+  CLASH_WITH_OBSTRUCTION,
   emptyState,
   findClashes,
   findFreeSpot,
@@ -21,12 +22,14 @@ import {
   undo,
 } from '@/modules/space-planner-for-shop/lib/client/planner-store'
 import type { History, PlannerState, ProductInfo, SpotItem } from '@/modules/space-planner-for-shop/lib/client/planner-store'
+import { countPlanProducts, planProductIds } from '@/modules/space-planner-for-shop/lib/plan-counts'
 import { buildScene } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import type { FabricSlot } from '@/modules/space-planner-for-shop/lib/three/planner-model'
-import { boundingBox, polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
+import { boundingBox, normaliseYaw, polygonAreaM2, validateRoomGeometry } from '@/modules/space-planner-for-shop/lib/geometry'
 import { formatLength, parseLengthMm } from '@/modules/space-planner-for-shop/lib/units'
-import { defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
+import { PLAN_SCHEMA_VERSION, defaultRoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
+import { MAX_ITEMS } from '@/modules/space-planner-for-shop/lib/validation'
 import type {
   OpeningKind,
   PlanItem,
@@ -58,6 +61,57 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/** What a refused save answers with. `needsSignIn` comes from the member gate. */
+type SaveFailure = { error?: string; needsSignIn?: boolean }
+
+/** The session went while the tab was open. Handled, never shown. */
+class NeedsSignIn extends Error {}
+
+/**
+ * The saved copy has gone - deleted from another tab, or from another device.
+ *
+ * Its own type because the ONLY useful response is to forget the id and let the
+ * next Save make a fresh one. Said as a plain message, the advice was a lie: the
+ * planner went on PUTting to the same dead id for ever, so "press Save again"
+ * produced the identical failure every time, and the room version told the
+ * shopper to press Start again - which throws the room outline away. Following
+ * the instruction destroyed the work it was supposed to rescue.
+ */
+class SavedCopyGone extends Error {
+  constructor(readonly what: 'space' | 'layout') {
+    super(
+      what === 'space'
+        ? 'That space is no longer there - it may have been deleted somewhere else. Press Save again and it will be kept as a new one.'
+        : 'That layout is no longer there - it may have been deleted somewhere else. Press Save again and it will be kept as a new one.',
+    )
+  }
+}
+
+/**
+ * A refused save, worded for the person who pressed the button.
+ *
+ * The routes answer in their own terms - "Not found", "Forbidden", a validation
+ * message - and those went straight into the planner's alert bar. Deleting a
+ * room in another tab and then pressing Save read, in full, "Not found".
+ *
+ * So: the two cases worth naming are named, and everything else gets one plain
+ * sentence rather than whatever the server happened to say.
+ */
+async function saveError(response: Response, data: SaveFailure | null, what: 'space' | 'layout'): Promise<Error> {
+  if (response.status === 401 || data?.needsSignIn) return new NeedsSignIn()
+  if (response.status === 404) return new SavedCopyGone(what)
+  // A refusal the shopper can act on: too many rooms, a room that folds through
+  // itself. Those the routes word for a shopper already, so they are passed on.
+  // 413 belongs here too. The routes write a proper sentence for it - "that
+  // room is bigger than we can store, simplify the outline" - and replacing it
+  // with "try again in a moment" sent the shopper round a loop that could only
+  // ever fail the same way.
+  if (response.status === 400 || response.status === 409 || response.status === 413) {
+    return new Error(data?.error ?? `We could not save that ${what} just now.`)
+  }
+  return new Error(`We could not save that ${what} just now. Please try again in a moment.`)
 }
 
 /**
@@ -104,10 +158,22 @@ function useDialogFocus<T extends HTMLElement>(onClose?: () => void) {
     closeRef.current = onClose
   })
 
+  // Captured during the FIRST RENDER, not in the effect below.
+  //
+  // React applies `autoFocus` while it commits, which is before a passive
+  // effect runs - this hook relies on that two lines further down. So by the
+  // time the effect read document.activeElement, focus was already inside the
+  // dialog and "the opener" was one of the dialog's own controls: on close it
+  // called focus() on a node that had just been removed from the document, and
+  // the keyboard user landed on <body> and tabbed from the top of the site. A
+  // lazy state initialiser runs before the commit, so it sees the real opener.
+  const [opener] = useState<HTMLElement | null>(() =>
+    typeof document === 'undefined' || !(document.activeElement instanceof HTMLElement) ? null : document.activeElement,
+  )
+
   useEffect(() => {
     const node = ref.current
     if (!node) return
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const selector = 'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
     if (!node.contains(document.activeElement)) {
       node.querySelector<HTMLElement>(selector)?.focus()
@@ -134,15 +200,25 @@ function useDialogFocus<T extends HTMLElement>(onClose?: () => void) {
     node.addEventListener('keydown', onKey)
     return () => {
       node.removeEventListener('keydown', onKey)
-      opener?.focus()
+      // Only if it is still on the page: the control that opened a dialog can
+      // perfectly well have been what the dialog removed.
+      if (opener && opener.isConnected) opener.focus()
     }
-  }, [])
+  }, [opener])
 
   return ref
 }
 
 /** One resolved model as the browser holds it - see lib/model-resolver's ClientModel. */
 type PlannerModel = {
+  /**
+   * The product this file belongs to.
+   *
+   * Kept because the map it lives in is keyed `productId@@context` for a
+   * combined variant, so the key is not the product id and cannot stand in for
+   * one.
+   */
+  productId: string
   url: string
   cacheKey: string
   format: string
@@ -197,7 +273,29 @@ export type SpacePlannerProps = {
   heading: string
   intro: string
   budgets: { maxUniqueModels: number; decimationTarget: number; textureMaxPx: number; decimationEnabled: boolean }
+  /**
+   * How many things this shop allows in one layout - the owner's own setting,
+   * and the number the server refuses on.
+   *
+   * Passed in rather than assumed, because the browser was quoting the SCHEMA's
+   * hard ceiling of 400 while the server refused at this, which defaults to 200:
+   * a shopper with a 250-line basket was told 400 was fine, watched all 250
+   * stage, placed them, and was then refused with "we top out at 200". The two
+   * also count differently - the schema counts the tray as well, the setting
+   * counts only what is in the room - so quoting either one at the wrong moment
+   * is a promise the other will break.
+   */
+  maxItemsPerPlan: number
   guidance: { walkwayClearanceMm: number; disclaimer: string; enabled: boolean }
+  /**
+   * What the shop says about the prices on the item list.
+   *
+   * A different sentence from the spacing guidance, and it was missing: the item
+   * list printed the spacing disclaimer under a column of money, so the only
+   * caveat a shopper read beside a total was about how far apart to put desks.
+   * The PDF and the shared page have carried this wording all along.
+   */
+  priceDisclaimer: string
   /** Whatever this shop prints in front of a number. Never assumed to be a pound. */
   currencySymbol: string
   /**
@@ -282,6 +380,15 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const [startAgain, setStartAgain] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
+  /**
+   * Which part of the export is happening, in the shopper's words.
+   *
+   * The dialog said "Making it…" from the first press to the last byte - a span
+   * that with three saved views ticked can be a minute and a half, most of it
+   * photographing things one at a time, with Cancel disabled, Escape refused,
+   * the backdrop refused and one unchanging word to go on.
+   */
+  const [exportStep, setExportStep] = useState('')
   const [photos, setPhotos] = useState(false)
   /**
    * Viewpoints saved against this ROOM, not this layout.
@@ -308,10 +415,33 @@ export function SpacePlanner(props: SpacePlannerProps) {
    */
   const [planMode, setPlanMode] = useState<PlanMode>('furnish')
   /** Which door or window is being edited, and what the next tap on a wall makes. */
-  const [openingSelection, setOpeningSelection] = useState<string | null>(null)
+  const [openingSelectionId, setOpeningSelection] = useState<string | null>(null)
   const [openingKind, setOpeningKind] = useState<OpeningKind>('door')
   /** Which column or other obstruction is being edited on the plan. */
-  const [obstructionSelection, setObstructionSelection] = useState<string | null>(null)
+  const [obstructionSelectionId, setObstructionSelection] = useState<string | null>(null)
+  // A selected column or door that no longer exists is not a selection.
+  //
+  // Both of these are React state of their own, so `load` - the undo and redo
+  // path - restored the geometry and left them naming something gone. The
+  // furnish toolbar is replaced by the columns toolbar whenever a column is
+  // selected, so undoing a column left that toolbar on screen, finding nothing,
+  // saying "tap the floor where the column stands" - and taking Undo, Redo,
+  // Save, Add to basket, More, Room and Start again away with it. On a phone
+  // that is the whole of the chrome, and the way out is a Done button belonging
+  // to a mode nobody asked to be in.
+  //
+  // Derived rather than cleared in the undo handler, because undo is not the
+  // only way to lose one - reshaping a room, loading a plan and the
+  // displacement pass all can - and because deriving it cannot flash the wrong
+  // toolbar for a frame on the way to fixing itself.
+  const obstructionSelection =
+    obstructionSelectionId && state.geometry.obstructions.some((entry) => entry.id === obstructionSelectionId)
+      ? obstructionSelectionId
+      : null
+  const openingSelection =
+    openingSelectionId && state.geometry.openings.some((entry) => entry.id === openingSelectionId)
+      ? openingSelectionId
+      : null
   /**
    * Whether the 3D view uses a perspective camera.
    *
@@ -327,6 +457,23 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const shapeBeforeEdit = useRef<RoomGeometry | null>(null)
   const idCounter = useRef(0)
   const stagedProductRef = useRef(false)
+  /** Whether the basket has already been read in. See the effect that sets it. */
+  const stagedCartRef = useRef(false)
+  /**
+   * How many things are in the room right now.
+   *
+   * A ref rather than a dependency, because staging from the basket must not
+   * rebuild itself on every furniture edit - the same reason its callback
+   * deliberately leaves `state.items` out. See the cap in stageFromCart.
+   *
+   * Kept up to date here, above the effect that stages the basket, so that on a
+   * saved plan opened with a basket waiting the count is already right when the
+   * cap is worked out. Effects run in the order they are declared.
+   */
+  const placedCountRef = useRef(0)
+  useEffect(() => {
+    placedCountRef.current = state.items.filter((item) => !item.staged).length
+  }, [state.items])
   /**
    * Product ids already asked about, whatever came back.
    *
@@ -383,13 +530,17 @@ export function SpacePlanner(props: SpacePlannerProps) {
     if (!scratch) return
     queueMicrotask(() => {
       dispatch({ type: 'load', snapshot: { geometry: scratch.geometry, items: scratch.items } })
+      if (scratch.roomName) setRoomName(scratch.roomName)
       setStarted(true)
     })
   }, [opened])
 
   // ---- product data -----------------------------------------------------
 
-  const productIds = useMemo(() => [...new Set(state.items.map((item) => item.productId))], [state.items])
+  // Companions included. They are priced into the item list and the running
+  // total like anything else, so they need their name and their price - without
+  // this they counted towards the total as nothing at all.
+  const productIds = useMemo(() => planProductIds(state.items), [state.items])
 
   const fetchProducts = useCallback(async (
     ids: string[],
@@ -404,7 +555,11 @@ export function SpacePlanner(props: SpacePlannerProps) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ productIds: ids, ...(contexts?.length ? { contexts } : {}) }),
     })
-    if (!response.ok) return []
+    // Thrown rather than answered empty. An empty answer is indistinguishable
+    // from "none of those products exist any more", which is how a shop having
+    // a bad five minutes told a customer that everything in their basket had
+    // been discontinued. Callers that genuinely do not mind catch it.
+    if (!response.ok) throw new Error('The shop did not answer.')
     const data = (await response.json()) as {
       items: Array<ProductInfo & { id: string }>
       models: Array<PlannerModel & { productId: string; context?: string }>
@@ -480,8 +635,20 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const stageFromCart = useCallback(
     async (mode: 'initial' | 'refresh') => {
       const lines = readCart()
-      const staged = cartAsStagedItems()
-      if (mode === 'initial' && staged.length === 0) return
+      const wanted = cartAsStagedItems()
+      if (mode === 'initial' && wanted.length === 0) return
+      // The tray gets no more than the layout can hold.
+      //
+      // Nothing capped this: a basket of two hundred lines at fifty each is ten
+      // thousand items, built in the browser before anything is validated. The
+      // item cap only bites server-side at save, and above roughly seventeen
+      // hundred the payload size check fires FIRST - so the shopper's reward for
+      // a big basket was a plain 413 instead of the carefully worded "take a few
+      // out" the cap exists to give them, having already sat through a room that
+      // had ground to a halt drawing furniture it was never going to keep.
+      const room = Math.max(0, Math.min(props.maxItemsPerPlan, MAX_ITEMS) - placedCountRef.current)
+      const staged = wanted.slice(0, room)
+      const overflow = wanted.length - staged.length
       // One context request per distinct grouped line, so the desk staged with
       // its screens arrives as the combined model rather than the plain desk.
       const contextRequests = new Map<string, { productId: string; context: string; extraValueIds: string[] }>()
@@ -492,11 +659,29 @@ export function SpacePlanner(props: SpacePlannerProps) {
           contextRequests.set(key, { productId: entry.productId, context: entry.modelContext.context, extraValueIds: entry.modelContext.extraValueIds })
         }
       }
-      const items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))], [...contextRequests.values()])
+      let items: Array<ProductInfo & { id: string }>
+      try {
+        items = await fetchProducts([...new Set(staged.map((entry) => entry.productId))], [...contextRequests.values()])
+      } catch {
+        // The shop did not answer. Said plainly, because the alternative - an
+        // empty answer read as "none of this is sold any more" - told customers
+        // their basket had been discontinued over a dropped connection.
+        setTrayNote('')
+        setMessage({ tone: 'error', text: 'We could not reach the shop to fetch your basket. Try the Cart tab again in a moment.' })
+        return
+      }
       const byId = new Map(items.map((item) => [item.id, item]))
+      // Cleared by the reducer against the tray as it stands NOW. Working out
+      // the ids here - before or after the request, it makes no difference -
+      // reads them off this closure's copy of the state, so anything placed
+      // while the request was in flight was still listed as waiting and the
+      // refresh took it back out of the room.
+      // basketOnly: re-reading the basket replaces what came FROM the basket and
+      // leaves alone anything the tray is holding because a redrawn room could
+      // no longer fit it. Committed first, so it is undoable either way.
       if (mode === 'refresh') {
-        const trayIds = state.items.filter((item) => item.staged).map((item) => item.id)
-        if (trayIds.length > 0) dispatch({ type: 'delete-items', ids: trayIds })
+        commit()
+        dispatch({ type: 'clear-staged', basketOnly: true })
       }
       for (const entry of staged) {
         const info = byId.get(entry.productId)
@@ -519,20 +704,34 @@ export function SpacePlanner(props: SpacePlannerProps) {
         )
       }
       if (clamped > 0) notes.push('Very large quantities come in as the first 50.')
+      if (overflow > 0) {
+        notes.push(
+          `A layout holds ${Math.min(props.maxItemsPerPlan, MAX_ITEMS)} things, so ${overflow} from your basket are waiting for the next one. Your basket still has all of them.`,
+        )
+      }
       setTrayNote(notes.join(' '))
       setTab('tray')
     },
-    [fetchProducts, nextId, state.items],
+    // No state.items: the reducer resolves the waiting list against the tray as
+    // it stands when the action lands, which is the whole point of clear-staged.
+    // Depending on it here also rebuilt this callback on every furniture edit.
+    [fetchProducts, nextId, commit, props.maxItemsPerPlan],
   )
 
   useEffect(() => {
-    if (!props.stageCart || !started) return
+    if (!props.stageCart || !started || stagedCartRef.current) return
+    // Guarded by a ref, not by the effect's own dependencies. "once per mount"
+    // was not true: Start again sets `started` back to false and the first-run
+    // screen sets it true again, so the effect fired a second time and staged
+    // the whole basket on top of the copy already waiting - twelve lines became
+    // twenty-four. The product-page effect below has always had this guard.
+    stagedCartRef.current = true
     void (async () => {
       await stageFromCart('initial')
     })()
-    // Deliberately once per mount: re-staging on every basket change would
-    // duplicate what the shopper has already placed. The Cart tab's refresh
-    // button is the deliberate version of the same thing.
+    // Deliberately once: re-staging on every basket change would duplicate what
+    // the shopper has already placed. The Cart tab's refresh button is the
+    // deliberate version of the same thing.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [props.stageCart, started])
 
@@ -545,8 +744,22 @@ export function SpacePlanner(props: SpacePlannerProps) {
     if (!wanted || !started || stagedProductRef.current) return
     stagedProductRef.current = true
     void (async () => {
-      const [info] = await fetchProducts([wanted])
-      if (!info) return
+      let info: (ProductInfo & { id: string }) | undefined
+      try {
+        ;[info] = await fetchProducts([wanted])
+      } catch {
+        setMessage({ tone: 'error', text: 'We could not fetch that one just now. Find it again under "Add things".' })
+        return
+      }
+      // Said, not swallowed. The products route filters to ACTIVE, so a
+      // product archived, drafted or deleted since somebody followed "See it in
+      // your room" answered with an empty list and the shopper landed on a blank
+      // first-run screen with no explanation at all. The basket path has counted
+      // and named exactly this case from the start.
+      if (!info) {
+        setMessage({ tone: 'info', text: 'That product is not for sale any more, so there was nothing to put in the room. Everything else still works.' })
+        return
+      }
       const product = { ...info, productId: info.id }
       const spot = findFreeSpot(state.items, state.geometry, product)
       dispatch({ type: 'add-item', id: nextId(), product, x: spot.x, y: spot.y })
@@ -564,8 +777,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
     // is already saved has somewhere - and writing it here would have "continue
     // where you left off" resurrect it on the next visit as if it were unsaved.
     if (!started || savedPlanId) return
-    writeScratch(state.geometry, state.items)
-  }, [state.geometry, state.items, started, savedPlanId])
+    writeScratch(state.geometry, state.items, roomName)
+  }, [state.geometry, state.items, started, savedPlanId, roomName])
 
   useEffect(() => {
     if (!dirty) return
@@ -591,6 +804,24 @@ export function SpacePlanner(props: SpacePlannerProps) {
   }, [products])
 
   const clashes = useMemo(() => findClashes(state.items, underTop, state.geometry), [state.items, underTop, state.geometry])
+  /**
+   * The items involved in a clash, each once - what the warning counts and
+   * selects.
+   *
+   * `b` is the sentinel 'obstruction' where the other party is a column rather
+   * than a second item, so it is filtered out: counting it made one desk in a
+   * pillar read as "2 things are overlapping", and selecting it left the panel
+   * claiming two selected over a list of one.
+   */
+  const clashingIds = useMemo(
+    () => [...new Set(clashes.flatMap((pair) => [pair.a, pair.b]).filter((id) => id !== CLASH_WITH_OBSTRUCTION))],
+    [clashes],
+  )
+  const clashCount = clashingIds.length
+  const clashSentence =
+    clashCount === 1
+      ? 'One thing is overlapping something else. A chair tucked under a desk is fine; two desks in the same spot is not.'
+      : `${clashCount} things are overlapping something else. A chair tucked under a desk is fine; two desks in the same spot is not.`
   const labels = useMemo(() => {
     const out: Record<string, string> = {}
     for (const [id, info] of Object.entries(products)) out[id] = info.name
@@ -607,9 +838,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   const description = useMemo(() => {
     const resolved = new Map<string, ResolvedModel>()
-    for (const [productId, model] of models) {
-      resolved.set(productId, {
-        productId,
+    for (const [key, model] of models) {
+      resolved.set(key, {
+        // The map is keyed `productId@@context` for a combined variant, so the
+        // key is not the product id and must not be stored as one. Nothing reads
+        // this field today, which is exactly how it would go unnoticed until
+        // something did.
+        productId: model.productId,
         plainUrl: model.cacheKey,
         format: model.format as ResolvedModel['format'],
         yawOffsetDeg: model.yawOffsetDeg,
@@ -617,8 +852,16 @@ export function SpacePlanner(props: SpacePlannerProps) {
         fabricKey: model.fabricKey ?? '',
       })
     }
-    return buildScene(state.geometry, toPlanItems(state), snapshot, resolved)
-  }, [state, snapshot, models])
+    return buildScene(state.geometry, { version: PLAN_SCHEMA_VERSION, items: state.items }, snapshot, resolved)
+    // The two fields the scene is actually built from, rather than the whole
+    // state. `select` returns a new state object - it has to - so selecting
+    // anything while Preview was open rebuilt this description, which tore the
+    // entire 3D scene down and built it again: every model re-cloned, every
+    // placeholder re-made, every product photo re-requested, behind "Putting the
+    // room together…". Tapping a line in the item list to find it in the room,
+    // or pressing "Show me what is overlapping", cost a full rebuild for a
+    // change the scene does not contain.
+  }, [state.geometry, state.items, snapshot, models])
 
   const prepareOptions = useMemo(
     () => ({
@@ -633,6 +876,31 @@ export function SpacePlanner(props: SpacePlannerProps) {
 
   const placed = useMemo(() => state.items.filter((item) => !item.staged), [state.items])
   const tray = useMemo(() => state.items.filter((item) => item.staged), [state.items])
+
+  // Everything in the room, by product, companions included - the same rule the
+  // PDF, the email and the quote price against. Counting placed items alone put
+  // a different total on screen from the one on the paperwork for any desk
+  // bought with its screens.
+  const roomCounts = useMemo(() => countPlanProducts(state.items), [state.items])
+
+  // What the room adds up to, kept in the shopper's eyeline rather than two
+  // taps away on the Item list tab. This is a shopping tool: the running total
+  // is the number every decision in it is being made against, and hiding it
+  // behind a tab turned "can we afford a twelfth desk" into a detour. Zero when
+  // nothing priced is down yet, and the header simply says nothing.
+  const placedTotal = useMemo(() => {
+    let total = 0
+    for (const [productId, quantity] of roomCounts) total += (products[productId]?.price ?? 0) * quantity
+    return total
+  }, [roomCounts, products])
+
+  // Whether anything in the room is priced "from" - a listing whose variations
+  // carry their own prices. The header total says so too, or it states a figure
+  // this shop has not agreed to.
+  const totalIsFrom = useMemo(
+    () => [...roomCounts.keys()].some((productId) => products[productId]?.priceVaries),
+    [roomCounts, products],
+  )
 
   /**
    * The 3D view has measured a model whose plan size was a guess. Adopt the
@@ -810,6 +1078,25 @@ export function SpacePlanner(props: SpacePlannerProps) {
   )
 
   /**
+   * Off to sign in, without the browser asking whether they meant it.
+   *
+   * The unsaved-work guard fires on any navigation while `dirty`, so pressing
+   * Save as a signed-out visitor produced the browser's own "Leave site?"
+   * dialog - and choosing "Stay" left them looking at a note about making an
+   * account with nothing to click. The work is in the browser's scratch copy
+   * either way, which is what makes dropping the flag honest rather than
+   * convenient: it is already kept, and it comes back after signing in.
+   */
+  const goSignIn = useCallback(() => {
+    setDirty(false)
+    // In a microtask, so React has committed the flag - and with it removed the
+    // beforeunload listener - before the navigation starts.
+    queueMicrotask(() => {
+      window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
+    })
+  }, [props.signInHref])
+
+  /**
    * Save the room and the layout, and answer with the plan's id.
    *
    * The id matters to more than the save button now: anything that has to happen
@@ -822,8 +1109,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
    */
   const savePlan = useCallback(async (opts: { quiet?: boolean } = {}): Promise<string | null> => {
     if (!props.signedIn) {
-      setMessage({ tone: 'info', text: 'Make an account to keep this - it takes a moment and your room comes with you.' })
-      window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
+      goSignIn()
       return null
     }
     // One save at a time. Two clicks of Save in quick succession both saw "no
@@ -840,8 +1126,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: roomName, notes: '', geometry: state.geometry }),
         })
-        const roomData = (await roomResponse.json()) as { room?: { id: string }; error?: string }
-        if (!roomResponse.ok || !roomData.room) throw new Error(roomData.error ?? 'Could not save the room')
+        const roomData = (await roomResponse.json().catch(() => null)) as SaveFailure & { room?: { id: string } } | null
+        if (!roomResponse.ok || !roomData?.room) throw await saveError(roomResponse, roomData, 'space')
         roomId = roomData.room.id
         setSavedRoomId(roomId)
         roomIdRef.current = roomId
@@ -855,8 +1141,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
         // so a refused room update - the walls, the doors, the columns - saved
         // the furniture over the OLD room and told the shopper all was well.
         if (!roomResponse.ok) {
-          const roomData = (await roomResponse.json().catch(() => null)) as { error?: string } | null
-          throw new Error(roomData?.error ?? 'Could not save the room')
+          const roomData = (await roomResponse.json().catch(() => null)) as SaveFailure | null
+          throw await saveError(roomResponse, roomData, 'space')
         }
       }
 
@@ -865,8 +1151,8 @@ export function SpacePlanner(props: SpacePlannerProps) {
         ? await fetch(`/api/m/space-planner-for-shop/member/plans/${savedPlanId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body })
         : await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}/plans`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
 
-      const planData = (await planResponse.json()) as { plan?: { id: string }; error?: string }
-      if (!planResponse.ok || !planData.plan) throw new Error(planData.error ?? 'Could not save the plan')
+      const planData = (await planResponse.json().catch(() => null)) as SaveFailure & { plan?: { id: string } } | null
+      if (!planResponse.ok || !planData?.plan) throw await saveError(planResponse, planData, 'layout')
 
       setSavedPlanId(planData.plan.id)
       setDirty(false)
@@ -874,12 +1160,30 @@ export function SpacePlanner(props: SpacePlannerProps) {
       if (!opts.quiet) setMessage({ tone: 'info', text: 'Saved. You will find it under "My spaces" in your account.' })
       return planData.plan.id
     } catch (error) {
+      // A session that expired while the tab was open is a sign-in prompt, not
+      // an error message: props.signedIn was rendered on the server and has no
+      // idea. Without this the shopper read "Sign in to save your plans." as a
+      // red alert with nothing to click.
+      if (error instanceof NeedsSignIn) {
+        goSignIn()
+        return null
+      }
+      // Forget the dead id, so the advice in the message is true by the time
+      // they read it. A layout that has gone does not take its room with it -
+      // the room may be perfectly fine - so only the one that 404ed is dropped.
+      if (error instanceof SavedCopyGone) {
+        if (error.what === 'space') {
+          setSavedRoomId(null)
+          roomIdRef.current = null
+        }
+        setSavedPlanId(null)
+      }
       setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not save that just now.' })
       return null
     } finally {
       savingRef.current = false
     }
-  }, [props.signedIn, props.signInHref, savedPlanId, savedRoomId, state, roomName, planName])
+  }, [props.signedIn, goSignIn, savedPlanId, savedRoomId, state, roomName, planName])
 
   /**
    * Give the room a different name.
@@ -905,10 +1209,14 @@ export function SpacePlanner(props: SpacePlannerProps) {
           const response = await fetch(`/api/m/space-planner-for-shop/member/rooms/${roomId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            // Notes deliberately left out rather than sent empty: the route
-            // treats an absent one as "leave it alone", and a rename has no
-            // business clearing what somebody wrote about the room.
-            body: JSON.stringify({ name, geometry: state.geometry }),
+            // The name and nothing else. Notes are left out because the route
+            // treats an absent one as "leave it alone" and a rename has no
+            // business clearing what somebody wrote about the room - and the
+            // GEOMETRY is left out for a sharper reason: sending it committed
+            // whatever the browser was holding, so a wall dragged and not yet
+            // saved was written to the server by typing a new name, taking the
+            // furniture in every other layout in the room with it.
+            body: JSON.stringify({ name }),
           })
           if (!response.ok) throw new Error('the rename was refused')
         } catch {
@@ -919,7 +1227,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         }
       })()
     },
-    [roomName, props.signedIn, state.geometry],
+    [roomName, props.signedIn],
   )
 
   // ---- saved viewpoints ---------------------------------------------------
@@ -1067,7 +1375,9 @@ export function SpacePlanner(props: SpacePlannerProps) {
       shapeBeforeEdit.current = null
 
       const candidate = { ...state.geometry, vertices }
-      const issues = validateRoomGeometry(candidate).filter((issue) => issue.code === 'self-intersecting' || issue.code === 'wall-too-short')
+      const issues = validateRoomGeometry(candidate).filter(
+        (issue) => issue.code === 'self-intersecting' || issue.code === 'wall-too-short' || issue.code === 'not-a-number',
+      )
       if (issues.length > 0) {
         setMessage({ tone: 'error', text: issues[0]?.message ?? 'That shape will not work.' })
         // Put back the outline that was there when the gesture started. The
@@ -1133,13 +1443,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
   const exportPdf = useCallback(
     async (options: { includePlanView: boolean; include3dView: boolean; includeQuote: boolean; viewIds: string[] }) => {
       setExportBusy(true)
+      setExportStep('Getting the room ready…')
       setMessage(null)
       const stageBefore = stage
       const perspectiveBefore = perspective
       try {
         if (!props.signedIn) {
-          setMessage({ tone: 'info', text: 'Make an account to save this as a PDF - it takes a moment.' })
-          window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
+          goSignIn()
           return
         }
 
@@ -1147,6 +1457,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         // waiting for them is the long part.
         let viewImage: string | null = null
         if (options.include3dView) {
+          setExportStep('Photographing the 3D view…')
           setStage('orbit')
           viewImage = await waitForCapture(captureView, () => !viewBusy.current)
         }
@@ -1179,8 +1490,22 @@ export function SpacePlanner(props: SpacePlannerProps) {
           planImage = await waitForCapture(capturePlan)
         }
 
+        // What was asked for and did not come out. A picture that fails to
+        // photograph itself simply used to be absent from the document, with no
+        // mention of it anywhere - so somebody who ticked "the 3D view", waited
+        // for it, and got a PDF without one had no way of telling whether they
+        // had ticked it at all.
+        const missingPictures: string[] = []
+        if (options.include3dView && !viewImage) missingPictures.push('the 3D view')
+        if (options.includePlanView && !planImage) missingPictures.push('the floor plan')
+        const missingViews = wanted.length - savedViews.length
+        if (missingViews > 0) missingPictures.push(missingViews === 1 ? 'one of your saved views' : `${missingViews} of your saved views`)
+
+        setExportStep('Saving your layout…')
         const planId = await savePlan({ quiet: true })
         if (!planId) return
+
+        setExportStep('Putting the document together…')
 
         const response = await fetch(`/api/m/space-planner-for-shop/member/plans/${planId}/pdf`, {
           method: 'POST',
@@ -1211,6 +1536,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
         link.remove()
         URL.revokeObjectURL(url)
         setExporting(false)
+        if (missingPictures.length > 0) {
+          setMessage({
+            tone: 'info',
+            text: `Your PDF is here, but ${missingPictures.join(' and ')} would not come out - the measurements and the item list are all there.`,
+          })
+        }
       } catch (error) {
         setMessage({ tone: 'error', text: error instanceof Error ? error.message : 'We could not make that PDF just now.' })
       } finally {
@@ -1221,9 +1552,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
         setStage(stageBefore)
         setPerspective(perspectiveBefore)
         setExportBusy(false)
+        setExportStep('')
       }
     },
-    [props.signedIn, props.signInHref, savePlan, stage, perspective, views, roomName, planName],
+    [props.signedIn, goSignIn, savePlan, stage, perspective, views, roomName, planName],
   )
 
   const sendToCart = useCallback(() => {
@@ -1246,7 +1578,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
     })))
     setMessage(
       result.ok
-        ? { tone: 'info', text: `${result.added === 1 ? 'One thing' : `${result.added} things`} added to your basket.` }
+        ? result.added === 0
+          ? // Nothing to do, said as such. This is the ordinary answer for
+            // somebody who came in from the basket and planned the room without
+            // changing what was in it - and "0 things added to your basket"
+            // reads as a failure when it is the opposite.
+            { tone: 'info', text: 'Your basket already holds everything in this room.' }
+          : { tone: 'info', text: `${result.added === 1 ? 'One thing' : `${result.added} things`} added to your basket.` }
         : { tone: 'error', text: result.error },
     )
   }, [placed])
@@ -1275,7 +1613,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
         // nothing, so Escape may always close it. The export dialog is only
         // held open while a PDF is actually being made - closing it then would
         // leave the download to arrive into a page with no sign it was coming.
-        if (!exportBusy) setExporting(false)
+        setExporting(false)
         setPhotos(false)
         setMoreOpen(false)
         return
@@ -1399,7 +1737,10 @@ export function SpacePlanner(props: SpacePlannerProps) {
               />
             ) : (
               <>
-                <span className="spl-room-name-text">{roomName}</span>
+                {/* The name is ellipsised, so the full one has to be readable
+                    somewhere. The rename button's label carries it for screen
+                    readers; this is the same courtesy for everybody else. */}
+                <span className="spl-room-name-text" title={roomName}>{roomName}</span>
                 <button
                   type="button"
                   className="spl-name-edit"
@@ -1413,6 +1754,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
           </div>
           <span className="spl-sub">
             {areaM2.toFixed(1)} m² · {placed.length} {placed.length === 1 ? 'item' : 'items'}
+            {placedTotal > 0 && ` · roughly ${totalIsFrom ? 'from ' : ''}${formatMoney(placedTotal, props.currencySymbol)}`}
             {tray.length > 0 && ` · ${tray.length} waiting`}
           </span>
         </div>
@@ -1424,6 +1766,12 @@ export function SpacePlanner(props: SpacePlannerProps) {
               type="button"
               role="tab"
               className="spl-tab"
+              // Declared as tabs since the first release with nothing to point
+              // at: no aria-controls here and no tabpanel on the stage, so a
+              // screen reader announced a relationship that did not exist. The
+              // side-panel tablist below has always wired both ends.
+              id={`spl-view-tab-${option}`}
+              aria-controls="spl-view-stage"
               aria-selected={stage === option}
               onClick={() => {
                 setStage(option)
@@ -1551,11 +1899,61 @@ export function SpacePlanner(props: SpacePlannerProps) {
         )}
       </div>
 
+      {/* Two regions, both permanently mounted, and neither of them ever changes
+          its politeness.
+          Mounted because a live region that arrives at the same moment as its
+          text is one most screen readers never announce - which is why "Saved.",
+          "added to your basket" and every error were silent to anybody not
+          watching the bar. Two of them because switching a single node between
+          status and alert is the other half of the same trap: the politeness is
+          read when the region is registered, so a node that changes it may
+          announce with the old one or not at all. */}
+      <p className="spl-visually-hidden" role="status" aria-live="polite">
+        {message && message.tone !== 'error' ? message.text : ''}
+      </p>
+      <p className="spl-visually-hidden" role="alert" aria-live="assertive">
+        {message && message.tone === 'error' ? message.text : ''}
+      </p>
+
+      {/* The visible box, unchanged in shape. Only the WORDS are hidden from a
+          screen reader - the two regions above have already said them, and the
+          same sentence twice is its own small defect. The button is not inside
+          anything hidden, because a focusable control in an aria-hidden subtree
+          is a worse problem than the one being solved. */}
       {message && (
-        <p className={message.tone === 'error' ? 'spl-alert spl-alert-error' : 'spl-alert'} role={message.tone === 'error' ? 'alert' : 'status'}>
-          <span className="spl-alert-text">{message.text}</span>
-          <button type="button" className="spl-alert-close" onClick={() => setMessage(null)} aria-label="Dismiss">
+        <p className={message.tone === 'error' ? 'spl-alert spl-alert-error' : 'spl-alert'}>
+          {/* Said in a word as well as in a colour: the two alerts differ only
+              by the colour of a three-pixel border, which is no difference at
+              all to a colour-blind reader. */}
+          <span className="spl-alert-label" aria-hidden="true">{message.tone === 'error' ? 'Problem:' : 'Note:'}</span>
+          <span className="spl-alert-text" aria-hidden="true">{message.text}</span>
+          <button type="button" className="spl-alert-close" onClick={() => setMessage(null)} aria-label="Dismiss this message">
             ×
+          </button>
+        </p>
+      )}
+
+      {/* Things overlapping is said in words, not only as a red outline on a
+          canvas. It matters more than an ordinary warning: anything left
+          standing in a column is staged by the server when the room is saved,
+          so a shopper who cannot see the outline loses furniture out of the
+          room with no idea why. */}
+      {/* Announced from a region of its own, permanently mounted for the same
+          reason as the two above: one that arrives with its text is one most
+          screen readers never read out. */}
+      <p className="spl-visually-hidden" role="status" aria-live="polite">
+        {clashCount > 0 && planMode === 'furnish' ? clashSentence : ''}
+      </p>
+      {clashingIds.length > 0 && planMode === 'furnish' && (
+        <p className="spl-alert">
+          <span className="spl-alert-label" aria-hidden="true">Note:</span>
+          <span className="spl-alert-text" aria-hidden="true">{clashSentence}</span>
+          <button
+            type="button"
+            className="spl-btn spl-btn-sm"
+            onClick={() => { dispatch({ type: 'select', ids: clashingIds }); setTab('selected') }}
+          >
+            Show me what is overlapping
           </button>
         </p>
       )}
@@ -1583,7 +1981,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
       </div>
 
       <div className={planMode !== 'furnish' ? 'spl-body spl-body-editing' : 'spl-body'}>
-        <div className="spl-stage">
+        <div className="spl-stage" id="spl-view-stage" role="tabpanel" aria-labelledby={`spl-view-tab-${stage}`}>
           {stage === 'plan' ? (
             <Plan2d
               geometry={state.geometry}
@@ -1625,7 +2023,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 setObstructionSelection(id)
                 setDirty(true)
               }}
-              onMoveObstruction={(id, dx, dy) => dispatch({ type: 'move-obstruction', id, dx, dy })}
+              onMoveObstruction={(id, dx, dy, settle) => dispatch({ type: 'move-obstruction', id, dx, dy, settle })}
               registerCapture={(capture) => { capturePlan.current = capture }}
             />
           ) : (
@@ -1644,6 +2042,38 @@ export function SpacePlanner(props: SpacePlannerProps) {
             />
           )}
 
+          {/* Undo and redo, on the room itself - but only where the toolbar
+              cannot carry them. On a phone the pair lives behind "More", and
+              there is no Ctrl+Z on a touchscreen: the two of them together
+              made a mis-drag effectively permanent for anybody on a phone.
+              Hidden from every wider screen by the stylesheet, and stood down
+              while the room itself is being drawn or reshaped - those modes
+              own the stage and have their own ways back. */}
+          {planMode === 'furnish' && (
+            <div className="spl-stage-undo">
+              <button
+                type="button"
+                className="spl-btn spl-btn-icon"
+                aria-label="Undo"
+                title="Undo"
+                disabled={history.past.length === 0}
+                onClick={() => applyStep(undo(history, state))}
+              >
+                ↺
+              </button>
+              <button
+                type="button"
+                className="spl-btn spl-btn-icon"
+                aria-label="Redo"
+                title="Redo"
+                disabled={history.future.length === 0}
+                onClick={() => applyStep(redo(history, state))}
+              >
+                ↻
+              </button>
+            </div>
+          )}
+
           {wallEdit && (
             <WallDialog
               units={state.geometry.units}
@@ -1660,6 +2090,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
           {exporting && (
             <ExportDialog
               busy={exportBusy}
+              step={exportStep}
               signedIn={props.signedIn}
               views={views}
               onCancel={() => setExporting(false)}
@@ -1742,6 +2173,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
                 {TAB_LABELS[option]}
                 {option === 'selected' && state.selection.length > 0 ? ` (${state.selection.length})` : ''}
                 {option === 'tray' ? ` (${tray.length})` : ''}
+                {option === 'items' && placed.length > 0 ? ` (${placed.length})` : ''}
               </button>
             ))}
           </div>
@@ -1762,50 +2194,51 @@ export function SpacePlanner(props: SpacePlannerProps) {
               <CataloguePanel onPlace={place} onPlaceProduct={placeProduct} placedCounts={placedCounts} />
             </div>
 
+            {/* All three stay mounted and hidden, like the catalogue above.
+                Rendering them only while active left every tab's aria-controls
+                pointing at an element that did not exist, which is a broken
+                relationship rather than a missing nicety - and the stylesheet
+                already makes [hidden] mean hidden. */}
             <div className="spl-stack">
-              {activeTab === 'tray' && (
-                <div id="spl-panel-tray" role="tabpanel" aria-labelledby="spl-tab-tray" className="spl-stack">
-                  <TrayPanel
-                    items={tray}
-                    products={products}
-                    note={trayNote}
-                    onPlace={placeFromTray}
-                    onPlaceAll={placeAllFromTray}
-                    onRemove={removeFromTray}
-                    onRefresh={() => void stageFromCart('refresh')}
-                  />
-                </div>
-              )}
+              <div id="spl-panel-tray" role="tabpanel" aria-labelledby="spl-tab-tray" className="spl-stack" hidden={activeTab !== 'tray'}>
+                <TrayPanel
+                  items={tray}
+                  products={products}
+                  note={trayNote}
+                  onPlace={placeFromTray}
+                  onPlaceAll={placeAllFromTray}
+                  onRemove={removeFromTray}
+                  onRefresh={() => void stageFromCart('refresh')}
+                  onClearAll={() => { commit(); dispatch({ type: 'clear-staged' }); setTrayNote('') }}
+                />
+              </div>
 
-              {activeTab === 'selected' && (
-                <div id="spl-panel-selected" role="tabpanel" aria-labelledby="spl-tab-selected" className="spl-stack">
-                  <SelectedPanel
-                    state={state}
-                    products={products}
-                    onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
-                    onRotate={(ids, deltaDeg) => { commit(); dispatch({ type: 'rotate-items', ids, deltaDeg, snap: false }) }}
-                    onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
-                    onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
-                    onArray={(id, count, spacing) => {
-                      commit()
-                      dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw: 0, newIds: Array.from({ length: count }, () => nextId()) })
-                    }}
-                  />
-                </div>
-              )}
+              <div id="spl-panel-selected" role="tabpanel" aria-labelledby="spl-tab-selected" className="spl-stack" hidden={activeTab !== 'selected'}>
+                <SelectedPanel
+                  state={state}
+                  products={products}
+                  onPatch={(id, patch) => { commit(); dispatch({ type: 'set-item', id, patch }) }}
+                  onRotate={(ids, deltaDeg) => { commit(); dispatch({ type: 'rotate-items', ids, deltaDeg, snap: false }) }}
+                  onDelete={(ids) => { commit(); dispatch({ type: 'delete-items', ids }) }}
+                  onDuplicate={(ids) => { commit(); dispatch({ type: 'duplicate-items', ids, offsetMm: 200, newIds: ids.map(() => nextId()) }) }}
+                  onArray={(id, count, spacing, alongYaw) => {
+                    commit()
+                    dispatch({ type: 'array-item', id, count, spacingMm: spacing, alongYaw, newIds: Array.from({ length: count }, () => nextId()) })
+                  }}
+                />
+              </div>
 
-              {activeTab === 'items' && (
-                <div id="spl-panel-items" role="tabpanel" aria-labelledby="spl-tab-items" className="spl-stack">
-                  <ItemListPanel
-                    items={placed}
-                    products={products}
-                    disclaimer={props.guidance.disclaimer}
-                    currencySymbol={props.currencySymbol}
-                    selection={state.selection}
-                    onSelect={(ids) => dispatch({ type: 'select', ids })}
-                  />
-                </div>
-              )}
+              <div id="spl-panel-items" role="tabpanel" aria-labelledby="spl-tab-items" className="spl-stack" hidden={activeTab !== 'items'}>
+                <ItemListPanel
+                  items={placed}
+                  products={products}
+                  disclaimer={props.guidance.disclaimer}
+                  priceDisclaimer={props.priceDisclaimer}
+                  currencySymbol={props.currencySymbol}
+                  selection={state.selection}
+                  onSelect={(ids) => dispatch({ type: 'select', ids })}
+                />
+              </div>
             </div>
           </div>
         </aside>
@@ -1815,7 +2248,13 @@ export function SpacePlanner(props: SpacePlannerProps) {
           carries the item list and the wording that says what the plan is and is
           not. */}
       <div className="spl-print-only">
-        <ItemListPanel items={placed} products={products} disclaimer={props.guidance.disclaimer} currencySymbol={props.currencySymbol} />
+        <ItemListPanel
+          items={placed}
+          products={products}
+          disclaimer={props.guidance.disclaimer}
+          priceDisclaimer={props.priceDisclaimer}
+          currencySymbol={props.currencySymbol}
+        />
       </div>
     </div>
   )
@@ -1887,6 +2326,8 @@ function WallDialog(props: { units: RoomGeometry['units']; lengthMm: number; onC
  */
 function ExportDialog(props: {
   busy: boolean
+  /** Which phase the export is in, so the button says something that changes. */
+  step: string
   signedIn: boolean
   /** Saved viewpoints for this room - any of them can go in as its own picture. */
   views: SplRoomView[]
@@ -1946,7 +2387,12 @@ function ExportDialog(props: {
         )}
 
         <div className="spl-buttons">
-          <button type="button" className="spl-btn" onClick={props.onCancel} disabled={props.busy}>Cancel</button>
+          {/* Enabled throughout. The work carries on in the background either
+              way - the pictures are already being taken and the save has its own
+              guard - but a shopper who has changed their mind, or whose export
+              is stuck behind a cold-starting browser on the server, is not held
+              in a modal until it finishes. */}
+          <button type="button" className="spl-btn" onClick={props.onCancel}>{props.busy ? 'Close' : 'Cancel'}</button>
           <button
             type="button"
             className="spl-btn spl-btn-primary"
@@ -1954,7 +2400,7 @@ function ExportDialog(props: {
             autoFocus
             onClick={() => props.onExport({ includePlanView, include3dView, includeQuote, viewIds })}
           >
-            {props.busy ? 'Making it…' : 'Make the PDF'}
+            {props.busy ? props.step || 'Making it…' : 'Make the PDF'}
           </button>
         </div>
       </div>
@@ -2193,7 +2639,19 @@ function PhotoDialog(props: {
         <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={props.onClose} disabled={busy}>Close</button>
           {showing && (
-            <a className="spl-btn spl-launch" href={showing.url} target="_blank" rel="noreferrer">Open full size</a>
+            <>
+              <a className="spl-btn spl-launch" href={showing.url} target="_blank" rel="noreferrer">Open full size</a>
+              {/* A picture somebody waited minutes for is one they want to keep.
+                  Without the download attribute, saving it on a phone was a
+                  long-press and a guess. */}
+              <a
+                className="spl-btn spl-launch"
+                href={showing.url}
+                download={`${props.planLabel}.webp`.replace(/[^A-Za-z0-9 ._-]+/g, '')}
+              >
+                Save the picture
+              </a>
+            </>
           )}
           <button
             type="button"
@@ -2233,6 +2691,29 @@ function ViewsStrip(props: {
 }) {
   const [editing, setEditing] = useState<string | null>(null)
   const [menu, setMenu] = useState<string | null>(null)
+
+  // A menu opened by a tap closes on the next tap anywhere else, and on Escape.
+  // Without it the only way out was pressing the same ⋯ again - so a menu opened
+  // by accident sat over the strip until it was found and dismissed.
+  useEffect(() => {
+    if (!menu) return
+    const away = (event: Event) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('.spl-view-chip')) return
+      setMenu(null)
+    }
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      setMenu(null)
+    }
+    document.addEventListener('pointerdown', away)
+    document.addEventListener('keydown', key, true)
+    return () => {
+      document.removeEventListener('pointerdown', away)
+      document.removeEventListener('keydown', key, true)
+    }
+  }, [menu])
 
   return (
     <div className="spl-views">
@@ -2597,9 +3078,43 @@ function FirstRun(props: {
     ])
   }
 
+  const submitTyped = () => {
+    const w = parseLengthMm(width)
+    const d = parseLengthMm(depth)
+    const c = parseLengthMm(ceiling)
+    if (!w || !d || !c || w < 500 || d < 500) {
+      setError('One of those did not read as a length. Try something like 4.2m or 4200.')
+      return
+    }
+    if (w > 100_000 || d > 100_000) {
+      // A typo, not a warehouse: 4200m reads as a length and draws a room the
+      // grid can barely address. The geometry validators catch this on every
+      // other path in; this is the one they miss.
+      setError('That is over 100 m on a side. If the space really is that big, plan it in sections.')
+      return
+    }
+    props.onReady({
+      ...defaultRoomGeometry(),
+      ceilingMm: Math.min(20_000, Math.max(1500, c)),
+      vertices: [
+        { x: 0, y: 0 },
+        { x: w, y: 0 },
+        { x: w, y: d },
+        { x: 0, y: d },
+      ],
+    })
+  }
+
   if (mode === 'type') {
     return (
-      <div className="spl-first-run">
+      // A real form, so Enter in any of the three fields does what Enter does
+      // everywhere else. It was three loose inputs and a button: somebody typing
+      // their office with a tape measure in the other hand had to stop, find the
+      // mouse, and click - which is the exact moment this screen loses people.
+      <form
+        className="spl-first-run"
+        onSubmit={(event) => { event.preventDefault(); submitTyped() }}
+      >
         <h1 className="spl-title">Your room</h1>
         <p className="spl-note">Inside measurements, in whatever units you like - 4200, 4.2m and 13&apos; 9&quot; all work.</p>
         <div className="spl-row">
@@ -2619,40 +3134,11 @@ function FirstRun(props: {
         {error && <p className="spl-alert spl-alert-error"><span className="spl-alert-text">{error}</span></p>}
         <div className="spl-buttons">
           <button type="button" className="spl-btn" onClick={() => setMode('choose')}>Back</button>
-          <button
-            type="button"
-            className="spl-btn spl-btn-primary"
-            onClick={() => {
-              const w = parseLengthMm(width)
-              const d = parseLengthMm(depth)
-              const c = parseLengthMm(ceiling)
-              if (!w || !d || !c || w < 500 || d < 500) {
-                setError('One of those did not read as a length. Try something like 4.2m or 4200.')
-                return
-              }
-              if (w > 100_000 || d > 100_000) {
-                // A typo, not a warehouse: 4200m reads as a length and draws a
-                // room the grid can barely address. The geometry validators
-                // catch this on every other path in; this is the one they miss.
-                setError('That is over 100 m on a side. If the space really is that big, plan it in sections.')
-                return
-              }
-              props.onReady({
-                ...defaultRoomGeometry(),
-                ceilingMm: Math.min(20_000, Math.max(1500, c)),
-                vertices: [
-                  { x: 0, y: 0 },
-                  { x: w, y: 0 },
-                  { x: w, y: d },
-                  { x: 0, y: d },
-                ],
-              })
-            }}
-          >
+          <button type="submit" className="spl-btn spl-btn-primary">
             That is my room
           </button>
         </div>
-      </div>
+      </form>
     )
   }
 
@@ -2780,6 +3266,7 @@ function TrayPanel(props: {
   onPlaceAll: () => void
   onRemove: (id: string) => void
   onRefresh: () => void
+  onClearAll: () => void
 }) {
   if (props.items.length === 0) return <p className="spl-note">Nothing waiting to go in.</p>
 
@@ -2792,9 +3279,19 @@ function TrayPanel(props: {
           Put all {props.items.length} in the room
         </button>
       )}
-      <button type="button" className="spl-btn spl-btn-sm" onClick={props.onRefresh}>
-        Refresh from basket
-      </button>
+      <div className="spl-buttons">
+        <button type="button" className="spl-btn spl-btn-sm" onClick={props.onRefresh}>
+          Refresh from basket
+        </button>
+        {/* One press rather than twenty. A basket of twenty lines at a dozen
+            apiece fills this list with more than a layout may hold, and taking
+            them off one at a time is not an answer to that. */}
+        {props.items.length > 1 && (
+          <button type="button" className="spl-btn spl-btn-sm" onClick={props.onClearAll}>
+            Clear the list
+          </button>
+        )}
+      </div>
       <ul className="spl-list">
         {props.items.map((item) => {
           const info = props.products[item.productId]
@@ -2846,7 +3343,7 @@ function SelectedPanel(props: {
   onRotate: (ids: string[], deltaDeg: number) => void
   onDelete: (ids: string[]) => void
   onDuplicate: (ids: string[]) => void
-  onArray: (id: string, count: number, spacingMm: number) => void
+  onArray: (id: string, count: number, spacingMm: number, alongYaw: number) => void
 }) {
   const selected = props.state.items.filter((item) => props.state.selection.includes(item.id))
   const first = selected[0]
@@ -2879,15 +3376,50 @@ function SelectedPanel(props: {
             mounted on it or tucked under it comes round with it. */}
         <button type="button" className="spl-btn" onClick={() => props.onRotate([first.id], 90)}>Turn 90°</button>
         <button type="button" className="spl-btn" onClick={() => props.onDuplicate(props.state.selection)}>Duplicate</button>
-        <button type="button" className="spl-btn" onClick={() => props.onArray(first.id, 3, first.widthMm + 100)}>Row of four</button>
+        {/* Spaced along the direction the thing is FACING, by the dimension it
+            actually presents that way. Both were hardcoded: the row always ran
+            east, spaced by the item's width, so turning a desk 90 degrees with
+            the button immediately beside this one and then pressing Row of four
+            laid the copies out along an axis the desk no longer measured that
+            way - straight into the clash warning for anything deeper than it is
+            wide. Yaw is clockwise from "north", which is -y, so a yaw of 0 runs
+            along +x for a rotation of 90. */}
+        <button
+          type="button"
+          className="spl-btn"
+          onClick={() => {
+            const alongYaw = normaliseYaw(first.yaw)
+            const across = Math.abs(Math.cos((alongYaw * Math.PI) / 180)) > 0.5 ? first.widthMm : first.depthMm
+            props.onArray(first.id, 3, across + 100, alongYaw)
+          }}
+        >
+          Row of four
+        </button>
         <button type="button" className="spl-btn spl-btn-danger" onClick={() => props.onDelete(props.state.selection)}>Remove</button>
       </div>
     </div>
   )
 }
 
+/**
+ * A number, typed rather than dispatched keystroke by keystroke.
+ *
+ * Held as text while the field has focus, exactly as LengthField does, and for a
+ * worse reason: this one moves the selected item. Clearing the box to retype
+ * read as `Number('') === 0` and teleported the desk to the top-left corner of
+ * the room, a leading minus sign could not be typed at all, and every digit on
+ * the way to "1200" banked its own undo step.
+ */
 function NumberField(props: { label: string; value: number; onChange: (value: number) => void }) {
   const id = useId()
+  const [text, setText] = useState('')
+  const [editing, setEditing] = useState(false)
+
+  const commit = (raw: string) => {
+    const value = Number(raw.trim())
+    if (raw.trim() !== '' && Number.isFinite(value)) props.onChange(value)
+  }
+
   return (
     <div className="spl-field">
       <label htmlFor={id}>{props.label}</label>
@@ -2895,11 +3427,11 @@ function NumberField(props: { label: string; value: number; onChange: (value: nu
         id={id}
         className="spl-input"
         type="number"
-        value={Math.round(props.value)}
-        onChange={(event) => {
-          const value = Number(event.target.value)
-          if (Number.isFinite(value)) props.onChange(value)
-        }}
+        value={editing ? text : String(Math.round(props.value))}
+        onFocus={() => { setText(String(Math.round(props.value))); setEditing(true) }}
+        onChange={(event) => setText(event.target.value)}
+        onBlur={(event) => { setEditing(false); commit(event.target.value) }}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
       />
     </div>
   )
@@ -2914,10 +3446,17 @@ function ItemListPanel(props: {
   items: PlanItem[]
   products: Record<string, ProductInfo>
   disclaimer: string
+  /** What the shop says about its prices. Absent on the printed sheet, which
+   * carries the same wording from the server. */
+  priceDisclaimer?: string
   currencySymbol: string
   selection?: string[]
   onSelect?: (ids: string[]) => void
 }) {
+  // Which placed items each line stands for, so tapping a line can pick them
+  // out on the plan. A companion has no items of its own - it rides inside its
+  // main item's model - so its line has nothing to select, which is why the
+  // quantities come from the shared count rather than from this map.
   const groups = new Map<string, string[]>()
   for (const item of props.items) {
     const ids = groups.get(item.productId) ?? []
@@ -2925,11 +3464,20 @@ function ItemListPanel(props: {
     groups.set(item.productId, ids)
   }
 
-  if (groups.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
+  // The same rule the PDF, the email and the quote price against, so the number
+  // on screen and the number on the paperwork cannot disagree.
+  const counts = countPlanProducts(props.items)
+  if (counts.size === 0) return <p className="spl-note">Nothing in the room yet.</p>
 
-  const rows = [...groups.entries()]
-  const total = rows.reduce((sum, [productId, ids]) => sum + (props.products[productId]?.price ?? 0) * ids.length, 0)
+  const rows = [...counts.entries()]
+  const total = rows.reduce((sum, [productId, quantity]) => sum + (props.products[productId]?.price ?? 0) * quantity, 0)
+  const itemCount = rows.reduce((sum, [, quantity]) => sum + quantity, 0)
   const anyPriced = rows.some(([productId]) => (props.products[productId]?.price ?? 0) > 0)
+  // A listing priced through its variations quotes a "from". Multiplying that
+  // into a line total states a price the shop has not agreed to, so where one is
+  // in the room the totals are marked as the lowest it could be rather than
+  // presented as the figure.
+  const anyFrom = rows.some(([productId]) => props.products[productId]?.priceVaries)
   const selectedSet = new Set(props.selection ?? [])
   const onSelect = props.onSelect
 
@@ -2948,35 +3496,42 @@ function ItemListPanel(props: {
           </tr>
         </thead>
         <tbody>
-          {rows.map(([productId, ids]) => {
+          {rows.map(([productId, quantity]) => {
+            const ids = groups.get(productId) ?? []
+            const selectable = onSelect && ids.length > 0
             const allSelected = ids.length > 0 && ids.every((id) => selectedSet.has(id))
             const each = props.products[productId]?.price ?? 0
+            const name = props.products[productId]?.name ?? 'Item'
             return (
               <tr
                 key={productId}
-                className={onSelect ? `spl-bom-row${allSelected ? ' is-selected' : ''}` : undefined}
-                onClick={onSelect ? () => onSelect(allSelected ? [] : ids) : undefined}
+                className={selectable ? `spl-bom-row${allSelected ? ' is-selected' : ''}` : undefined}
+                onClick={selectable ? () => onSelect(allSelected ? [] : ids) : undefined}
               >
                 <td>
-                  {onSelect ? (
+                  {selectable ? (
                     <button
                       type="button"
                       className="spl-bom-select"
                       aria-pressed={allSelected}
                       onClick={(event) => { event.stopPropagation(); onSelect(allSelected ? [] : ids) }}
                     >
-                      {props.products[productId]?.name ?? 'Item'}
+                      {name}
                     </button>
                   ) : (
-                    props.products[productId]?.name ?? 'Item'
+                    name
                   )}
                 </td>
-                <td className="spl-num">{ids.length}</td>
+                <td className="spl-num">{quantity}</td>
                 <td className="spl-num">{props.products[productId]?.priceFormatted ?? '-'}</td>
                 {/* The line total is the number a buyer of twelve desks actually
                     wants - "each" alone leaves them doing the twelve-times table
-                    against a screen. */}
-                <td className="spl-num">{each > 0 ? formatMoney(each * ids.length, props.currencySymbol) : '-'}</td>
+                    against a screen. Where the each is a "from", so is this. */}
+                <td className="spl-num">
+                  {each > 0
+                    ? `${props.products[productId]?.priceVaries ? 'From ' : ''}${formatMoney(each * quantity, props.currencySymbol)}`
+                    : '-'}
+                </td>
               </tr>
             )
           })}
@@ -2985,13 +3540,14 @@ function ItemListPanel(props: {
           <tfoot>
             <tr>
               <td>Roughly</td>
-              <td className="spl-num">{props.items.length}</td>
-              <td className="spl-num" aria-hidden="true" />
-              <td className="spl-num">{formatMoney(total, props.currencySymbol)}</td>
+              <td className="spl-num">{itemCount}</td>
+              <td className="spl-num" />
+              <td className="spl-num">{`${anyFrom ? 'From ' : ''}${formatMoney(total, props.currencySymbol)}`}</td>
             </tr>
           </tfoot>
         )}
       </table>
+      {anyPriced && props.priceDisclaimer && <p className="spl-note">{props.priceDisclaimer}</p>}
       <p className="spl-note">{props.disclaimer}</p>
     </div>
   )

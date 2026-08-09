@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireSplUser } from '@/modules/space-planner-for-shop/lib/access'
-import { cancelBackfill, createBackfill, getActiveBackfill, getBackfill } from '@/modules/space-planner-for-shop/lib/db/jobs'
+import { cancelBackfill, createBackfill, getActiveBackfill, getBackfill, resumeStoppedBackfill } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { countActiveProducts } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
 import { runBackfillStep } from '@/modules/space-planner-for-shop/lib/backfill-run'
 
@@ -22,6 +22,14 @@ export async function POST(request: NextRequest) {
   if (!body.jobId) {
     const existing = await getActiveBackfill()
     if (existing) return NextResponse.json({ job: existing, message: 'A rebuild is already running.' })
+
+    // Start after a Stop means carry on, not begin again. A stopped job keeps
+    // its cursor, and over a whole catalogue starting from zero would quietly
+    // discard everything the last pass got through.
+    const resumed = await resumeStoppedBackfill()
+    if (resumed) {
+      return NextResponse.json({ job: resumed, message: `Carrying on from ${resumed.cursor} of ${resumed.total}.` })
+    }
 
     const total = await countActiveProducts()
     const job = await createBackfill(total)

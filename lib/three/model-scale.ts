@@ -105,13 +105,42 @@ function median(values: number[]): number {
  * the unit the scene description works in and converting at one end only is how
  * this stays readable.
  */
-export function modelScaleFor(measured: Measured, planned: Planned, approximate: boolean, real: RealSize | null = null): ModelScale {
+export function modelScaleFor(
+  measured: Measured,
+  planned: Planned,
+  approximate: boolean,
+  real: RealSize | null = null,
+  /** True when `planned` is the generic marker block rather than a stated size. */
+  generic = false,
+): ModelScale {
   // The recorded real size outranks the whole reconciliation below it. Nothing
   // here is a judgement call once the owner has stated the product's overall
   // height (or width) against the file that draws it: scale to that, uniformly,
   // and leave the model's proportions exactly as its maker left them.
   const fromReal = realSizeScale(measured, real)
   if (fromReal !== null) return { x: fromReal, y: fromReal, z: fromReal, uniform: true }
+
+  // A generic marker has nothing to reconcile against, so it does not get to
+  // move the mesh.
+  //
+  // Everything below this line reconciles the file against a PLANNED size, and
+  // that is only worth doing when the planned size is a statement about the
+  // product - a category default is somebody's honest guess at what a chair of
+  // this sort measures. The marker is not: it is the invented 800 x 600 x 750
+  // block the ladder falls to when it knows nothing at all, and running it
+  // through the ratio filter produces a number with the shape of a measurement
+  // and none of the content. A five-metre bench desk exported at 5000 x 800 x
+  // 730 has its width ratio thrown out as implausible, keeps 1.03 on height and
+  // 0.75 on depth, and gets drawn at their median - so the room showed a 4441 mm
+  // desk, the flat plan adopted it as measured-from-the-model, the approx. badge
+  // came off, and the PDF and the emailed plan quoted a size 11 per cent out on
+  // every axis that nobody had measured. It never re-fires either, because the
+  // adoption only looks at marker and category_default rows.
+  //
+  // Drawn at the size it was exported instead, which is the same answer this
+  // function already gives when no ratio survives, for the same reason: the mesh
+  // is the only thing in the room that knows.
+  if (generic) return { x: 1, y: 1, z: 1, uniform: true }
 
   const axes: Array<['x' | 'y' | 'z', number, number]> = [
     ['x', planned.width * 1000, measured.widthMm],

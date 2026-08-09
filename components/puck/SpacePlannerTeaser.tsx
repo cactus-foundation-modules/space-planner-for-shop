@@ -45,7 +45,7 @@ export function SpacePlannerTeaser(props: SpacePlannerTeaserProps) {
         <h2 style={{ margin: 0, fontSize: 'var(--text-xl, 1.35rem)', color: 'var(--color-text)' }}>
           {props.heading?.trim() || 'Plan your space'}
         </h2>
-        <p style={{ margin: 0, color: 'var(--color-text-muted)', maxWidth: '38rem' }}>
+        <p style={{ margin: 0, color: 'var(--color-text-secondary)', maxWidth: '38rem' }}>
           {props.body?.trim() || 'Draw your room, drop our furniture into it, and see what fits before you buy a thing.'}
         </p>
         <PlannerLaunchButton label={props.buttonLabel?.trim() || 'Open the Space Planner'} from="plain" primary />

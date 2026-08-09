@@ -14,7 +14,7 @@ export async function GET() {
     // Two read-outs the owner cannot work out from the switches: whether the
     // picture service is actually wired up, and whether this shop can answer
     // "when will it arrive" at all.
-    renderWorkerConfigured: renderWorkerConfigured(),
+    renderWorkerConfigured: await renderWorkerConfigured(),
     deliveryEstimatesAvailable: deliveryEstimatesAvailable(),
   })
 }

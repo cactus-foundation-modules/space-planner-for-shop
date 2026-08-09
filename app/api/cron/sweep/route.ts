@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getSplConfig } from '@/modules/space-planner-for-shop/lib/config'
 import { deleteOrphanedDimensions, listStaleProductIds } from '@/modules/space-planner-for-shop/lib/db/dimension-cache'
@@ -24,7 +25,10 @@ export async function GET(request: NextRequest) {
   // variable is set.
   const secret = process.env.CRON_SECRET
   if (!secret) return NextResponse.json({ error: 'CRON_SECRET is not configured' }, { status: 503 })
-  if (request.headers.get('authorization') !== `Bearer ${secret}`) {
+  // Compared in constant time, like every other secret in this module. `!==` on
+  // strings stops at the first byte that differs, which over enough attempts is
+  // a way of reading the secret one character at a time.
+  if (!constantTimeEqual(request.headers.get('authorization') ?? '', `Bearer ${secret}`)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
@@ -70,4 +74,13 @@ export async function GET(request: NextRequest) {
   report.orphanMachinesDestroyed = await sweepOrphanMachines(await claimedMachineIds()).catch(() => 0)
 
   return NextResponse.json({ ok: true, ...report })
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a)
+  const right = Buffer.from(b)
+  // A length mismatch cannot be compared in constant time and does not need to
+  // be: the length of "Bearer " plus a secret is not the secret.
+  if (left.length !== right.length) return false
+  return timingSafeEqual(left, right)
 }

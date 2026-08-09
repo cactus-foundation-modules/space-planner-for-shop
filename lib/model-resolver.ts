@@ -342,46 +342,94 @@ export async function resolveModelsForProducts(
     })
   }
 
-  // Combined-model variants, resolved after (and beside) the base entries. Few
-  // per room by nature - one per grouped desk, not one per product - so these
-  // go through p3d's own single-child resolver rather than the batch machinery.
-  for (const request of opts.contexts ?? []) {
-    if (!request.context) continue
-    const key = plannerModelKey(request.productId, request.context)
-    if (out.has(key)) continue
-    try {
-      const variant = await resolveContextVariant(request, out.get(request.productId) ?? null)
-      if (variant) out.set(key, variant)
+  // Combined-model variants, resolved after (and beside) the base entries.
+  //
+  // "Few per room by nature" was the reasoning for doing these one at a time
+  // through p3d's single-child resolver, and it is true of a room somebody built
+  // by hand. It is not true of the schema's cap: this route takes eighty
+  // contexts, each of which was three sequential queries warm and around eleven
+  // cold, so a shopper arriving from a basket full of desks-with-screens paid
+  // two hundred and forty round trips in a row - on an unauthenticated route,
+  // with a sixty-second ceiling and a connection pooler the whole storefront
+  // shares. The three lookups that do not depend on each other are now done for
+  // the whole set at once, and the fabric resolves go through the same wave loop
+  // resolveFabric uses, for the same reason it uses one.
+  // Deduplicated by the key they will be stored under, which the old loop got
+  // for free by testing `out` on each iteration: a plan holding six identical
+  // desks-with-screens sends one request per grouped line, and without this the
+  // batch would resolve the same combination six times over - concurrently, so
+  // all six would miss the cache the first would otherwise have filled.
+  const requests = [
+    ...new Map(
+      (opts.contexts ?? [])
+        .filter((request) => request.context && !out.has(plannerModelKey(request.productId, request.context)))
+        .map((request) => [plannerModelKey(request.productId, request.context), request]),
+    ).values(),
+  ]
+  if (requests.length > 0) {
+    const contextIds = [...new Set(requests.map((request) => request.productId))]
+    const contextParents = await getVariationParents(contextIds)
+    const parentFor = (productId: string): string => contextParents.get(productId) ?? productId
+    const tagged = await getModelsForProducts(
+      [...new Set(contextIds.flatMap((productId) => [productId, parentFor(productId)]))],
+      { includeContexts: true },
+    )
+
+    // Child first, then listing - the same two shelves, and the same exact-match
+    // rule, p3d's own resolver checks.
+    const pending: Array<{ request: (typeof requests)[number]; model: (typeof tagged)[number] }> = []
+    for (const request of requests) {
+      const parentId = parentFor(request.productId)
+      const model =
+        tagged.find((m) => m.productId === request.productId && m.context === request.context) ??
+        tagged.find((m) => m.productId === parentId && m.context === request.context)
       // No tagged file: nothing is stored, the scene's lookup falls back to the
       // base entry, and the room shows the plain product - exact-or-base.
-    } catch {
-      // A combination that will not resolve draws as the base model.
+      if (model) pending.push({ request, model })
+    }
+
+    if (pending.length > 0) {
+      const fileMeta = await getModelMetaForModels([...new Set(pending.map((entry) => entry.model.id))])
+      for (let start = 0; start < pending.length; start += FABRIC_CONCURRENCY) {
+        await Promise.all(
+          pending.slice(start, start + FABRIC_CONCURRENCY).map(async ({ request, model }) => {
+            try {
+              const variant = await buildContextVariant(
+                request,
+                model,
+                parentFor(request.productId),
+                fileMeta.get(model.id) ?? null,
+                out.get(request.productId) ?? null,
+              )
+              if (variant) out.set(plannerModelKey(request.productId, request.context), variant)
+            } catch {
+              // A combination that will not resolve draws as the base model.
+            }
+          }),
+        )
+      }
     }
   }
 
   return out
 }
 
-// One add-on combination for one placed product: the tagged file for its exact
-// context (or nothing, and the caller falls back to base) plus its paints,
-// companion values included. Cached alongside the fabric cache with the
-// context in the key, for the same reload-churn reason.
-async function resolveContextVariant(
+// One add-on combination for one placed product: the paints for its exact
+// context (companion values included) hung on a tagged file the caller has
+// already found. Cached alongside the fabric cache with the context in the key,
+// for the same reload-churn reason.
+//
+// The tagged file, the listing behind the variant and the file's own metadata
+// are all passed in rather than looked up here: they are the three lookups that
+// do not depend on each other, so the caller does them once for the whole set
+// instead of three times per context in a row.
+async function buildContextVariant(
   request: { productId: string; context: string; extraValueIds: string[] },
+  model: { id: string; url: string; format: string },
+  parentId: string,
+  file: { yawOffsetDegrees: number; noDecimation: boolean } | null,
   base: PlannerModel | null,
 ): Promise<PlannerModel | null> {
-  const parentOf = await getVariationParents([request.productId])
-  const parentId = parentOf.get(request.productId) ?? request.productId
-  const childId = request.productId
-
-  // The tagged file, child first then parent - the same two shelves p3d's own
-  // resolver checks, with the same exact-match rule.
-  const tagged = await getModelsForProducts([childId, parentId], { includeContexts: true })
-  const model =
-    tagged.find((m) => m.productId === childId && m.context === request.context) ??
-    tagged.find((m) => m.productId === parentId && m.context === request.context)
-  if (!model) return null
-
   const cacheKey = `${request.productId}|${request.context}|${request.extraValueIds.join(',')}`
   let bundle: FabricBundle | null
   const hit = readFabricCache(cacheKey)
@@ -390,7 +438,7 @@ async function resolveContextVariant(
   } else {
     const config = await getFabricConfig(parentId)
     bundle = config
-      ? await resolveFabricForChild(childId, parentId, config, {
+      ? await resolveFabricForChild(request.productId, parentId, config, {
           context: request.context,
           extraValueIds: request.extraValueIds,
         })
@@ -399,8 +447,6 @@ async function resolveContextVariant(
   }
   const usable = bundle && bundle.slots.length > 0 ? bundle : null
 
-  const fileMeta = await getModelMetaForModels([model.id])
-  const file = fileMeta.get(model.id)
   const plain = plainUrl(usable?.modelUrl ?? model.url)
   const slots = toSlots(usable)
   return {
@@ -412,10 +458,19 @@ async function resolveContextVariant(
     yawOffsetDeg: file?.yawOffsetDegrees ?? 0,
     noDecimation: file?.noDecimation ?? false,
     fabricKey: fabricKeyFor(slots),
+    // The product's own mount, inherited from its base entry: a wall-hung unit
+    // is still wall-hung when it is drawn with its add-ons on.
     mountOverride: base?.mountOverride ?? null,
     slots,
-    realMetres: usable?.realCm ? usable.realCm / 100 : base?.realMetres ?? null,
-    realAxis: usable?.scaleAxis ?? base?.realAxis ?? 'height',
+    // The base product's recorded size only applies when this variant is drawing
+    // the base product's FILE. A combined desk-and-screens model is a different
+    // file with a different bounding box, and the recorded height is the desk's
+    // alone: calling the taller mesh 73 cm scaled the whole assembly, screens
+    // included, down by the ratio of the two. Where the context has no size of
+    // its own, null sends it down the ordinary reconciliation path, which is the
+    // honest answer for a file nobody has measured.
+    realMetres: usable?.realCm ? usable.realCm / 100 : (plain === base?.plainUrl ? base?.realMetres ?? null : null),
+    realAxis: usable?.scaleAxis ?? (plain === base?.plainUrl ? base?.realAxis : undefined) ?? 'height',
   }
 }
 

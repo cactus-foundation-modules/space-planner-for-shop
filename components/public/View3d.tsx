@@ -90,6 +90,14 @@ const KEY_STEP_M = 0.1
 /** How long the how-to-drive note stays up before it gets out of the way. */
 const HINT_LIFE_MS = 7000
 
+/**
+ * How long a scene build may take before it is treated as never arriving.
+ *
+ * Generous - a roomful of large models on a slow connection is seconds, not
+ * minutes - and it exists only to make the failure reachable at all.
+ */
+const BUILD_TIMEOUT_MS = 60_000
+
 type SceneState = {
   scene: Scene
   camera: PlannerCamera
@@ -144,6 +152,8 @@ export function View3d(props: View3dProps) {
   }, [props.onMeasuredSizes])
   const [unsupported, setUnsupported] = useState(false)
   const [degraded, setDegraded] = useState(0)
+  /** The build threw outright, as against a few items falling back to blocks. */
+  const [failed, setFailed] = useState(false)
   const [busy, setBusy] = useState(true)
   const [hinted, setHinted] = useState(false)
   /** Bumped when the GPU hands the context back, to make the scene build again. */
@@ -276,11 +286,14 @@ export function View3d(props: View3dProps) {
       observer.disconnect()
       canvas.removeEventListener('webglcontextlost', onLost)
       canvas.removeEventListener('webglcontextrestored', onRestored)
-      controls.dispose()
+      // Through the ref, not the mount-time closure: switching the projection
+      // replaces the controls, so disposing `controls` here disposed the
+      // original a second time and left the live pair alone.
+      const current = stateRef.current
+      ;(current?.controls ?? controls).dispose()
       // The room and item groups own geometries and cloned materials; the
       // renderer's dispose drops the context but not their JS-side buffers, and
       // this view unmounts on every switch back to the flat plan.
-      const current = stateRef.current
       if (current?.room) disposeGroup(current.room)
       if (current?.items) disposeGroup(current.items)
       renderer.dispose()
@@ -295,6 +308,7 @@ export function View3d(props: View3dProps) {
     if (!state) return
     let cancelled = false
     setBusy(true)
+    setFailed(false)
 
     if (state.room) {
       state.scene.remove(state.room)
@@ -304,23 +318,48 @@ export function View3d(props: View3dProps) {
     state.scene.add(room)
     state.room = room
 
+    // Caught, always. A rejection here used to leave the busy flag up for good:
+    // the view sat behind "Putting the room together…" for ever, and a PDF with
+    // the 3D view ticked waited out the whole capture timeout before printing
+    // without the picture. Nobody was ever told why.
     void (async () => {
-      const result = await buildItems(props.description, props.models, props.options)
-      if (cancelled) {
-        disposeGroup(result.group)
-        return
+      try {
+        // Raced against a clock, because nothing downstream has one.
+        //
+        // A model url that connects and then never answers leaves the loader's
+        // promise pending for ever: the catch never runs, the finally never
+        // runs, and "Putting the room together…" sits there permanently - while
+        // also pinning the busy flag the PDF export waits on. A minute is far
+        // longer than a roomful takes and far shorter than a shopper's patience.
+        const result = await Promise.race([
+          buildItems(props.description, props.models, props.options),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('the 3D room took too long to build')), BUILD_TIMEOUT_MS),
+          ),
+        ])
+        if (cancelled) {
+          disposeGroup(result.group)
+          return
+        }
+        const current = stateRef.current
+        if (!current) return
+        if (current.items) {
+          current.scene.remove(current.items)
+          disposeGroup(current.items)
+        }
+        current.scene.add(result.group)
+        current.items = result.group
+        setDegraded(result.degraded.length)
+        if (result.measured.length > 0) onMeasuredRef.current?.(result.measured)
+      } catch (error) {
+        if (cancelled) return
+        console.error('[space-planner] the 3D room could not be built', error)
+        setFailed(true)
+      } finally {
+        // Only when this build is still the one on screen: a cancelled build is
+        // replaced by a fresh one that has already put the flag back up.
+        if (!cancelled) setBusy(false)
       }
-      const current = stateRef.current
-      if (!current) return
-      if (current.items) {
-        current.scene.remove(current.items)
-        disposeGroup(current.items)
-      }
-      current.scene.add(result.group)
-      current.items = result.group
-      setDegraded(result.degraded.length)
-      setBusy(false)
-      if (result.measured.length > 0) onMeasuredRef.current?.(result.measured)
     })()
 
     return () => {
@@ -399,6 +438,11 @@ export function View3d(props: View3dProps) {
   useEffect(() => {
     const register = props.registerCapture
     if (!register) return
+    // No renderer exists in the unsupported case, so this closure would always
+    // resolve to null while `busy` reads false - and the PDF export treats
+    // "not busy" as "safe to call", so it would wait out the whole capture
+    // timeout instead of failing fast on a device that was never going to work.
+    if (unsupported) return
     register(() => {
       const state = stateRef.current
       const canvas = canvasRef.current
@@ -419,7 +463,7 @@ export function View3d(props: View3dProps) {
       }
     })
     return () => register(null)
-  }, [props.registerCapture])
+  }, [props.registerCapture, unsupported])
 
   // Where the camera is standing, for saving a viewpoint or photographing one.
   // Null before the scene exists, which the parent shows as a disabled button
@@ -544,14 +588,34 @@ export function View3d(props: View3dProps) {
         </div>
       )}
 
+      <div className="spl-visually-hidden" role="status" aria-live="polite">
+        {busy ? 'Putting the room together.' : failed ? 'The 3D view could not be put together.' : ''}
+      </div>
       {busy && (
-        <div className="spl-coach" role="status">
+        <div className="spl-coach" aria-hidden="true">
           Putting the room together…
         </div>
       )}
-      {!busy && degraded > 0 && (
+      {!busy && failed && (
         <div className="spl-coach">
-          {degraded === 1 ? 'One item is' : `${degraded} items are`} showing as a plain block - its picture would not load. The size is still right.
+          The 3D view could not be put together just now. The flat plan still has everything in it, sizes and all.{' '}
+          {/* There was no way back at all: the only escape was guessing that
+              switching to Edit and back again rebuilds the scene. */}
+          <button type="button" className="spl-btn spl-btn-sm" onClick={() => { setFailed(false); setRestores((count) => count + 1) }}>
+            Try again
+          </button>
+        </div>
+      )}
+      {!busy && !failed && degraded > 0 && (
+        <div className="spl-coach">
+          {/* Not "its picture would not load": most of these are items over
+              the on-screen model budget, which the planner CHOSE not to draw
+              in full. Saying the shop's pictures are broken when they are fine
+              sends the owner looking for a fault that is not there - and the
+              plural subject had a singular block and a singular possessive
+              besides. */}
+          {degraded === 1 ? 'One item is' : `${degraded} items are`} showing as {degraded === 1 ? 'a plain block' : 'plain blocks'} rather than
+          as furniture. {degraded === 1 ? 'Its size is' : 'Their sizes are'} still right.
         </div>
       )}
       {/* Two versions of the same note, picked by CSS rather than by measuring
@@ -560,7 +624,7 @@ export function View3d(props: View3dProps) {
           the Alt key, none of which a phone has. On a phone the stage is about
           190px tall, and three lines of instructions across the bottom of it is
           most of the room the note is describing. */}
-      {!busy && degraded === 0 && !hinted && (
+      {!busy && !failed && degraded === 0 && !hinted && (
         <div className="spl-coach spl-hint">
           <span className="spl-hint-touch">Drag to look, pinch to zoom, two fingers to slide.</span>
           <span className="spl-hint-pointer">

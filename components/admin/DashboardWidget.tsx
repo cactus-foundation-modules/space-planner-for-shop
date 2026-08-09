@@ -16,20 +16,20 @@ export async function spacePlannerDashboardWidget() {
       <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{summary.openedThisWeek}</div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>Opened this week</div>
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>Opened this week</div>
         </div>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{summary.plansThisWeek}</div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>Plans saved</div>
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>Plans saved</div>
         </div>
         <div>
           <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{summary.quotesThisWeek}</div>
-          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>Quotes asked for</div>
+          <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>Quotes asked for</div>
         </div>
       </div>
 
       {wanted.length > 0 && (
-        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)', margin: '0 0 0.75rem' }}>
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 0.75rem' }}>
           Most placed without a 3D model: {wanted.map((entry) => entry.name).join(', ')}.
         </p>
       )}

@@ -61,8 +61,21 @@ export async function planQuotaExceeded(roomId: string): Promise<string | null> 
   return `This space already has ${count} layouts in it. Delete one you no longer need and try again.`
 }
 
-export async function itemQuotaExceeded(itemCount: number): Promise<string | null> {
+/**
+ * How many things one layout may hold.
+ *
+ * Counted over what is IN THE ROOM. Anything still waiting under the Cart tab
+ * has not been placed, and counting it produced the least helpful message this
+ * module has ever shown: "that is 240 things in one room, and we top out at
+ * 200" about a room with nothing in it, because the shopper had arrived from a
+ * twenty-line basket at a dozen apiece.
+ */
+export async function itemQuotaExceeded(items: Array<{ staged?: boolean }>): Promise<string | null> {
   const config = await getSplConfigCached()
-  if (itemCount <= config.maxItemsPerPlan) return null
-  return `That is ${itemCount} things in one room, and we top out at ${config.maxItemsPerPlan}. Split it into two plans and they will still price up together.`
+  const placed = items.filter((item) => !item.staged).length
+  if (placed <= config.maxItemsPerPlan) return null
+  // "Layout", not "room": a room holds many layouts, the cap is per layout, and
+  // the owner's own label for this setting is "Things in one layout". Two
+  // functions above, this file already says "spaces" and "layouts" correctly.
+  return `That is ${placed} things in one layout, and we top out at ${config.maxItemsPerPlan}. Split it across two layouts and they will still price up together.`
 }

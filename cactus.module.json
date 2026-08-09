@@ -1,6 +1,6 @@
 {
   "name": "space-planner-for-shop",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "tablePrefix": "spl_",
   "description": "Lets shoppers draw their own room to scale, place products from your catalogue in it in 2D and 3D, check what actually fits, and take away a floor plan, a priced item list and a quote request. Uses the 3D models you already have and falls back to sized placeholders for everything else.",
   "requiresCoreVersion": "0.5.942",
@@ -105,7 +105,8 @@
       "point": "core.admin-dashboard-widgets",
       "id": "space-planner-summary",
       "import": "./components/admin/DashboardWidget",
-      "component": "spacePlannerDashboardWidget"
+      "component": "spacePlannerDashboardWidget",
+      "permission": "space-planner.access"
     },
     {
       "point": "core.media-usage-providers",
@@ -188,6 +189,7 @@
     "spl_category_defaults",
     "spl_dimension_cache",
     "spl_render_jobs",
+    "spl_render_worker",
     "spl_backfill_jobs",
     "spl_events",
     "spl_settings"
