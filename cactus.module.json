@@ -1,6 +1,6 @@
 {
   "name": "space-planner-for-shop",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "tablePrefix": "spl_",
   "description": "Lets shoppers draw their own space to scale, place products from your catalogue in it in 2D and 3D, check what actually fits, and take away a floor plan, a priced item list and a quote request. Uses the 3D models you already have and falls back to sized placeholders for everything else.",
   "requiresCoreVersion": "0.5.942",
@@ -37,30 +37,11 @@
     "space-planner.access",
     "space-planner.manage"
   ],
-  "navGroupLabel": "Space Planner",
   "navEntries": [
     {
-      "label": "Spaces & layouts",
+      "label": "Space Planner",
       "path": "/m/space-planner-for-shop/plans",
       "icon": "<path d=\"M3 3h18v18H3z\"/><path d=\"M3 10h7V3M21 14h-7v7\"/>",
-      "permission": "space-planner.access"
-    },
-    {
-      "label": "Model corrections",
-      "path": "/m/space-planner-for-shop/models",
-      "icon": "<path d=\"M12 2 3 7v10l9 5 9-5V7z\"/><path d=\"m3 7 9 5 9-5M12 12v10\"/>",
-      "permission": "space-planner.access"
-    },
-    {
-      "label": "Sizes",
-      "path": "/m/space-planner-for-shop/dimensions",
-      "icon": "<path d=\"M3 8h18v8H3z\"/><path d=\"M7 8v8M11 8v4M15 8v8M19 8v4\"/>",
-      "permission": "space-planner.access"
-    },
-    {
-      "label": "Pictures",
-      "path": "/m/space-planner-for-shop/renders",
-      "icon": "<rect x=\"3\" y=\"4\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"2\"/><path d=\"m21 15-5-4-4 4-2-2-4 4\"/>",
       "permission": "space-planner.access"
     }
   ],

@@ -1,5 +1,6 @@
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasSplPermission } from '@/modules/space-planner-for-shop/lib/access'
+import SpacePlannerNav from '@/modules/space-planner-for-shop/components/admin/SpacePlannerNav'
 import { RendersScreen } from '@/modules/space-planner-for-shop/components/admin/RendersScreen'
 
 export const metadata = { title: 'Pictures — Admin' }
@@ -9,5 +10,10 @@ export default async function SpacePlannerRendersScreenPage() {
   if (!user) return null
   const canAccess = await hasSplPermission(user, 'space-planner.access', { allowAccess: true })
   if (!canAccess) return <div className="alert alert-danger">You do not have permission to view the Space Planner.</div>
-  return <RendersScreen />
+  return (
+    <div>
+      <SpacePlannerNav />
+      <RendersScreen />
+    </div>
+  )
 }
