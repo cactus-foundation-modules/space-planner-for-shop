@@ -96,7 +96,7 @@ export const PlanItemsSchema = z.object({
   // element(s)", and the routes hand the first issue's message straight to the
   // shopper - so somebody who arrived from a large basket was told about arrays.
   items: z.array(PlanItemSchema).max(MAX_ITEMS, {
-    message: `That is more than ${MAX_ITEMS} things in one layout, counting everything still waiting under Cart. Take a few out and try again.`,
+    message: `That is more than ${MAX_ITEMS} things in one layout, counting everything still waiting under Waiting. Take a few out and try again.`,
   }),
 })
 
