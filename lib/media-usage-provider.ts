@@ -2,20 +2,39 @@ import { prisma } from '@/lib/db/prisma'
 
 // Provider for the core.media-usage-providers extension point.
 //
-// A plan snapshots the catalogue thumbnail of every product on it, a saved
-// version keeps its own copy, and a render job holds both the urls it was asked
-// to draw and the url of the image it produced. None of it is visible to core,
-// so a plan's imagery counted as unused. The JSON columns are returned whole as
-// text; core does the matching.
+// Room and plan thumbnails and finished renders are Media rows this module keeps
+// ids for in its own tables. Core has no idea those tables exist, so without this
+// every one of them reads as an unused file in the library - and the library's
+// "delete everything unused" button would be pointing straight at customers'
+// saved plans.
+//
+// The saved plan's own snapshot counts too. It holds the catalogue thumbnail
+// each line was showing when the plan was saved, and after the product itself is
+// deleted that copy is the only description of it left anywhere - which is
+// precisely the picture the unused-media sweep would otherwise take away.
 export async function spacePlannerMediaUsageProvider(): Promise<string[]> {
   const rows = await prisma.$queryRaw<{ ref: string | null }[]>`
-    SELECT "result_url" AS ref FROM "spl_render_jobs" WHERE "result_url" IS NOT NULL
+    SELECT "thumbnail_media_id" AS ref FROM "spl_rooms" WHERE "thumbnail_media_id" IS NOT NULL
     UNION ALL
+    SELECT "thumbnail_media_id" AS ref FROM "spl_plans" WHERE "thumbnail_media_id" IS NOT NULL
+    UNION ALL
+    SELECT "result_media_id" AS ref FROM "spl_render_jobs" WHERE "result_media_id" IS NOT NULL
+    UNION ALL
+    SELECT "result_url" AS ref FROM "spl_render_jobs" WHERE "result_url" <> ''
+    UNION ALL
+    -- A render job also names the products it was asked to draw, urls and all,
+    -- inside its params blob - the one place a picture can be held that none of
+    -- the columns above describes. Returned whole as text (the contract allows
+    -- it); core matches urls out of the haystack itself.
     SELECT "params"::text AS ref FROM "spl_render_jobs" WHERE "params" IS NOT NULL
     UNION ALL
-    SELECT "product_snapshot"::text AS ref FROM "spl_plans" WHERE "product_snapshot" IS NOT NULL
+    SELECT entry.value ->> 'image' AS ref
+      FROM "spl_plans", jsonb_each("product_snapshot") AS entry
+     WHERE jsonb_typeof("product_snapshot") = 'object' AND entry.value ->> 'image' IS NOT NULL
     UNION ALL
-    SELECT "product_snapshot"::text AS ref FROM "spl_plan_versions" WHERE "product_snapshot" IS NOT NULL
+    SELECT entry.value ->> 'image' AS ref
+      FROM "spl_plan_versions", jsonb_each("product_snapshot") AS entry
+     WHERE jsonb_typeof("product_snapshot") = 'object' AND entry.value ->> 'image' IS NOT NULL
   `
-  return rows.map((r) => r.ref).filter((r): r is string => !!r)
+  return rows.map((row) => row.ref).filter((ref): ref is string => Boolean(ref))
 }
