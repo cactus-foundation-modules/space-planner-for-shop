@@ -20,6 +20,23 @@ export async function spacePlannerMediaReferenceRewriter(change: MediaReferenceC
     UPDATE "spl_render_jobs" SET "result_url" = ${newUrl} WHERE "result_url" = ${oldUrl}
   `
 
+  // A render job also keeps the urls of the products it was asked to draw, inside
+  // its params blob. Prefiltered by a literal substring search so only the jobs
+  // that mention the old url are read back; a url is an opaque string inside the
+  // JSON, so swapping one for the other cannot change the document's shape.
+  const jobs = await prisma.$queryRaw<{ id: string; params: string }[]>`
+    SELECT "id", "params"::text AS "params"
+    FROM "spl_render_jobs"
+    WHERE position(${oldUrl} in "params"::text) > 0
+  `
+  for (const job of jobs) {
+    const rewritten = job.params.split(oldUrl).join(newUrl)
+    if (rewritten === job.params) continue
+    await prisma.$executeRaw`
+      UPDATE "spl_render_jobs" SET "params" = ${rewritten}::jsonb WHERE "id" = ${job.id}
+    `
+  }
+
   // The snapshot is an object keyed by product id, each entry carrying an
   // `image`. jsonb_object_agg rebuilds it with the one key replaced, which is
   // the only way to touch a value inside it without reading the whole thing out
