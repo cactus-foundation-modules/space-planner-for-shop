@@ -12,6 +12,7 @@ import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import type { OpenPlan, SavedRoomLink } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
+import { quoteRequestsOffered } from '@/modules/space-planner-for-shop/lib/quote'
 import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { isTurnstileConfigured } from '@/lib/config/env'
 
@@ -138,6 +139,12 @@ export default async function SpacePlannerPage({
   // nobody is offered a picture the site cannot take.
   const rendersAvailable = config.rendersEnabled && (await renderWorkerConfigured())
 
+  // Same test, for the same reason: the owner's switch says they want the
+  // button, the quotes module's mode says whether this shop invites quote
+  // requests at all. A shop set to "normal shop" does not, anywhere else, so
+  // the planner does not either.
+  const quoteAvailable = config.quoteEnabled && (await quoteRequestsOffered())
+
   return (
     <div style={{ padding: 'var(--space-3)' }}>
       {/* Keyed on which room is being shown, because the planner is opened from
@@ -166,7 +173,7 @@ export default async function SpacePlannerPage({
         priceDisclaimer={config.bomDisclaimer}
         currencySymbol={shopConfig.currencySymbol}
         rendersAvailable={rendersAvailable}
-        quoteAvailable={config.quoteEnabled}
+        quoteAvailable={quoteAvailable}
         emailAvailable={config.emailPlanEnabled}
         turnstileSiteKey={isTurnstileConfigured() ? process.env.TURNSTILE_SITE_KEY ?? null : null}
         member={member ? { name: member.displayName ?? '', email: member.email } : null}

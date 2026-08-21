@@ -4,7 +4,7 @@ import { recordMemberActivity } from '@/lib/members/activity'
 import { requireMember } from '@/modules/space-planner-for-shop/lib/member-gate'
 import { getPlanForMember, setPlanShare, updatePlan } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { getRoomForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
-import { createQuoteFromPlan } from '@/modules/space-planner-for-shop/lib/quote'
+import { createQuoteFromPlan, quoteRequestsOffered } from '@/modules/space-planner-for-shop/lib/quote'
 import { getSplConfigCached } from '@/modules/space-planner-for-shop/lib/config'
 import { countRecentEventsForMember, recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { verifyTurnstile } from '@/lib/auth/turnstile'
@@ -30,8 +30,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   if (gate.error) return gate.error
   const { id } = await context.params
 
+  // Both halves, because the button being hidden is not the same as the route
+  // being shut: this is the only thing standing between a hand-written POST and
+  // a quote landing in the owner's inbox from a shop that does not take them.
   const config = await getSplConfigCached()
-  if (!config.quoteEnabled) {
+  if (!config.quoteEnabled || !(await quoteRequestsOffered())) {
     return NextResponse.json({ error: 'Quotes are switched off at the moment.' }, { status: 403 })
   }
 

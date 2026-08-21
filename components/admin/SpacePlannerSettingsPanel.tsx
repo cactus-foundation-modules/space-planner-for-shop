@@ -11,6 +11,7 @@ export function SpacePlannerSettingsPanel() {
   const [config, setConfig] = useState<SplConfig | null>(null)
   const [renderWorker, setRenderWorker] = useState(false)
   const [deliveryAvailable, setDeliveryAvailable] = useState(false)
+  const [quoteRequests, setQuoteRequests] = useState(false)
   const [status, setStatus] = useState('')
   const [failed, setFailed] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -22,11 +23,17 @@ export function SpacePlannerSettingsPanel() {
       try {
         const response = await fetch('/api/m/space-planner-for-shop/admin/settings')
         if (!response.ok) throw new Error()
-        const data = (await response.json()) as { config: SplConfig; renderWorkerConfigured: boolean; deliveryEstimatesAvailable: boolean }
+        const data = (await response.json()) as {
+          config: SplConfig
+          renderWorkerConfigured: boolean
+          deliveryEstimatesAvailable: boolean
+          quoteRequestsAvailable: boolean
+        }
         if (!mounted.current) return
         setConfig(data.config)
         setRenderWorker(data.renderWorkerConfigured)
         setDeliveryAvailable(data.deliveryEstimatesAvailable)
+        setQuoteRequests(data.quoteRequestsAvailable)
       } catch {
         // "Loading…" for ever is a lie with a spinner. Say it failed.
         if (mounted.current) setFailed(true)
@@ -100,7 +107,17 @@ export function SpacePlannerSettingsPanel() {
 
       <section style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>What customers can do with a layout</h3>
-        <Toggle label="Ask for a quote" checked={config.quoteEnabled} onChange={(value) => patch({ quoteEnabled: value })} />
+        <Toggle
+          label={`Ask for a quote${quoteRequests ? '' : ' (this shop is not set to sell by quote, so nothing is offered)'}`}
+          checked={config.quoteEnabled}
+          onChange={(value) => patch({ quoteEnabled: value })}
+        />
+        {!quoteRequests && (
+          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+            Shop &gt; Quotes is set to a normal shop with checkout, so no part of the shop invites a quote request and the
+            planner does not either. Switch that to quotes-only and this comes back on its own.
+          </p>
+        )}
         <Toggle label="Email themselves the layout" checked={config.emailPlanEnabled} onChange={(value) => patch({ emailPlanEnabled: value })} />
         <Toggle
           label={`Photoreal pictures${renderWorker ? '' : ' (the picture service is not set up on this site yet)'}`}

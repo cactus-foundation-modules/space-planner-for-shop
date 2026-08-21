@@ -1,5 +1,5 @@
 import { getSiteUrl } from '@/lib/config/env'
-import { getQuoteConfigCached, pricesHidden } from '@/modules/quote-for-shop/lib/config'
+import { getQuoteConfigCached, isQuoteOnly, pricesHidden } from '@/modules/quote-for-shop/lib/config'
 import { buildQuoteSnapshot } from '@/modules/quote-for-shop/lib/snapshot'
 import { createQuote } from '@/modules/quote-for-shop/lib/db/quotes'
 import { sendQuoteAlertToOwner, sendQuoteRequestAck } from '@/modules/quote-for-shop/lib/email'
@@ -104,4 +104,28 @@ export async function createQuoteFromPlan(input: PlanQuoteInput): Promise<PlanQu
       typeof entry === 'string' ? entry : `${entry.name} (${entry.reason})`,
     ),
   }
+}
+
+/**
+ * Whether this shop is actually taking quote requests at all.
+ *
+ * The planner's own "Ask for a quote" switch says whether the owner wants the
+ * button on a layout; it has never said whether the shop sells that way. So a
+ * perfectly ordinary shop - checkout on, prices published, quote-for-shop
+ * installed only for the save-a-basket feature - was offering "Ask for a quote"
+ * on every layout, because the switch defaults to on and nothing above it ever
+ * looked at how the shop sells.
+ *
+ * The mode in Shop > Quotes is that decision, and it is one decision for the
+ * whole shop: in quote-only every buy button asks for a quote and the basket
+ * leads to the request page, and in normal-shop mode nothing anywhere invites a
+ * quote request. The planner is part of the shop, so it follows the shop.
+ *
+ * Same shape as rendersEnabled and the render worker: switched on and actually
+ * on offer are two different things, and the button is only honest when both
+ * are true.
+ */
+export async function quoteRequestsOffered(): Promise<boolean> {
+  const config = await getQuoteConfigCached()
+  return isQuoteOnly(config)
 }
