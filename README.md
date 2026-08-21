@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="module-art.webp" alt="Space Planner for Shop" width="640" />
+</p>
+
 # Space Planner for Shop
 
 Lets a shopper draw their own room to scale, put your catalogue in it in 2D and 3D,
