@@ -22,5 +22,17 @@ export async function spacePlannerMemberAccountNav(member: { id: string }): Prom
   const count = Number(rows[0]?.count ?? 0)
   if (count === 0) return []
 
-  return [{ key: 'space-planner', label: 'My spaces', href: '/space-planner/spaces', badge: 0 }]
+  // `sectionId` joins this tab to the one-page account: with that switched on,
+  // core draws the spaces library into the account page and the tab scrolls to
+  // it rather than loading a page. The page carries on existing for bookmarks
+  // and for sites with the tabbed account.
+  return [
+    {
+      key: 'space-planner',
+      label: 'My spaces',
+      href: '/space-planner/spaces',
+      badge: 0,
+      sectionId: 'space-planner-spaces-full',
+    },
+  ]
 }

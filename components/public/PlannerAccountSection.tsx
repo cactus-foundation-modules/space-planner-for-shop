@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { getMemberFromCookie } from '@/lib/members/session'
+import { getMembersConfig } from '@/lib/members/config'
 import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
 import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
 
@@ -14,6 +15,12 @@ export async function PlannerAccountSection() {
   const member = await getMemberFromCookie()
   if (!member) return null
   if (!(await plannerVisible())) return null
+
+  // On a one-page account the whole spaces library is already further down the
+  // page (PlannerSpacesSection), so a card summarising it would be a card
+  // pointing at the thing directly underneath it.
+  const membersConfig = await getMembersConfig()
+  if (membersConfig.accountSinglePage) return null
 
   const rooms = await listRoomsForMember(member.id)
   if (rooms.length === 0) return null

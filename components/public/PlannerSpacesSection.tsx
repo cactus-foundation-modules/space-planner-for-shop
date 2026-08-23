@@ -1,0 +1,139 @@
+import Link from 'next/link'
+import { getMemberFromCookie } from '@/lib/members/session'
+import { getMemberAreaPath } from '@/lib/members/paths'
+import { plannerVisible } from '@/modules/space-planner-for-shop/lib/visibility'
+import { listRoomsForMember } from '@/modules/space-planner-for-shop/lib/db/rooms'
+import { listPlansForRoom } from '@/modules/space-planner-for-shop/lib/db/plans'
+import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
+import { SpaceDeleteButton } from '@/modules/space-planner-for-shop/components/public/SpaceDeleteButton'
+
+// The library: spaces, and the layouts inside them.
+//
+// Measure once, compare layouts - that is what a fit-out buyer is actually doing
+// when they ask for a quote, and it is why a space is a first-class thing here
+// rather than a property of a layout.
+//
+// One component, two homes: the page at /space-planner/spaces, and the section
+// core draws into a one-page member account (through the `sectionId` on the My
+// spaces tab). Neither is a cut-down version of the other, because a member who
+// turned their account into one page did not ask for less of it.
+export async function PlannerSpacesSection() {
+  if (!(await plannerVisible())) return null
+
+  const member = await getMemberFromCookie()
+  if (!member) {
+    return (
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        <h2 style={{ margin: 0 }}>My spaces</h2>
+        <p style={{ color: 'var(--color-text-secondary)' }}>
+          Sign in to see the spaces you have saved. Anything you were part-way through is still in this browser.
+        </p>
+        <Link href={`/${getMemberAreaPath()}/login`} prefetch={false} style={{ color: 'var(--color-primary)' }}>
+          Sign in →
+        </Link>
+      </div>
+    )
+  }
+
+  const rooms = await listRoomsForMember(member.id)
+  const withPlans = await Promise.all(
+    rooms.map(async (entry) => ({ entry, plans: await listPlansForRoom(entry.room.id, member.id) })),
+  )
+
+  return (
+    <div style={{ display: 'grid', gap: '1.5rem' }}>
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `.spl-space-row:hover { border-color: var(--color-primary) !important; }
+.spl-space-row:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }`,
+        }}
+      />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>My spaces</h2>
+        <Link href="/space-planner" prefetch={false} style={{ color: 'var(--color-primary)' }}>
+          Plan another →
+        </Link>
+      </div>
+
+      {withPlans.length === 0 && (
+        <p style={{ color: 'var(--color-text-secondary)' }}>
+          Nothing saved yet. <Link href="/space-planner" style={{ color: 'var(--color-primary)' }}>Draw your first space</Link> - it takes a minute.
+        </p>
+      )}
+
+      {withPlans.map(({ entry, plans }) => (
+        <section key={entry.room.id} style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md, 10px)', padding: '1rem', display: 'grid', gap: '0.6rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 'var(--text-lg, 1.1rem)' }}>{entry.room.name}</h3>
+              <p style={{ margin: '0.2rem 0 0', color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                {polygonAreaM2(entry.room.geometry.vertices).toFixed(1)} m² · {entry.planCount}{' '}
+                {entry.planCount === 1 ? 'layout' : 'layouts'} · last worked on {entry.lastEditedAt.toLocaleDateString('en-GB')}
+              </p>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              {/* Measure once, lay out many times - so a space's own link opens it
+                  with a fresh layout rather than reopening the last one. */}
+              <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                New layout in this space →
+              </Link>
+              {/* Deleting the space takes its layouts with it, which the
+                  confirmation says out loud before it happens. */}
+              <SpaceDeleteButton target="room" id={entry.room.id} name={entry.room.name} planCount={entry.planCount} />
+            </div>
+          </div>
+
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: '0.35rem' }}>
+            {plans.map((plan) => (
+              <li key={plan.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                {/* The whole row opens the layout. A list of things somebody
+                    spent an afternoon on that cannot be clicked is a list of
+                    things they have effectively lost.
+
+                    The row and its delete are siblings and never nested: a
+                    button inside a link is invalid, and every press of it would
+                    open the layout it was meant to throw away. */}
+                <Link
+                  href={`/space-planner?plan=${plan.id}`}
+                  prefetch={false}
+                  className="spl-space-row"
+                  style={{
+                    flex: '1 1 14rem',
+                    minWidth: 0,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: '0.75rem',
+                    flexWrap: 'wrap',
+                    padding: '0.5rem 0.6rem',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-sm, 6px)',
+                    color: 'inherit',
+                    textDecoration: 'none',
+                  }}
+                >
+                  <span>{plan.name}</span>
+                  <span style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                    {plan.items.items.filter((item) => !item.staged).length} items
+                    {plan.quoteId && ' · quoted'}
+                    {plan.shareToken && ' · shared'}
+                    {' · open →'}
+                  </span>
+                </Link>
+                <SpaceDeleteButton target="plan" id={plan.id} name={plan.name} />
+              </li>
+            ))}
+            {plans.length === 0 && (
+              <li style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm, 0.875rem)' }}>
+                No layouts in this one yet.{' '}
+                <Link href={`/space-planner?room=${entry.room.id}`} prefetch={false} style={{ color: 'var(--color-primary)' }}>
+                  Start one
+                </Link>
+                .
+              </li>
+            )}
+          </ul>
+        </section>
+      ))}
+    </div>
+  )
+}
