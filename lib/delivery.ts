@@ -1,4 +1,4 @@
-import { moduleExtensionPointComponents } from '@/lib/modules/extension-points'
+import { modulePublicExtensionPointComponents as moduleExtensionPointComponents } from '@/lib/modules/extension-points.public'
 import type { Bom } from '@/modules/space-planner-for-shop/lib/bom'
 
 // "How much" is always followed by "when", and with a good few thousand products
