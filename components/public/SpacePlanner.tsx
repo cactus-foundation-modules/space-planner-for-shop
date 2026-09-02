@@ -1155,6 +1155,7 @@ export function SpacePlanner(props: SpacePlannerProps) {
     // In a microtask, so React has committed the flag - and with it removed the
     // beforeunload listener - before the navigation starts.
     queueMicrotask(() => {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- signInHref is a site-configured destination, not necessarily a page of this app
       window.location.href = `${props.signInHref}?next=${encodeURIComponent('/space-planner')}`
     })
   }, [props.signInHref])
