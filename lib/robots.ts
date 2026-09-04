@@ -8,6 +8,10 @@
 //
 // The indexable surface is whatever landing page the owner builds with the Puck
 // teaser block, which is an ordinary page and needs nothing from us.
+//
+// Anchored: a bare '/space-planner' is a PREFIX match, so it would also block
+// any root-slug page whose slug merely starts with it. The trailing-slash entry
+// still covers the planner's own sub-routes (/spaces, /render, /shared).
 export async function getPublicRobotsDisallow(): Promise<string[]> {
-  return ['/space-planner', '/space-planner/']
+  return ['/space-planner$', '/space-planner?', '/space-planner/']
 }
