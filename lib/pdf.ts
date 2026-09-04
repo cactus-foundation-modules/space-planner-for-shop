@@ -1,4 +1,5 @@
 import { getSiteUrl } from '@/lib/config/env'
+import { resolvePrintBrowser } from '@/lib/documents/chromium'
 
 // Printing a document to PDF with a headless browser.
 //
@@ -13,28 +14,10 @@ import { getSiteUrl } from '@/lib/config/env'
 // to the browser directly.
 //
 // Both heavy packages are imported dynamically, so a shop where nobody presses
-// the button never loads a browser. They are already declared in next.config.ts
-// (serverExternalPackages, and the chromium binary in outputFileTracingIncludes
-// under /api/m/**), which is why this needs no build change.
-
-const MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const MAC_CHROMIUM = '/Applications/Chromium.app/Contents/MacOS/Chromium'
-const LINUX_CHROME = '/usr/bin/google-chrome'
-const LINUX_CHROMIUM = '/usr/bin/chromium'
-
-/** True on a serverless/Linux deployment, where the packaged chromium is the one to use. */
-function isServerless(): boolean {
-  return Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL)
-}
-
-async function localChromePath(): Promise<string | null> {
-  if (process.env.CHROME_PATH) return process.env.CHROME_PATH
-  const { existsSync } = await import('fs')
-  for (const candidate of [MAC_CHROME, MAC_CHROMIUM, LINUX_CHROME, LINUX_CHROMIUM]) {
-    if (existsSync(candidate)) return candidate
-  }
-  return null
-}
+// the button never loads a browser. WHICH browser was the one thing worth having
+// in common, so finding it is core's (lib/documents/chromium.ts) - the copy that
+// used to sit here had its own list of Chrome install paths to keep in step, and
+// it would have had to learn about the chromium pack separately.
 
 export class PlanPdfUnavailableError extends Error {}
 
@@ -47,32 +30,28 @@ export class PlanPdfUnavailableError extends Error {}
  * font to wait for, no request that could hang the print.
  */
 export async function renderPlanPdf(html: string, opts: { logoDataUrl?: string | null } = {}): Promise<Uint8Array> {
-  const [{ default: puppeteer }, chromiumModule] = await Promise.all([
+  const [{ default: puppeteer }, browser0] = await Promise.all([
     import('puppeteer-core'),
-    isServerless() ? import('@sparticuz/chromium') : Promise.resolve(null),
+    resolvePrintBrowser().catch((error: unknown) => {
+      // The detail goes to the log, not the shopper: a chromium fetch or unpack
+      // error is full of paths and errno noise that helps nobody outside this
+      // process.
+      console.error('[space-planner] PDF browser could not be prepared:', error)
+      throw new PlanPdfUnavailableError('The PDF service could not start just now. Try again in a minute.')
+    }),
   ])
-  const chromium = chromiumModule?.default ?? null
-
-  let executablePath: string | null = null
-  try {
-    executablePath = chromium ? await chromium.executablePath() : await localChromePath()
-  } catch (error) {
-    // The detail goes to the log, not the shopper: a chromium unpack error is
-    // full of paths and errno noise that helps nobody outside this process.
-    console.error('[space-planner] PDF browser unpack failed:', error)
-    throw new PlanPdfUnavailableError('The PDF service could not start just now. Try again in a minute.')
-  }
-  if (!executablePath) {
+  if (!browser0) {
     throw new PlanPdfUnavailableError(
       'No browser is available to make a PDF. Install Google Chrome locally, or set CHROME_PATH.',
     )
   }
+  const { executablePath, args } = browser0
 
   let browser
   try {
     browser = await puppeteer.launch({
       executablePath,
-      args: chromium ? chromium.args : ['--no-sandbox', '--disable-dev-shm-usage'],
+      args,
       headless: true,
       // A sheet of A4 at 96dpi, so anything with a breakpoint in it prints its
       // desktop shape rather than its phone one.
