@@ -67,8 +67,10 @@ one need a customer account like everybody else.
   layouts.
 - **A basket button**, via shop's `shop.cart-header-actions`.
 - **A member account card and tab**, "My spaces".
-- **Four admin screens** under their own sidebar section: rooms & plans, model
-  corrections, sizes, and pictures.
+- **One admin tab**, under Settings > Shop > Space Planner, with the module's own
+  settings and four screens on it: spaces & layouts, model corrections, sizes, and
+  pictures. No sidebar link of its own - every other shop add-on lives under Shop
+  settings, and this is one of them.
 
 ## What the shopper can do with it
 

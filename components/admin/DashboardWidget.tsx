@@ -34,8 +34,11 @@ export async function spacePlannerDashboardWidget() {
         </p>
       )}
 
-      <a href={`/${adminPath}/m/space-planner-for-shop/plans`} style={{ fontSize: 'var(--text-sm)', color: 'var(--color-primary)', textDecoration: 'none' }}>
-        Rooms &amp; plans →
+      {/* The Space Planner admin is a tab inside Shop settings rather than a sidebar
+          link of its own, so this deep-links through both strips: Shop's sub-tab,
+          then the Spaces & layouts tab within it. */}
+      <a href={`/${adminPath}/config?tab=shop&sub=space-planner&spl=plans`} style={{ fontSize: 'var(--text-sm)', color: 'var(--color-primary)', textDecoration: 'none' }}>
+        Spaces &amp; layouts →
       </a>
     </div>
   )
