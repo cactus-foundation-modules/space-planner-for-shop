@@ -9,7 +9,7 @@ import { polygonAreaM2 } from '@/modules/space-planner-for-shop/lib/geometry'
 import { getShopConfigCached } from '@/modules/shop/lib/config'
 import { ShopClosedNotice } from '@/modules/shop/components/public/ShopClosedNotice'
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
-import { SpacePlanner } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
+import { SpacePlannerLazy } from '@/modules/space-planner-for-shop/components/public/SpacePlannerLazy'
 import type { OpenPlan, SavedRoomLink } from '@/modules/space-planner-for-shop/components/public/SpacePlanner'
 import { getSplConfigCached, renderWorkerConfigured } from '@/modules/space-planner-for-shop/lib/config'
 import { quoteRequestsOffered } from '@/modules/space-planner-for-shop/lib/quote'
@@ -152,7 +152,7 @@ export default async function SpacePlannerPage({
           ids and the history are first-render state, so without a key a soft
           navigation from one saved room to another would draw the new room
           under the old one's name and save over the old one's layout. */}
-      <SpacePlanner
+      <SpacePlannerLazy
         key={openPlan?.planId ?? openPlan?.roomId ?? 'new'}
         signedIn={Boolean(member)}
         signInHref={signInHref}

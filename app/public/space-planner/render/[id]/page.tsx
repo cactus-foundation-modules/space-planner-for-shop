@@ -7,7 +7,7 @@ import { resolveModelsForProducts } from '@/modules/space-planner-for-shop/lib/m
 import { buildScene, type ResolvedModel } from '@/modules/space-planner-for-shop/lib/scene/scene-plan'
 import { verifyRenderPageToken } from '@/modules/space-planner-for-shop/lib/render-dispatch'
 import { readSavedCamera } from '@/modules/space-planner-for-shop/lib/validation'
-import { RenderFrame } from '@/modules/space-planner-for-shop/components/public/RenderFrame'
+import { RenderFrameLazy } from '@/modules/space-planner-for-shop/components/public/RenderFrameLazy'
 import type { PlanItems, ProductSnapshot, RoomGeometry } from '@/modules/space-planner-for-shop/lib/types'
 
 // The page the picture is a photograph OF.
@@ -186,7 +186,7 @@ export default async function RenderPage({
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: BLANKING_CSS }} />
-      <RenderFrame
+      <RenderFrameLazy
         description={description}
         sources={sources}
         camera={camera}
