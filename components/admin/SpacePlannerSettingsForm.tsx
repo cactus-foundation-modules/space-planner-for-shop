@@ -4,6 +4,7 @@ import { useId, useRef, useState, useEffect } from 'react'
 import type { SplConfig } from '@/modules/space-planner-for-shop/lib/config'
 import type { SplSettingsPayload } from '@/modules/space-planner-for-shop/lib/admin/use-spl-settings'
 import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
+import { InfoTip } from '@/components/admin/InfoTip'
 
 // The module's settings form. It sits on the Settings tab of the Space Planner
 // panel inside Shop settings (manifest settingsTabs > host: shop.settings-sub-tabs)
@@ -58,50 +59,30 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
 
   return (
     <div className="settings-masonry">
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>Who can see it</h3>
+      <section className="card">
+        <div className="card-title">
+          Who sees it, and where
+          {config.adminOnly && <InfoTip>None of the buttons reach customers while the planner is staff only.</InfoTip>}
+        </div>
         <Toggle
           label="Hide the Space Planner from customers (staff only)"
           checked={config.adminOnly}
           onChange={(value) => patch({ adminOnly: value })}
+          tip="The planner disappears from your shop and its address says the page does not exist. Staff with Space Planner access can still use it, and layouts already shared by link keep working."
         />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-          On, and the planner vanishes from your shop entirely - no buttons, no links, and its own address says the page does
-          not exist. Anyone signed in to this admin with Space Planner access carries on using it as normal, so you can live
-          with it on your real catalogue before anybody else meets it. Layouts you have already shared by link keep working, since
-          you sent those to somebody on purpose. Saving a layout still needs a customer account, staff or not.
-        </p>
-      </section>
-
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>Where it shows up</h3>
-        {config.adminOnly && (
-          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-            None of this reaches customers while the planner is staff only.
-          </p>
-        )}
+        <Toggle label="Email themselves the layout" checked={config.emailPlanEnabled} onChange={(value) => patch({ emailPlanEnabled: value })} />
         <Toggle label="Button on the basket page" checked={config.showOnCart} onChange={(value) => patch({ showOnCart: value })} />
         <Toggle label="Button on product pages" checked={config.showOnProduct} onChange={(value) => patch({ showOnProduct: value })} />
         <Text label="Basket button wording" value={config.cartButtonLabel} onChange={(value) => patch({ cartButtonLabel: value })} />
         <Text label="Product button wording" value={config.productButtonLabel} onChange={(value) => patch({ productButtonLabel: value })} />
-      </section>
-
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>What customers can do with a layout</h3>
         <Toggle
-          label={`Ask for a quote${quoteRequests ? '' : ' (this shop is not set to sell by quote, so nothing is offered)'}`}
+          label={`Customers can ask for a quote${quoteRequests ? '' : ' (not offered: this shop does not sell by quote)'}`}
           checked={config.quoteEnabled}
           onChange={(value) => patch({ quoteEnabled: value })}
+          tip={quoteRequests ? undefined : 'Shop > Quotes is set to a normal shop with checkout, so no part of the shop invites a quote request and the planner does not either. Switch that to quotes-only and this comes back on its own.'}
         />
-        {!quoteRequests && (
-          <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-            Shop &gt; Quotes is set to a normal shop with checkout, so no part of the shop invites a quote request and the
-            planner does not either. Switch that to quotes-only and this comes back on its own.
-          </p>
-        )}
-        <Toggle label="Email themselves the layout" checked={config.emailPlanEnabled} onChange={(value) => patch({ emailPlanEnabled: value })} />
         <Toggle
-          label={`Photoreal pictures${renderWorker ? '' : ' (the picture service is not set up on this site yet)'}`}
+          label={`Photoreal pictures${renderWorker ? '' : ' (the picture service is not set up yet)'}`}
           checked={config.rendersEnabled}
           onChange={(value) => patch({ rendersEnabled: value })}
         />
@@ -112,28 +93,24 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         />
       </section>
 
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>Spacing guidance</h3>
-        <Toggle label="Warn about tight walkways" checked={config.clearanceWarningsEnabled} onChange={(value) => patch({ clearanceWarningsEnabled: value })} />
+      <section className="card">
+        <div className="card-title">Spacing guidance</div>
+        <Toggle label="Warn about tight walkways" checked={config.clearanceWarningsEnabled} onChange={(value) => patch({ clearanceWarningsEnabled: value })} wide />
         <NumberField label="Walkway (mm)" value={config.walkwayClearanceMm} min={0} max={5000} onChange={(value) => patch({ walkwayClearanceMm: value })} />
         <NumberField label="Space behind a desk for a chair (mm)" value={config.deskChairClearanceMm} min={0} max={5000} onChange={(value) => patch({ deskChairClearanceMm: value })} />
         <Textarea label="Wording shown with every warning and on every printout" value={config.guidanceDisclaimer} onChange={(value) => patch({ guidanceDisclaimer: value })} />
       </section>
 
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>Limits</h3>
+      <section className="card">
+        <div className="card-title">
+          Limits and housekeeping
+          <InfoTip>Old usage counts are cleared after the number of days set here. Nothing a customer saved is ever deleted by it - somebody spent an afternoon on those.</InfoTip>
+        </div>
         <NumberField label="Spaces per customer" value={config.maxRoomsPerMember} min={1} max={500} onChange={(value) => patch({ maxRoomsPerMember: value })} />
         <NumberField label="Layouts per space" value={config.maxPlansPerRoom} min={1} max={200} onChange={(value) => patch({ maxPlansPerRoom: value })} />
         <NumberField label="Things in one layout" value={config.maxItemsPerPlan} min={10} max={400} onChange={(value) => patch({ maxItemsPerPlan: value })} />
         <NumberField label="Different 3D models on screen at once" value={config.maxUniqueModels} min={2} max={64} onChange={(value) => patch({ maxUniqueModels: value })} />
-      </section>
-
-      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
-        <h3 style={{ margin: 0 }}>Housekeeping</h3>
         <NumberField label="Keep usage counts for this many days" value={config.eventRetentionDays} min={0} max={3650} onChange={(value) => patch({ eventRetentionDays: value })} />
-        <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-          Nothing a customer saved is ever deleted by this - somebody spent an afternoon on those.
-        </p>
       </section>
 
       <SettingsHeaderActions>
@@ -149,11 +126,12 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
   )
 }
 
-function Toggle(props: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+function Toggle(props: { label: string; checked: boolean; onChange: (value: boolean) => void; tip?: string; wide?: boolean }) {
   return (
-    <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+    <label className={props.wide ? 'settings-check field--wide' : 'settings-check'}>
       <input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.target.checked)} />
       <span>{props.label}</span>
+      {props.tip && <InfoTip>{props.tip}</InfoTip>}
     </label>
   )
 }
@@ -161,7 +139,7 @@ function Toggle(props: { label: string; checked: boolean; onChange: (value: bool
 function Text(props: { label: string; value: string; onChange: (value: string) => void }) {
   const id = useId()
   return (
-    <div className="field" style={{ margin: 0 }}>
+    <div className="field">
       <label htmlFor={id}>{props.label}</label>
       <input id={id} value={props.value} onChange={(event) => props.onChange(event.target.value)} />
     </div>
@@ -171,7 +149,7 @@ function Text(props: { label: string; value: string; onChange: (value: string) =
 function Textarea(props: { label: string; value: string; onChange: (value: string) => void }) {
   const id = useId()
   return (
-    <div className="field" style={{ margin: 0 }}>
+    <div className="field">
       <label htmlFor={id}>{props.label}</label>
       <textarea id={id} rows={3} value={props.value} onChange={(event) => props.onChange(event.target.value)} />
     </div>
@@ -212,7 +190,7 @@ function NumberField(props: { label: string; value: number; onChange: (value: nu
   }
 
   return (
-    <div className="field" style={{ margin: 0 }}>
+    <div className="field">
       <label htmlFor={id}>{props.label}</label>
       <input
         id={id}
