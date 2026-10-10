@@ -3,6 +3,7 @@
 import { useId, useRef, useState, useEffect } from 'react'
 import type { SplConfig } from '@/modules/space-planner-for-shop/lib/config'
 import type { SplSettingsPayload } from '@/modules/space-planner-for-shop/lib/admin/use-spl-settings'
+import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
 
 // The module's settings form. It sits on the Settings tab of the Space Planner
 // panel inside Shop settings (manifest settingsTabs > host: shop.settings-sub-tabs)
@@ -56,8 +57,8 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
   }
 
   return (
-    <div style={{ display: 'grid', gap: '1.25rem', maxWidth: '44rem' }}>
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+    <div className="settings-masonry">
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Who can see it</h3>
         <Toggle
           label="Hide the Space Planner from customers (staff only)"
@@ -72,7 +73,7 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         </p>
       </section>
 
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Where it shows up</h3>
         {config.adminOnly && (
           <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
@@ -85,7 +86,7 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         <Text label="Product button wording" value={config.productButtonLabel} onChange={(value) => patch({ productButtonLabel: value })} />
       </section>
 
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>What customers can do with a layout</h3>
         <Toggle
           label={`Ask for a quote${quoteRequests ? '' : ' (this shop is not set to sell by quote, so nothing is offered)'}`}
@@ -111,7 +112,7 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         />
       </section>
 
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Spacing guidance</h3>
         <Toggle label="Warn about tight walkways" checked={config.clearanceWarningsEnabled} onChange={(value) => patch({ clearanceWarningsEnabled: value })} />
         <NumberField label="Walkway (mm)" value={config.walkwayClearanceMm} min={0} max={5000} onChange={(value) => patch({ walkwayClearanceMm: value })} />
@@ -119,7 +120,7 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         <Textarea label="Wording shown with every warning and on every printout" value={config.guidanceDisclaimer} onChange={(value) => patch({ guidanceDisclaimer: value })} />
       </section>
 
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Limits</h3>
         <NumberField label="Spaces per customer" value={config.maxRoomsPerMember} min={1} max={500} onChange={(value) => patch({ maxRoomsPerMember: value })} />
         <NumberField label="Layouts per space" value={config.maxPlansPerRoom} min={1} max={200} onChange={(value) => patch({ maxPlansPerRoom: value })} />
@@ -127,7 +128,7 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         <NumberField label="Different 3D models on screen at once" value={config.maxUniqueModels} min={2} max={64} onChange={(value) => patch({ maxUniqueModels: value })} />
       </section>
 
-      <section style={{ display: 'grid', gap: '0.6rem' }}>
+      <section className="card" style={{ display: 'grid', gap: '0.6rem' }}>
         <h3 style={{ margin: 0 }}>Housekeeping</h3>
         <NumberField label="Keep usage counts for this many days" value={config.eventRetentionDays} min={0} max={3650} onChange={(value) => patch({ eventRetentionDays: value })} />
         <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
@@ -135,12 +136,15 @@ export function SpacePlannerSettingsForm({ payload }: { payload: SplSettingsPayl
         </p>
       </section>
 
-      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+      <SettingsHeaderActions>
+        <SettingsHeaderStatus
+          message={status === 'Saved.' ? status : null}
+          error={status && status !== 'Saved.' && status !== 'Saving…' ? status : null}
+        />
         <button type="button" className="btn btn-primary" onClick={() => void save()} disabled={saving}>
-          {saving ? 'Saving…' : 'Save settings'}
+          {saving ? 'Saving…' : 'Save changes'}
         </button>
-        {status && <span style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }} role="status">{status}</span>}
-      </div>
+      </SettingsHeaderActions>
     </div>
   )
 }
