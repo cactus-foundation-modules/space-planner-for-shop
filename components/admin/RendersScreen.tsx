@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 
 // The render log, with its errors in plain sight, and the switch that turns the
 // whole thing on.
@@ -34,6 +35,7 @@ type WorkerView = {
 }
 
 export function RendersScreen() {
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [jobs, setJobs] = useState<Job[]>([])
   const [worker, setWorker] = useState<WorkerView | null>(null)
   const [loading, setLoading] = useState(true)
@@ -117,7 +119,7 @@ export function RendersScreen() {
   }
 
   const takeDown = async () => {
-    if (!window.confirm('Take the picture service down? Existing pictures stay where they are; new ones stop being possible until you set it up again.')) return
+    if (!(await askConfirm({ title: 'Take the picture service down?', message: 'Existing pictures stay where they are; new ones stop being possible until you set it up again.', confirmLabel: 'Take it down' }))) return
     setBusy(true)
     setProblem(null)
     setNotice(null)
@@ -145,6 +147,7 @@ export function RendersScreen() {
 
   return (
     <div style={{ display: 'grid', gap: '1.25rem' }}>
+      {confirmNode}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
         <h1 style={{ margin: 0 }}>Pictures</h1>
         <button type="button" className="btn" onClick={() => void load({ showSpinner: true })} disabled={loading}>
