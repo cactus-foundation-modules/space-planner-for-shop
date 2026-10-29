@@ -18,7 +18,8 @@ import { getSplConfigCached, renderEnvConfigured, renderWorkerConfigured } from 
 import { recordEvent } from '@/modules/space-planner-for-shop/lib/db/events'
 import { buildRenderJobPayload, type RenderJobPayload } from '@/modules/space-planner-for-shop/lib/render-dispatch'
 import { payloadTooLarge, readSavedCamera } from '@/modules/space-planner-for-shop/lib/validation'
-import { createRenderMachine, destroyRenderMachine } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
+import { createRenderMachine, destroyRenderMachine, DEFAULT_WORKER_IMAGE } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
+import { getRenderWorker } from '@/modules/space-planner-for-shop/lib/db/render-worker'
 import { SplFlyError } from '@/modules/space-planner-for-shop/lib/fly/api'
 
 // Enqueue a photoreal render, and poll for it.
@@ -182,7 +183,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   let payload: RenderJobPayload
   try {
     const callbackToken = (await getRenderCallbackToken(job.id)) ?? ''
-    const built = await buildRenderJobPayload({ jobId: job.id, callbackToken })
+    const machineImage = renderEnvConfigured() ? null : (await getRenderWorker()).image || DEFAULT_WORKER_IMAGE
+    const built = await buildRenderJobPayload({ jobId: job.id, callbackToken, machineImage })
     payload = built.payload
     // The storage key is kept on the job rather than taken from the worker's
     // word for it later: the callback writes a Media row from this, and a worker

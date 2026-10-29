@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/db/prisma'
 import { getActiveMediaProvider } from '@/lib/config/env'
-import { confirmedSizeBytes, saveMediaRecord } from '@/lib/media/upload'
+import { confirmedSizeBytes, refuseOversizedBucketUpload, saveMediaRecord } from '@/lib/media/upload'
 import { finishRenderJob, getRenderCallbackToken, getRenderJob } from '@/modules/space-planner-for-shop/lib/db/jobs'
 import { getPlanForAdmin } from '@/modules/space-planner-for-shop/lib/db/plans'
 import { destroyRenderMachine } from '@/modules/space-planner-for-shop/lib/fly/render-worker'
@@ -110,6 +110,10 @@ async function register(
 
     const confirmed = await confirmedSizeBytes(provider, key, sizeBytes ?? 0)
     if (!confirmed) return { error: 'The picture was reported as done but nothing arrived in storage.' }
+    // Straight to the bucket (direct serving mode) the upload had no length signed
+    // into it - nobody knew the size before the picture was drawn - so the stored
+    // size is held to the upload ceiling here. Does nothing in Worker mode.
+    await refuseOversizedBucketUpload(provider, key, confirmed)
 
     const media = await saveMediaRecord({
       key,

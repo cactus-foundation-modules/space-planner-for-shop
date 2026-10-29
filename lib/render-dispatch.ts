@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from 'crypto'
 import { getActiveMediaProvider, getSessionSecret, getSiteUrl, isMediaProviderConfigured } from '@/lib/config/env'
-import { buildLibraryUploadKey, isS3Provider, workerUrl } from '@/lib/media/upload'
+import { buildLibraryUploadKey } from '@/lib/media/upload'
+import { directUploadTarget } from '@/lib/media/direct-upload-target'
+import { directUploadHeaders } from '@/lib/media/direct-upload-headers'
 import { signUploadToken, UPLOAD_TOKEN_TTL_MS } from '@/lib/media/upload-token'
 
 // Everything the worker is told, and the one thing it is trusted with.
@@ -64,6 +66,14 @@ export type RenderJobPayload = {
   uploadUrl: string
   uploadToken: string
   uploadContentType: string
+  /**
+   * Exactly the headers to PUT with. A Worker target takes the token as a
+   * bearer; a presigned bucket url (direct serving mode) must get none, since S3
+   * refuses two kinds of authentication on one request. Workers from before this
+   * field build the bearer header themselves, which is only right for a Worker
+   * target - see space-planner-render-worker's README.
+   */
+  uploadHeaders: Record<string, string>
   callbackUrl: string
   callbackToken: string
 }
@@ -71,24 +81,49 @@ export type RenderJobPayload = {
 export class RenderStorageError extends Error {}
 
 /**
+ * Whether a render worker image can upload to a presigned bucket url (direct
+ * serving mode). The v1 image always sends the upload token as a bearer, and S3
+ * refuses a request carrying two kinds of authentication, so it can only ever
+ * write through the Cloudflare Worker. `uploadHeaders` arrived after v1, and v1
+ * is never moved once in the wild (see the worker's own README), so the exact
+ * tag is a dependable test. Any other image - a later tag, a digest, one the
+ * owner built themselves - is taken at its word.
+ */
+export function imageTakesPresignedUploads(image: string): boolean {
+  return !/\/space-planner-render-worker:v1$/.test(image.trim())
+}
+
+/**
  * Build the job. Throws RenderStorageError, in plain English, when this site's
  * media storage cannot take a direct upload - because a 3200px picture is well
  * past what a serverless request body will carry, so there is no quiet fallback
  * to take instead.
  */
-export async function buildRenderJobPayload(opts: { jobId: string; callbackToken: string }): Promise<{ payload: RenderJobPayload; key: string }> {
+export async function buildRenderJobPayload(opts: {
+  jobId: string
+  callbackToken: string
+  /** The image the machine will run, when this site starts its own; null for a worker somebody else runs. */
+  machineImage: string | null
+}): Promise<{ payload: RenderJobPayload; key: string }> {
   const provider = await getActiveMediaProvider()
   if (!provider || !isMediaProviderConfigured(provider)) {
     throw new RenderStorageError('Media storage is not set up on this site, so there is nowhere to put the picture.')
   }
-  const base = workerUrl()
-  if (!base || !isS3Provider(provider)) {
+  const key = await buildLibraryUploadKey(provider, 'image/webp', `space-plan-${opts.jobId}.webp`)
+  // Through the Worker, or a presigned bucket url when the owner serves straight
+  // from the bucket. No size yet - the picture has not been drawn - so the
+  // callback holds the stored size to the ceiling instead.
+  const target = await directUploadTarget(provider, key, 'image/webp')
+  if (!target) {
     throw new RenderStorageError(
       'Pictures need the media storage that uploads straight to the store. This site is on a provider that cannot, so the picture has nowhere to land.',
     )
   }
-
-  const key = await buildLibraryUploadKey(provider, 'image/webp', `space-plan-${opts.jobId}.webp`)
+  if (target.presigned && opts.machineImage && !imageTakesPresignedUploads(opts.machineImage)) {
+    throw new RenderStorageError(
+      'This site serves its media straight from the storage bucket, and the picture machine it runs (v1) can only upload through the Cloudflare media Worker. Move the picture machine to a newer version, or switch Settings → Media back to serving through the Worker.',
+    )
+  }
   const { token } = signUploadToken(key, UPLOAD_TOKEN_TTL_MS)
   const site = getSiteUrl()
 
@@ -99,9 +134,10 @@ export async function buildRenderJobPayload(opts: { jobId: string; callbackToken
       pageUrl: `${site}/space-planner/render/${opts.jobId}?token=${encodeURIComponent(signRenderPageToken(opts.jobId))}`,
       width: RENDER_WIDTH,
       height: RENDER_HEIGHT,
-      uploadUrl: `${base}/${key}`,
+      uploadUrl: target.uploadUrl,
       uploadToken: token,
       uploadContentType: 'image/webp',
+      uploadHeaders: directUploadHeaders({ token, presigned: target.presigned }, 'image/webp'),
       callbackUrl: `${site}/api/m/space-planner-for-shop/public/render-callback`,
       callbackToken: opts.callbackToken,
     },

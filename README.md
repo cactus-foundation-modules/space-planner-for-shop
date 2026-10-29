@@ -361,6 +361,17 @@ at `/space-planner/render/[id]` - waits for that page to set
 pressed the button, and there is no second implementation to drift from it.
 Source: `cactus-foundation-modules/space-planner-render-worker`.
 
+**Media served straight from the bucket.** When the owner switches Settings →
+Media to serve straight from the bucket (core `MEDIA_SERVING_MODE=direct`), the
+job's `uploadUrl` is a presigned bucket PUT instead of the Worker, and
+`uploadHeaders` carries exactly the headers to send - no bearer, since S3 refuses
+a request with two kinds of authentication. The `v1` worker image ignores
+`uploadHeaders` and always sends the bearer, so a site that starts its own
+machines on `v1` has the job refused up front with that reason in the render log
+(`imageTakesPresignedUploads` in `lib/render-dispatch.ts`). No length is signed
+into the PUT (nobody knows it before the picture is drawn), so the callback holds
+the stored size to core's upload ceiling with `refuseOversizedBucketUpload`.
+
 ### What makes the picture different from the preview
 
 For its first few versions it was not different, and that was the bug. The render
